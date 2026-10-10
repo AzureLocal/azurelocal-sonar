@@ -1,0 +1,28 @@
+{
+  "subscriptionId": "00000000-0000-0000-0000-000000000000",
+  "resourceGroup": "rg-example-azl",
+  "clusterName": "clus01",
+  "apiVersion": "2025-09-15-preview",
+  "edgeApiVersion": "2025-12-01-preview",
+  "identityModel": "LocalIdentity",
+  "pollSeconds": 20,
+  "nodes": [
+    { "name": "node01", "address": "192.0.2.11", "arcMachineName": "node01", "seed": true },
+    { "name": "node02", "address": "192.0.2.12", "arcMachineName": "node02" }
+  ],
+  "logs": {
+    "paths": [
+      "C:\\CloudContent\\MASLogs",
+      "C:\\MASLogs",
+      "C:\\CloudDeployment\\Logs",
+      "C:\\Observability",
+      "C:\\Windows\\System32\\Bootstrap\\Logs"
+    ],
+    "include": ["*.log", "*.txt", "*.xml"],
+    "exclude": ["*.etl"],
+    "recurseDepth": 3,
+    "activeWindowMinutes": 30,
+    "maxLinesPerPoll": 500
+  },
+  "credential": { "source": "prompt" }
+}
