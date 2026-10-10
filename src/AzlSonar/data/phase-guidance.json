@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "phases": [
+    {
+      "phase": "provisioning",
+      "identityModel": "LocalIdentity",
+      "account": "Maintenance environment: Configurator app default user 'edgeuser'. After the OS is installed: the local administrator credentials given when provisioning (simplified provisioning) or the non-built-in local admin you create, with the same credentials on every node. Do not use the built-in Administrator.",
+      "logPaths": [
+        "C:\\Windows\\System32\\Bootstrap\\Logs",
+        "C:\\ProgramData\\AzureConnectedMachineAgent\\Log",
+        "C:\\ProgramData\\GuestConfig\\ext_mgr_logs",
+        "C:\\ProgramData\\GuestConfig\\extension_logs"
+      ],
+      "available": "Bootstrap logs exist once the Azure Stack HCI OS is installed and bootstrap/Arc registration starts. Arc agent and extension logs exist from Arc agent install onward. Before the OS is installed, the maintenance environment keeps its logs under /var/log; get them through the Configurator app support package.",
+      "access": "WinRM to the node IP (NTLM): add the node to the workstation's TrustedHosts or use HTTPS 5986, and always pass -Credential. A non-built-in local admin may also need LocalAccountTokenFilterPolicy=1 on the node (not stated for Azure Local). Alternatives: the Configurator app support package, or RDP (Learn's route for the bootstrap logs).",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/troubleshoot-simplified-machine-provisioning?view=azloc-2609",
+      "verified": false
+    },
+    {
+      "phase": "provisioning",
+      "identityModel": "ActiveDirectory",
+      "account": "Maintenance environment: Configurator app default user 'edgeuser'. After the OS is installed: the local administrator, with the same credentials on every node. If the nodes were joined to the domain before deployment (2604 or later), the deployment (LCM) user must be added to local Administrators.",
+      "logPaths": [
+        "C:\\Windows\\System32\\Bootstrap\\Logs",
+        "C:\\ProgramData\\AzureConnectedMachineAgent\\Log",
+        "C:\\ProgramData\\GuestConfig\\ext_mgr_logs",
+        "C:\\ProgramData\\GuestConfig\\extension_logs"
+      ],
+      "available": "Bootstrap logs exist once the Azure Stack HCI OS is installed and bootstrap/Arc registration starts. Arc agent and extension logs exist from Arc agent install onward.",
+      "access": "Nodes are normally still in a workgroup at this point, so use WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential. Use Kerberos by host name only if the nodes were joined to the domain beforehand.",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/troubleshoot-deployment-configurator-app?view=azloc-2609",
+      "verified": false
+    },
+    {
+      "phase": "validation",
+      "identityModel": "LocalIdentity",
+      "account": "The deployment local admin (localAdminUserName): non-built-in, with the same credentials on every node. Learn documents no separate LCM user for Local Identity.",
+      "logPaths": [
+        "C:\\CloudDeployment\\Logs",
+        "C:\\MASLogs"
+      ],
+      "available": "Environment Checker output is written to C:\\CloudDeployment\\Logs when validation runs as part of deployment, and each run overwrites the file. Standalone checker runs write to $HOME\\.AzStackHci instead. Learn documents C:\\MASLogs\\LcmEceLiteLogs for upgrade validation only; for deployment it is unverified.",
+      "access": "WinRM to the seed node by IP: TrustedHosts or HTTPS 5986, -Credential, and an account in local Administrators. CredSSP is not needed.",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/use-environment-checker?view=azloc-2609",
+      "verified": false
+    },
+    {
+      "phase": "validation",
+      "identityModel": "ActiveDirectory",
+      "account": "The local administrator (the same on every node). Learn does not say whether the deployment (LCM) user is a local admin during validation, unless the nodes were joined to the domain before deployment and it was added to Administrators.",
+      "logPaths": [
+        "C:\\CloudDeployment\\Logs",
+        "C:\\MASLogs"
+      ],
+      "available": "Environment Checker output is written to C:\\CloudDeployment\\Logs when validation runs as part of deployment, and each run overwrites the file. C:\\MASLogs\\LcmEceLiteLogs is documented for upgrade validation only.",
+      "access": "Nodes are not yet joined to the domain unless that was done before deployment, so use WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential.",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/use-environment-checker?view=azloc-2609",
+      "verified": false
+    },
+    {
+      "phase": "deployment",
+      "identityModel": "LocalIdentity",
+      "account": "The deployment local admin (localAdminUserName), with the same credentials on every node.",
+      "logPaths": [
+        "C:\\CloudDeployment\\Logs",
+        "C:\\MASLogs"
+      ],
+      "available": "During and after cloud deployment on the seed node (watch progress from the seed machine). Learn does not name the deployment log files or describe how they rotate. The limited and full Environment Checker runs happen first.",
+      "access": "WinRM to the seed node by IP: TrustedHosts or HTTPS 5986, -Credential, and an account in local Administrators. Fallbacks (both are Azure writes, so opt-in only): Arc run command (preview, output capped at 4 KB, needs runCommands/write) or Arc SSH (needs Owner or Contributor and sshd running on the node).",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-local-identity-with-key-vault-template?view=azloc-2609",
+      "verified": false
+    },
+    {
+      "phase": "deployment",
+      "identityModel": "ActiveDirectory",
+      "account": "The local administrator. During cloud deployment the LCM (deployment) user is added to local Administrators on the nodes, and the nodes are joined to the domain.",
+      "logPaths": [
+        "C:\\CloudDeployment\\Logs",
+        "C:\\MASLogs"
+      ],
+      "available": "During and after cloud deployment on the seed node. Learn does not name the deployment log files or describe how they rotate.",
+      "access": "Use WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential until the domain join completes. After that, Kerberos by host name with the LCM user works without TrustedHosts.",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-prep-active-directory?view=azloc-2609#considerations-for-large-scale-deployments",
+      "verified": false
+    },
+    {
+      "phase": "post-deployment",
+      "identityModel": "LocalIdentity",
+      "account": "The deployment local admin, which you maintain yourself. RecoveryAdmin, whose password is stored in the cluster Key Vault. The built-in Administrator is renamed ASBuiltInAdmin. Nodes stay in a workgroup (ADAware = 2).",
+      "logPaths": [
+        "C:\\CloudDeployment\\Logs",
+        "C:\\MASLogs",
+        "C:\\ProgramData\\AzureConnectedMachineAgent\\Log"
+      ],
+      "available": "The logs stay on the nodes after deployment. On-demand collection (Send-DiagnosticData or the portal's Send logs) works once the AzureEdgeTelemetryAndDiagnostics extension is installed, and needs the Azure Stack HCI Administrator role. For deployment failures, use standalone collection with Send-AzStackHciDiagnosticData.",
+      "access": "WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential. RDP is turned off after deployment. Learn lists Arc SSH (sshd enabled on each node) as the remote route for Local Identity clusters.",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-local-identity-with-key-vault?view=azloc-2609#post-deployment-steps",
+      "verified": false
+    },
+    {
+      "phase": "post-deployment",
+      "identityModel": "ActiveDirectory",
+      "account": "The LCM (deployment) user, which is in local Administrators. The local administrator; if that is the built-in account, it is renamed ASBuiltInAdmin. AD users or groups only if they are added to local Administrators (for example by a GPO that nests a domain group).",
+      "logPaths": [
+        "C:\\CloudDeployment\\Logs",
+        "C:\\MASLogs",
+        "C:\\ProgramData\\AzureConnectedMachineAgent\\Log"
+      ],
+      "available": "The logs stay on the nodes after deployment. On-demand collection (Send-DiagnosticData or the portal's Send logs) needs the AzureEdgeTelemetryAndDiagnostics extension and the Azure Stack HCI Administrator role.",
+      "access": "WinRM with Kerberos by host name and a domain account (no TrustedHosts needed). Connecting by IP falls back to NTLM and needs TrustedHosts or HTTPS. RDP is turned off after deployment.",
+      "source": "https://learn.microsoft.com/azure/azure-local/concepts/security-features?view=azloc-2609#local-built-in-user-accounts",
+      "verified": false
+    }
+  ]
+}

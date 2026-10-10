@@ -22,6 +22,7 @@ This is the contract every part of Sonar is built to (plan task S-4). Back end, 
   "resourceGroup": "rg-example-azl",
   "clusterName": "clus01",
   "apiVersion": "2025-09-15-preview",
+  "edgeApiVersion": "2025-12-01-preview",
   "identityModel": "LocalIdentity",
   "pollSeconds": 20,
   "nodes": [
@@ -43,9 +44,9 @@ This is the contract every part of Sonar is built to (plan task S-4). Back end, 
 
 Uses the signed-in Az PowerShell context (`Invoke-AzRestMethod`). Every `pollSeconds`:
 
-1. `GET .../providers/Microsoft.AzureStackHCI/clusters/{cluster}/deploymentSettings/default?api-version={apiVersion}` → `properties.deploymentMode`, `properties.provisioningState`, `properties.reportedProperties.validationStatus` and `.deploymentStatus`. Each status object is `{ status, steps[] }`; a step is `{ name, description, fullStepIndex, startTimeUtc, endTimeUtc, status, steps[]?, exception[]? }` (steps nest; `exception` is an array of strings). Either status object can be `{}` (not started). Statuses seen: `NotStarted`/`Not Started`, `InProgress`, `Success`, `Error`/`Failed`, `Skipped`.
+1. `GET .../providers/Microsoft.AzureStackHCI/clusters/{cluster}/deploymentSettings/default?api-version={apiVersion}` → `properties.deploymentMode`, `properties.provisioningState`, `properties.reportedProperties.validationStatus` and `.deploymentStatus`. Each status object is `{ status, steps[] }`; a step is `{ name, description, fullStepIndex, startTimeUtc, endTimeUtc, status, steps[]?, exception[]? }` (steps nest; `exception` is an array of strings). Either status object can be `{}` (not started). Learn documents `Error`, `Success`, `InProgress`; the lab also shows `Not Started`. Normalisation is case-insensitive and tolerant: unknown values become `unknown` with the raw value kept in `rawStatus`.
 2. `GET .../providers/Microsoft.HybridCompute/machines/{arcMachineName}?api-version=2024-07-10` per node → `properties.status` (Connected/Disconnected), `properties.lastStatusChange`, `properties.agentVersion`.
-3. Optional, best effort (ignore 404): `GET .../providers/Microsoft.AzureStackHCI/edgeMachines?api-version=2025-09-15-preview` in the resource group → each edge machine's `properties.provisioningState` and lifecycle (provisioning phase).
+3. Optional, best effort (ignore 404/400): `GET .../providers/Microsoft.AzureStackHCI/edgeMachines?api-version={edgeApiVersion}` (edge machines exist from 2025-12-01-preview; their ProvisionOs jobs use the same step-tree shape plus `percentComplete`) in the resource group → each edge machine's `properties.provisioningState` and lifecycle (provisioning phase).
 
 `ConvertTo-AzlSonarStepTree` turns a status object into a flat-or-nested normalized tree:
 `{ id (fullStepIndex), name, description, status (normalized: notstarted|running|success|error|skipped), start, end, durationSeconds, errors[], children[] }`. Durations: end−start; running steps use now−start.
@@ -56,7 +57,7 @@ Uses the signed-in Az PowerShell context (`Invoke-AzRestMethod`). Every `pollSec
 
 ## Log tailer (read-only)
 
-PowerShell remoting to the seed node (`New-PSSession -ComputerName <address> -Credential`). Workgroup nodes (Local Identity) need the address in the workstation's WinRM `TrustedHosts`; Sonar checks and tells the user, never sets it. Every poll: list files under `logs.paths` matching `include`, newest first; for each file keep a byte offset; read new bytes since the offset (shared read, `FileShare.ReadWrite`), split lines, cap at `maxLinesPerPoll`. Rotation/truncation (size < offset) resets the offset to 0. Lines are classified `error` (`\b(error|exception|failed|fatal)\b`, case-insensitive), `warning` (`\bwarn(ing)?\b`), else `info`. If the session cannot be opened, the tailer reports `{ state: "unavailable", reason }` and retries every 60 s; the page shows the reason and the phase guidance.
+PowerShell remoting to the seed node (`New-PSSession -ComputerName <address> -Credential`). Workgroup nodes (Local Identity) need the address in the workstation's WinRM `TrustedHosts`; Sonar checks and tells the user, never sets it. Every poll: list files under `logs.paths` matching `include`, newest first; for each file keep a byte offset; read new bytes since the offset (shared read, `FileShare.ReadWrite`), split lines, cap at `maxLinesPerPoll`. Rotation/truncation (size < offset) resets the offset to 0. Lines are classified `error` (`\b(error|exception|failed|fatal)\b`, case-insensitive), `warning` (`\bwarn(ing)?\b`), else `info`. Arc run command and Arc SSH are not used: both write to Azure (research.md, S-3), which breaks read-only. If the session cannot be opened, the tailer reports `{ state: "unavailable", reason }` and retries every 60 s; the page shows the reason and the phase guidance.
 
 ## Phase guidance (`data/phase-guidance.json`)
 
