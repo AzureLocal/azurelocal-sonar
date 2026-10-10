@@ -27,13 +27,13 @@ Status vocabulary: Backlog · In progress · Blocked (say on what) · Done (unve
 
 | T | Task | Status | Owner |
 |---|---|---|---|
-| S-1 | Research: the deploymentSettings step tree (validation and deployment) — schema, nesting, status values, timestamps, error fields, refresh behaviour, api-version; edgeMachines lifecycle and jobs for provisioning | In progress (10 Oct 23:20; validation step tree captured live from nic26-clus01) | AI |
-| S-2 | Research: deployment log locations on the seed node per phase (bootstrap, validation, deployment, LCM/ECE), file naming and rotation, which account can read them for Local Identity and for AD deployments, and when each log appears; documented sources only, marked where verified live | In progress (10 Oct 23:20; research agent) | AI |
-| S-3 | Research: access methods to the logs — WinRM/PS remoting (TrustedHosts for workgroup nodes), Arc run command, Arc SSH — limits and security | In progress (10 Oct 23:20; research agent) | AI |
+| S-1 | Research: the deploymentSettings step tree (validation and deployment) — schema, nesting, status values, timestamps, error fields, refresh behaviour, api-version; edgeMachines lifecycle and jobs for provisioning | Done (unverified) (10 Oct; docs/research.md with Learn citations; live shape captured) | AI |
+| S-2 | Research: deployment log locations on the seed node per phase (bootstrap, validation, deployment, LCM/ECE), file naming and rotation, which account can read them for Local Identity and for AD deployments, and when each log appears; documented sources only, marked where verified live | Done (unverified) (10 Oct; live log paths verified on nic26-clus01 during Deploy) | AI |
+| S-3 | Research: access methods to the logs — WinRM/PS remoting (TrustedHosts for workgroup nodes), Arc run command, Arc SSH — limits and security | Done (unverified) (10 Oct; WinRM primary, SSH fallback; run command/Arc SSH excluded as writes) | AI |
 | S-4 | Design: API contract between back end and page; data model for steps, logs, accounts guidance; UI wireframe (step tree, timeline, log stream, node and account panel) | Done (unverified) (10 Oct 23:20; docs/design.md) | AI |
-| S-5 | Build v0.1: back end (Azure poller, log tailer, SSE), page (step tree, live log pane, filters), `Start-AzlSonar.ps1`, config file, README | In progress (10 Oct 23:20; back end and page agents in parallel) | AI |
-| S-6 | Tests: Pester for the back end (mocked ARM and node responses), PSScriptAnalyzer clean, page smoke test | Backlog | AI |
-| S-7 | Live test against the NIC 2026 lab cluster deployment (`nic26-clus01`): follow Validate and Deploy end to end; screenshots | In progress (10 Oct 23:15; nic26-clus01 Deploy pass running) | AI |
+| S-5 | Build v0.1: back end (Azure poller, log tailer, SSE), page (step tree, live log pane, filters), `Start-AzlSonar.ps1`, config file, README | Done (unverified) (10 Oct; e88fea9, c6772a8, d1b889f; GPT review blockers fixed; should-fixes in progress) | AI |
+| S-6 | Tests: Pester for the back end (mocked ARM and node responses), PSScriptAnalyzer clean, page smoke test | Done (unverified) (10 Oct; 278 Pester tests pass, analyzer clean; 3e54f52) | AI |
+| S-7 | Live test against the NIC 2026 lab cluster deployment (`nic26-clus01`): follow Validate and Deploy end to end; screenshots | In progress (10 Oct 23:47; Sonar live on the nic26-clus01 Deploy pass, screenshot E17/20261010-2347) | AI |
 | S-8 | Provisioning view: follow simplified machine provisioning (edge machine lifecycle, OS install, Arc onboarding) — the stages proven on 10 Oct | Backlog | AI |
 | S-9 | Export bundle: timeline JSON, collected logs, HTML report | Backlog | AI |
 | S-10 | Docs site and session material: how to run it, what each phase means, account guidance; demo in the Azure Local session alongside Beacon | Backlog | AI |
