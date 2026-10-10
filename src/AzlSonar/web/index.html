@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>AzL Sonar</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230a5cc7'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23fff' stroke-width='2' opacity='.6'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#log-panel">Skip to live logs</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <circle cx="16" cy="16" r="14" class="bm-bg"/>
+        <circle cx="16" cy="16" r="9.5" class="bm-ring"/>
+        <circle cx="16" cy="16" r="5" class="bm-ring"/>
+        <circle cx="16" cy="16" r="2" class="bm-dot"/>
+      </svg>
+      <span class="brand-name">AzL Sonar</span>
+      <span id="demo-badge" class="demo-badge" hidden>Demo data</span>
+    </div>
+
+    <div class="cluster">
+      <span class="eyebrow">Cluster</span>
+      <h1 id="cluster-name">&mdash;</h1>
+      <span id="cluster-meta" class="cluster-meta"></span>
+    </div>
+
+    <dl class="stats">
+      <div class="stat">
+        <dt>Phase</dt>
+        <dd><span id="phase-chip" class="phase-chip" data-phase="unknown">&mdash;</span></dd>
+      </div>
+      <div class="stat">
+        <dt>Status</dt>
+        <dd><span id="overall-status" class="status-text" data-status="unknown">&mdash;</span></dd>
+      </div>
+      <div class="stat">
+        <dt>Elapsed</dt>
+        <dd><span id="elapsed" class="mono">&mdash;</span></dd>
+      </div>
+      <div class="stat">
+        <dt>Last poll</dt>
+        <dd><span id="last-poll" class="mono">&mdash;</span></dd>
+      </div>
+    </dl>
+
+    <ul id="node-chips" class="node-chips" aria-label="Nodes and Azure Arc status"></ul>
+
+    <div class="actions">
+      <span id="conn" class="conn" data-conn="connecting" title="Connection to the Sonar back end">
+        <span class="conn-dot" aria-hidden="true"></span><span id="conn-label">Connecting</span>
+      </span>
+      <button id="export-btn" type="button" class="btn">
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 1.5v8.2M4.6 6.5 8 9.9l3.4-3.4M2.5 11v2.5h11V11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Export</span>
+      </button>
+      <button id="theme-btn" type="button" class="btn btn-icon" aria-label="Switch to dark theme">
+        <svg class="i-moon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M13.5 9.6A5.8 5.8 0 0 1 6.4 2.5a5.8 5.8 0 1 0 7.1 7.1Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+        <svg class="i-sun" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v1.8M8 13.2V15M1 8h1.8M13.2 8H15M3 3l1.3 1.3M11.7 11.7 13 13M3 13l1.3-1.3M11.7 4.3 13 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" role="status" hidden>
+    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 1.8 15 14H1L8 1.8Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6.2v3.6M8 11.6v.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    <div id="banner-text" class="banner-text"></div>
+    <button id="banner-close" type="button" class="btn btn-ghost btn-sm" aria-label="Dismiss message">Dismiss</button>
+  </div>
+
+  <main id="main" class="layout">
+    <div class="col-left">
+      <section id="steps-panel" class="panel panel-steps" aria-labelledby="steps-title">
+        <div class="panel-head">
+          <h2 id="steps-title">Steps</h2>
+          <div class="panel-tools">
+            <button id="jump-current" type="button" class="btn btn-ghost btn-sm" disabled>Go to current step</button>
+            <button id="collapse-all" type="button" class="btn btn-ghost btn-sm">Collapse all</button>
+          </div>
+        </div>
+        <p class="hint" id="tree-hint">Arrow keys move, Enter expands or collapses, Space filters the logs to a step.</p>
+        <div id="tree-host" class="panel-body scroll" aria-describedby="tree-hint"></div>
+      </section>
+
+      <section id="guidance-panel" class="panel panel-guidance" aria-labelledby="guidance-title">
+        <div class="panel-head">
+          <h2 id="guidance-title">Log access</h2>
+          <span id="guidance-model" class="pill pill-muted"></span>
+        </div>
+        <div id="guidance-tabs" class="seg seg-sm" role="group" aria-label="Show guidance for phase"></div>
+        <div id="guidance-body" class="panel-body guidance-body">
+          <p class="muted">Loading guidance&hellip;</p>
+        </div>
+      </section>
+    </div>
+
+    <section id="log-panel" class="panel panel-logs" aria-labelledby="log-title" tabindex="-1">
+      <div class="panel-head">
+        <h2 id="log-title">Live logs</h2>
+        <span id="tailer-pill" class="pill pill-muted" data-tailer="unknown">Tailer: unknown</span>
+        <div class="panel-tools log-counts" aria-label="Log line counts">
+          <span class="count-badge" data-level="all" title="Lines received"><span id="cnt-all">0</span> lines</span>
+          <span class="count-badge" data-level="warning" title="Warning lines"><span id="cnt-warning">0</span> warnings</span>
+          <span class="count-badge" data-level="error" title="Error lines"><span id="cnt-error">0</span> errors</span>
+        </div>
+      </div>
+
+      <div id="tailer-alert" class="tailer-alert" hidden>
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.6v4M8 10.8v.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <div>
+          <strong>Live logs are unavailable.</strong>
+          <span id="tailer-reason"></span>
+          <span class="muted">The back end retries every 60 s. See <a href="#guidance-panel">Log access</a> for the account and location for this phase.</span>
+        </div>
+      </div>
+
+      <div class="log-toolbar">
+        <div id="level-filter" class="seg" role="group" aria-label="Level filter">
+          <button type="button" data-level="all" aria-pressed="true">All</button>
+          <button type="button" data-level="warning" aria-pressed="false" title="Warnings and errors">Warnings+</button>
+          <button type="button" data-level="error" aria-pressed="false">Errors</button>
+        </div>
+        <label class="search">
+          <span class="sr-only">Search log text</span>
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m10.5 10.5 3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <input id="log-search" type="search" placeholder="Search logs ( / )" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="file-filter">
+          <span class="sr-only">File filter</span>
+          <select id="file-filter">
+            <option value="">All files</option>
+          </select>
+        </label>
+        <button id="follow-btn" type="button" class="btn btn-sm follow" aria-pressed="true" title="Keep the newest line in view">
+          <span class="follow-dot" aria-hidden="true"></span><span id="follow-label">Following</span>
+        </button>
+      </div>
+
+      <div id="filter-chips" class="filter-chips" aria-label="Active log filters"></div>
+
+      <div id="log-view" class="log-view" role="region" aria-label="Log lines" tabindex="0"></div>
+
+      <div class="log-foot">
+        <span id="log-status" class="muted"></span>
+        <button id="new-lines" type="button" class="btn btn-sm btn-accent" hidden>0 new lines &darr;</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

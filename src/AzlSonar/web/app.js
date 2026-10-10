@@ -1,0 +1,1596 @@
+/* AzL Sonar page. Vanilla JS, no dependencies, no network calls except same-origin /api routes.
+   Contract: docs/design.md (HTTP API and Page sections). */
+(function () {
+  'use strict';
+
+  // ------------------------------------------------------------------ constants
+
+  var MAX_RENDERED_LINES = 3000;   // DOM cap for the log pane
+  var MAX_STORED_LINES = 20000;    // in-memory cap (server ring buffer is 5000)
+  var POLL_MS = 5000;              // fallback polling interval
+  var SSE_MAX_BACKOFF_MS = 30000;
+  var THEME_KEY = 'azlsonar.theme';
+  var PHASES = ['provisioning', 'validation', 'deployment', 'done', 'failed'];
+  var STATUS_LABEL = {
+    notstarted: 'Not started', running: 'In progress', success: 'Succeeded',
+    error: 'Failed', skipped: 'Skipped', unknown: 'Unknown'
+  };
+  var DEMO = /(?:^|[?&])demo=(?:1|true|yes)(?:&|$)/i.test(location.search);
+
+  // ------------------------------------------------------------------ state
+
+  var app = {
+    config: null,
+    state: null,
+    guidance: null,
+    guidancePhase: null,        // phase picked by the user in the guidance card (null = follow current)
+    tailer: null,
+    files: [],
+    lines: [],
+    lastSeq: 0,
+    counts: { all: 0, warning: 0, error: 0 },
+    filter: { level: 'all', q: '', file: '', stepKey: null },
+    follow: true,
+    newWhilePaused: 0,
+    rendered: 0,
+    treeSig: { validation: null, deployment: null },
+    expanded: new Map(),        // key -> bool (user choice)
+    sectionCollapsed: { validation: false, deployment: false },
+    stepIndex: new Map(),       // key -> { node, section, parentKey }
+    focusKey: { validation: null, deployment: null },
+    selectedKey: null,
+    currentKey: null,
+    lastAutoKey: null,
+    lastAnnounced: { phase: null, status: null, tailer: null },
+    errors: new Map(),          // banner messages by source
+    bannerDismissed: '',
+    conn: 'connecting'
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  // ------------------------------------------------------------------ helpers
+
+  function isObj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
+  function arr(v) { return Array.isArray(v) ? v : []; }
+  function str(v) { return v === null || v === undefined ? '' : String(v); }
+
+  function normStatus(s) {
+    var k = str(s).toLowerCase().replace(/[\s_-]+/g, '');
+    if (!k) return 'notstarted';
+    if (k === 'notstarted' || k === 'pending' || k === 'queued' || k === 'waiting') return 'notstarted';
+    if (k === 'running' || k === 'inprogress' || k === 'started' || k === 'executing' || k === 'accepted' ||
+        k === 'updating' || k === 'creating' || k === 'provisioning') return 'running';
+    if (k === 'success' || k === 'succeeded' || k === 'completed' || k === 'complete' || k === 'done') return 'success';
+    if (k === 'error' || k === 'failed' || k === 'failure' || k === 'canceled' || k === 'cancelled') return 'error';
+    if (k === 'skipped' || k === 'notapplicable') return 'skipped';
+    return 'unknown';
+  }
+
+  function normPhase(p) {
+    var k = str(p).toLowerCase();
+    return PHASES.indexOf(k) >= 0 ? k : (k ? k : 'unknown');
+  }
+
+  function parseTime(v) {
+    if (v === null || v === undefined || v === '') return NaN;
+    if (typeof v === 'number') return v < 1e12 ? v * 1000 : v;
+    var s = String(v);
+    // ASP.NET style /Date(1696000000000)/
+    var m = /\/Date\((-?\d+)/.exec(s);
+    if (m) return Number(m[1]);
+    var t = Date.parse(s);
+    if (isNaN(t) && /^\d{4}-\d{2}-\d{2} \d/.test(s)) t = Date.parse(s.replace(' ', 'T'));
+    return t;
+  }
+
+  function fmtDuration(sec) {
+    if (sec === null || sec === undefined || isNaN(sec) || sec < 0) return '';
+    sec = Math.floor(sec);
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    if (h > 0) return h + 'h ' + m + 'm ' + s + 's';
+    if (m > 0) return m + 'm ' + s + 's';
+    return s + 's';
+  }
+
+  function pad(n, w) { n = String(n); while (n.length < (w || 2)) n = '0' + n; return n; }
+  function fmtClock(t) {
+    if (isNaN(t)) return '';
+    var d = new Date(t);
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+  function fmtDateTime(t) {
+    if (isNaN(t)) return '';
+    try { return new Date(t).toLocaleString(); } catch (e) { return new Date(t).toISOString(); }
+  }
+  function fmtAgo(t) {
+    if (isNaN(t)) return '';
+    var s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 5) return 'just now';
+    if (s < 60) return s + ' s ago';
+    if (s < 3600) return Math.floor(s / 60) + ' min ago';
+    return fmtDuration(s) + ' ago';
+  }
+
+  function basename(p) {
+    var s = str(p);
+    var i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'));
+    return i >= 0 ? s.slice(i + 1) : s;
+  }
+
+  function el(tag, attrs, children) {
+    var e = document.createElement(tag);
+    if (attrs) {
+      for (var k in attrs) {
+        if (!Object.prototype.hasOwnProperty.call(attrs, k)) continue;
+        var v = attrs[k];
+        if (v === null || v === undefined || v === false) continue;
+        if (k === 'class') e.className = v;
+        else if (k === 'text') e.textContent = v;
+        else e.setAttribute(k, v === true ? '' : v);
+      }
+    }
+    if (children) {
+      for (var i = 0; i < children.length; i++) {
+        var c = children[i];
+        if (c === null || c === undefined || c === false) continue;
+        e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+      }
+    }
+    return e;
+  }
+
+  function announce(msg) {
+    var a = $('announcer');
+    a.textContent = '';
+    // a short delay makes screen readers pick up repeated messages
+    setTimeout(function () { a.textContent = msg; }, 60);
+  }
+
+  // ------------------------------------------------------------------ icons (static inline SVG)
+
+  var ICON = {
+    success: '<svg class="si si-success" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="m4.8 8.2 2.1 2.1 4.3-4.5" fill="none" stroke="var(--surface)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    error: '<svg class="si si-error" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="m5.6 5.6 4.8 4.8m0-4.8-4.8 4.8" stroke="var(--surface)" stroke-width="1.7" stroke-linecap="round"/></svg>',
+    running: '<svg class="si si-running" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="2"/><path class="spin" d="M8 1.8a6.2 6.2 0 0 1 6.2 6.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="8" cy="8" r="2" fill="currentColor"/></svg>',
+    skipped: '<svg class="si si-skipped" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m5.8 5.6 2.6 2.4-2.6 2.4m3-4.8 2.6 2.4-2.6 2.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    notstarted: '<svg class="si si-notstarted" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2.4 2.2"/></svg>',
+    unknown: '<svg class="si si-unknown" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6.3 6.3a1.8 1.8 0 1 1 2.5 1.6c-.5.3-.8.6-.8 1.2v.3M8 11.4v.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+    caret: '<svg class="caret" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m6 3.5 4.5 4.5L6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    close: '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m4 4 8 8m0-8-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>'
+  };
+  function icon(status) { return ICON[status] || ICON.unknown; }
+
+  // ------------------------------------------------------------------ theme
+
+  var mql = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  function storedTheme() {
+    try { var v = localStorage.getItem(THEME_KEY); return v === 'light' || v === 'dark' ? v : null; } catch (e) { return null; }
+  }
+  function effectiveTheme() {
+    var s = document.documentElement.getAttribute('data-theme');
+    if (s === 'light' || s === 'dark') return s;
+    return mql && mql.matches ? 'dark' : 'light';
+  }
+  function applyTheme(t) {
+    var root = document.documentElement;
+    if (t) root.setAttribute('data-theme', t); else root.removeAttribute('data-theme');
+    var eff = effectiveTheme();
+    root.setAttribute('data-effective-theme', eff);
+    var btn = $('theme-btn');
+    if (btn) {
+      var next = eff === 'dark' ? 'light' : 'dark';
+      btn.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+      btn.title = 'Switch to ' + next + ' theme';
+    }
+  }
+  applyTheme(storedTheme()); // runs before first paint where possible (script is deferred)
+
+  function toggleTheme() {
+    var next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* storage blocked: theme still switches */ }
+    applyTheme(next);
+  }
+
+  // ------------------------------------------------------------------ banner (non-blocking errors)
+
+  function setError(source, message) {
+    if (message) app.errors.set(source, message); else app.errors.delete(source);
+    renderBanner();
+  }
+  function renderBanner() {
+    var b = $('banner'), t = $('banner-text');
+    var msgs = Array.from(app.errors.values());
+    var sig = msgs.join('|');
+    if (!msgs.length || sig === app.bannerDismissed) { b.hidden = true; return; }
+    t.textContent = '';
+    if (msgs.length === 1) {
+      t.appendChild(document.createTextNode(msgs[0]));
+    } else {
+      var ul = el('ul');
+      msgs.forEach(function (m) { ul.appendChild(el('li', { text: m })); });
+      t.appendChild(ul);
+    }
+    b.hidden = false;
+  }
+
+  // ------------------------------------------------------------------ API
+
+  function getJSON(path) {
+    return fetch(path, { cache: 'no-store', headers: { Accept: 'application/json' }, credentials: 'same-origin' })
+      .then(function (r) {
+        if (!r.ok) throw new Error(path + ' returned HTTP ' + r.status);
+        return r.text();
+      })
+      .then(function (txt) {
+        if (!txt) return null;
+        try { return JSON.parse(txt); } catch (e) { throw new Error(path + ' returned invalid JSON'); }
+      });
+  }
+
+  function safeParse(data) {
+    try { return JSON.parse(data); } catch (e) { return null; }
+  }
+
+  function loadConfig() {
+    return getJSON('/api/config').then(function (c) { setError('config', null); applyConfig(c); },
+      function (e) { setError('config', 'Could not load the configuration: ' + e.message); });
+  }
+  function loadGuidance() {
+    return getJSON('/api/guidance').then(function (g) { setError('guidance', null); app.guidance = g; renderGuidance(); },
+      function (e) { setError('guidance', 'Could not load the phase guidance: ' + e.message); renderGuidance(); });
+  }
+  function loadState() {
+    return getJSON('/api/state').then(function (s) { setError('state', null); applyState(s); },
+      function (e) { setError('state', 'Could not read the deployment state: ' + e.message); throw e; });
+  }
+  function loadLogs() {
+    return getJSON('/api/logs?since=' + encodeURIComponent(app.lastSeq)).then(function (r) {
+      setError('logs', null);
+      if (!isObj(r)) return;
+      if (r.tailer) applyTailer(r.tailer);
+      if (Array.isArray(r.files)) applyFiles(r.files);
+      ingestLines(r.lines);
+    }, function (e) { setError('logs', 'Could not read the logs: ' + e.message); throw e; });
+  }
+
+  // ------------------------------------------------------------------ live updates (SSE + polling fallback)
+
+  var es = null, sseFailures = 0, sseTimer = null, pollTimer = null, polling = false;
+
+  function setConn(c) {
+    app.conn = c;
+    var node = $('conn');
+    node.setAttribute('data-conn', c);
+    node.title = { live: 'Live updates over Server-Sent Events', polling: 'Live stream unavailable: polling /api/state and /api/logs every 5 s while it reconnects',
+      offline: 'The Sonar back end is not answering; retrying', connecting: 'Connecting to the Sonar back end', demo: 'Demo mode: built-in sample data, no API calls' }[c] || '';
+    $('conn-label').textContent = { live: 'Live', polling: 'Polling', offline: 'Offline, retrying',
+      connecting: 'Connecting', demo: 'Demo' }[c] || c;
+  }
+
+  function connectSSE() {
+    if (DEMO) return;
+    if (typeof window.EventSource !== 'function') { startPolling(); return; }
+    try {
+      es = new EventSource('/api/events');
+    } catch (e) {
+      es = null; onSSEFailure(); return;
+    }
+    es.addEventListener('open', function () {
+      sseFailures = 0;
+      setError('sse', null);
+      stopPolling();
+      setConn('live');
+      // close any gap left while disconnected
+      loadLogs().catch(function () {});
+      loadState().catch(function () {});
+    });
+    es.addEventListener('state', function (e) {
+      var s = safeParse(e.data);
+      if (s) applyState(s);
+    });
+    es.addEventListener('log', function (e) {
+      var d = safeParse(e.data);
+      if (Array.isArray(d)) ingestLines(d);
+      else if (isObj(d) && Array.isArray(d.lines)) ingestLines(d.lines);
+    });
+    es.addEventListener('tailer', function (e) {
+      var t = safeParse(e.data);
+      if (t) applyTailer(t);
+    });
+    es.onerror = function () {
+      if (!es) return;
+      es.close();
+      es = null;
+      onSSEFailure();
+    };
+  }
+
+  function onSSEFailure() {
+    sseFailures++;
+    startPolling();
+    var delay = Math.min(SSE_MAX_BACKOFF_MS, 1000 * Math.pow(2, Math.min(sseFailures - 1, 5)));
+    delay += Math.floor(Math.random() * 500);
+    clearTimeout(sseTimer);
+    sseTimer = setTimeout(connectSSE, delay);
+  }
+
+  function startPolling() {
+    if (polling || DEMO) return;
+    polling = true;
+    if (app.conn !== 'offline') setConn('polling');
+    pollOnce();
+  }
+  function stopPolling() {
+    polling = false;
+    clearTimeout(pollTimer);
+  }
+  function pollOnce() {
+    if (!polling) return;
+    Promise.allSettled([loadState(), loadLogs()]).then(function (res) {
+      if (!polling) return;
+      var ok = res.some(function (r) { return r.status === 'fulfilled'; });
+      setConn(ok ? 'polling' : 'offline');
+      pollTimer = setTimeout(pollOnce, POLL_MS);
+    });
+  }
+
+  // ------------------------------------------------------------------ config + header
+
+  function cfgCluster(c) { return isObj(c) ? (c.cluster || c.clusterName || '') : ''; }
+
+  function applyConfig(c) {
+    if (!isObj(c)) return;
+    app.config = c;
+    renderHeader();
+  }
+
+  function renderHeader() {
+    var s = app.state || {}, c = app.config || {};
+    var name = s.cluster || cfgCluster(c) || 'Unknown cluster';
+    $('cluster-name').textContent = name;
+    var meta = [];
+    if (c.resourceGroup) meta.push(c.resourceGroup);
+    if (s.mode) meta.push('mode ' + s.mode);
+    if (c.identityModel) meta.push(c.identityModel);
+    if (s.provisioningState) meta.push('ARM ' + s.provisioningState);
+    $('cluster-meta').textContent = meta.join(' \u00b7 ');
+    document.title = (name !== 'Unknown cluster' ? name + ' \u2013 ' : '') + 'AzL Sonar';
+
+    var phase = app.state ? normPhase(s.phase) : 'unknown';
+    var chip = $('phase-chip');
+    chip.setAttribute('data-phase', phase);
+    chip.textContent = phase === 'unknown' ? (app.state ? 'unknown' : '\u2014') : phase;
+
+    var ov = overallStatus();
+    var st = $('overall-status');
+    st.setAttribute('data-status', ov.key);
+    st.innerHTML = app.state ? icon(ov.key) : '';
+    st.appendChild(document.createTextNode(app.state ? ov.label : '\u2014'));
+
+    tickHeader();
+    renderNodes();
+
+    if (app.state) {
+      if (app.lastAnnounced.phase !== null && app.lastAnnounced.phase !== phase) {
+        announce('Phase changed to ' + phase + '. Status: ' + ov.label + '.');
+      } else if (app.lastAnnounced.status !== null && app.lastAnnounced.status !== ov.label) {
+        announce('Status: ' + ov.label + '.');
+      }
+      app.lastAnnounced.phase = phase;
+      app.lastAnnounced.status = ov.label;
+    }
+  }
+
+  function sectionStatus(sec) {
+    if (!isObj(sec)) return 'notstarted';
+    var raw = sec.status;
+    if (isObj(raw)) raw = raw.status;
+    var st = normStatus(raw);
+    var tree = arr(sec.tree);
+    if ((st === 'unknown' || st === 'notstarted') && tree.length) {
+      var agg = aggregate(tree);
+      if (agg.running) return 'running';
+      if (agg.error) return 'error';
+      if (agg.total && agg.success + agg.skipped === agg.total) return 'success';
+      if (agg.success) return 'running';
+    }
+    return st;
+  }
+
+  function overallStatus() {
+    var s = app.state;
+    if (!s) return { key: 'unknown', label: 'Waiting for data' };
+    var phase = normPhase(s.phase);
+    if (phase === 'failed') return { key: 'error', label: 'Failed' };
+    if (phase === 'done') return { key: 'success', label: 'Succeeded' };
+    if (phase === 'deployment' || phase === 'validation') {
+      var k = sectionStatus(s[phase]);
+      var label = STATUS_LABEL[k];
+      if (k === 'success' && phase === 'validation') label = 'Validation succeeded';
+      if (k === 'unknown') label = str(isObj(s[phase]) ? s[phase].status : '') || 'Unknown';
+      return { key: k, label: label };
+    }
+    var ps = normStatus(s.provisioningState);
+    return { key: ps === 'notstarted' ? 'unknown' : ps, label: s.provisioningState ? 'Provisioning: ' + s.provisioningState : 'Provisioning' };
+  }
+
+  function elapsedRange() {
+    var s = app.state;
+    if (!s) return null;
+    var min = Infinity, max = -Infinity, running = false;
+    function walk(nodes) {
+      arr(nodes).forEach(function (n) {
+        if (!isObj(n)) return;
+        var a = parseTime(n.start), b = parseTime(n.end);
+        if (!isNaN(a) && a < min) min = a;
+        if (!isNaN(b) && b > max) max = b;
+        if (normStatus(n.status) === 'running') running = true;
+        walk(n.children);
+      });
+    }
+    walk(isObj(s.validation) ? s.validation.tree : null);
+    walk(isObj(s.deployment) ? s.deployment.tree : null);
+    if (min === Infinity) return null;
+    var phase = normPhase(s.phase);
+    var open = running || (phase !== 'done' && phase !== 'failed' && overallStatus().key === 'running');
+    return { start: min, end: open ? null : (max > -Infinity ? max : null) };
+  }
+
+  function tickHeader() {
+    var r = elapsedRange();
+    var e = $('elapsed');
+    if (!r) { e.textContent = '\u2014'; e.removeAttribute('title'); }
+    else {
+      var end = r.end === null ? Date.now() : r.end;
+      e.textContent = fmtDuration((end - r.start) / 1000) || '0s';
+      e.title = 'Since ' + fmtDateTime(r.start);
+    }
+    var lp = $('last-poll');
+    var t = app.state ? parseTime(app.state.polledAt) : NaN;
+    if (isNaN(t)) { lp.textContent = '\u2014'; lp.removeAttribute('data-stale'); lp.removeAttribute('title'); return; }
+    lp.textContent = fmtAgo(t);
+    lp.title = fmtDateTime(t);
+    var pollS = Number(app.config && app.config.pollSeconds) || 20;
+    lp.setAttribute('data-stale', String(Date.now() - t > Math.max(60, pollS * 3) * 1000));
+  }
+
+  function renderNodes() {
+    var ul = $('node-chips');
+    var byName = new Map();
+    arr(app.config && app.config.nodes).forEach(function (n) {
+      if (isObj(n) && n.name) byName.set(String(n.name).toLowerCase(), { name: n.name, seed: !!n.seed });
+    });
+    arr(app.state && app.state.nodes).forEach(function (n) {
+      if (!isObj(n) || !n.name) return;
+      var k = String(n.name).toLowerCase();
+      var cur = byName.get(k) || { name: n.name, seed: !!n.seed };
+      cur.arcStatus = n.arcStatus;
+      cur.lastStatusChange = n.lastStatusChange;
+      byName.set(k, cur);
+    });
+    ul.textContent = '';
+    byName.forEach(function (n) {
+      var arc = str(n.arcStatus) || 'Unknown';
+      var tip = n.name + ': Azure Arc ' + arc;
+      var lt = parseTime(n.lastStatusChange);
+      if (!isNaN(lt)) tip += ' since ' + fmtDateTime(lt);
+      ul.appendChild(el('li', { class: 'node-chip', 'data-arc': arc.toLowerCase(), title: tip }, [
+        el('span', { class: 'dot', 'aria-hidden': 'true' }),
+        el('span', { text: n.name }),
+        el('span', { class: 'arc', text: arc }),
+        n.seed ? el('span', { class: 'seed', text: 'seed' }) : null,
+        el('span', { class: 'sr-only', text: !isNaN(lt) ? ', since ' + fmtDateTime(lt) : '' })
+      ]));
+    });
+  }
+
+  // ------------------------------------------------------------------ state + step tree
+
+  function applyState(s) {
+    if (!isObj(s)) return;
+    app.state = s;
+    app.stepIndex = new Map();
+    indexSection('validation');
+    indexSection('deployment');
+    app.currentKey = findCurrentKey();
+    // auto-expand to the current step when it changes
+    var autoScroll = false;
+    if (app.currentKey && app.currentKey !== app.lastAutoKey) {
+      app.lastAutoKey = app.currentKey;
+      revealKey(app.currentKey);
+      autoScroll = true;
+    }
+    renderHeader();
+    renderTree(autoScroll);
+    renderGuidance();
+    if (app.filter.stepKey) renderChips();
+  }
+
+  function nodeKey(parentKey, node, i) {
+    var id = isObj(node) && node.id !== undefined && node.id !== null && node.id !== '' ? String(node.id) :
+      (isObj(node) && node.name ? 'n:' + node.name : 'i:' + i);
+    return parentKey + '/' + id;
+  }
+
+  function indexSection(section) {
+    var sec = app.state && app.state[section];
+    var seen = new Set();
+    function walk(nodes, parentKey) {
+      arr(nodes).forEach(function (n, i) {
+        if (!isObj(n)) return;
+        var k = nodeKey(parentKey, n, i);
+        if (seen.has(k)) k += '#' + i;  // duplicate ids: keep keys unique
+        seen.add(k);
+        app.stepIndex.set(k, { node: n, section: section, parentKey: parentKey });
+        n.__key = k;
+        walk(n.children, k);
+      });
+    }
+    walk(isObj(sec) ? sec.tree : null, section);
+  }
+
+  function findCurrentKey() {
+    var s = app.state, cur = isObj(s.current) ? s.current : null;
+    // 1. follow current.stepPath (ids or names) in the named phase
+    if (cur && Array.isArray(cur.stepPath) && cur.stepPath.length) {
+      var secs = cur.phase === 'validation' || cur.phase === 'deployment' ? [cur.phase] : ['deployment', 'validation'];
+      for (var si = 0; si < secs.length; si++) {
+        var nodes = isObj(s[secs[si]]) ? arr(s[secs[si]].tree) : [], found = null;
+        for (var d = 0; d < cur.stepPath.length; d++) {
+          var want = str(isObj(cur.stepPath[d]) ? (cur.stepPath[d].id || cur.stepPath[d].name) : cur.stepPath[d]);
+          var match = null;
+          for (var j = 0; j < nodes.length; j++) {
+            var n = nodes[j];
+            if (isObj(n) && (str(n.id) === want || str(n.name) === want)) { match = n; break; }
+          }
+          if (!match) break;
+          found = match;
+          nodes = arr(match.children);
+        }
+        if (found && found.__key) return found.__key;
+      }
+    }
+    // 2. deepest running step (deployment first)
+    var best = null, bestDepth = -1;
+    function walk(nodes, depth) {
+      arr(nodes).forEach(function (n) {
+        if (!isObj(n)) return;
+        if (normStatus(n.status) === 'running' && depth > bestDepth) { best = n; bestDepth = depth; }
+        walk(n.children, depth + 1);
+      });
+    }
+    ['deployment', 'validation'].forEach(function (sec) {
+      if (!best && isObj(s[sec])) walk(s[sec].tree, 0);
+    });
+    if (best) return best.__key;
+    // 3. by name
+    if (cur && cur.stepName) {
+      var hit = null;
+      app.stepIndex.forEach(function (v, k) { if (!hit && str(v.node.name) === str(cur.stepName)) hit = k; });
+      return hit;
+    }
+    return null;
+  }
+
+  function revealKey(key) {
+    var info = app.stepIndex.get(key);
+    if (!info) return;
+    app.sectionCollapsed[info.section] = false;
+    var p = info.parentKey;
+    while (p && app.stepIndex.has(p)) {
+      app.expanded.set(p, true);
+      p = app.stepIndex.get(p).parentKey;
+    }
+  }
+
+  function subtreeHas(n, statuses) {
+    var kids = arr(n.children);
+    for (var i = 0; i < kids.length; i++) {
+      if (!isObj(kids[i])) continue;
+      if (statuses.indexOf(normStatus(kids[i].status)) >= 0 || subtreeHas(kids[i], statuses)) return true;
+    }
+    return false;
+  }
+
+  function isExpanded(n) {
+    var k = n.__key;
+    if (app.expanded.has(k)) return app.expanded.get(k);
+    return subtreeHas(n, ['running', 'error']);
+  }
+
+  function aggregate(tree) {
+    var a = { total: 0, success: 0, error: 0, running: 0, skipped: 0, notstarted: 0, unknown: 0 };
+    function walk(nodes) {
+      arr(nodes).forEach(function (n) {
+        if (!isObj(n)) return;
+        if (arr(n.children).length) { walk(n.children); return; } // leaves carry the progress
+        a.total++;
+        a[normStatus(n.status)]++;
+      });
+    }
+    walk(tree);
+    return a;
+  }
+
+  function nodeDuration(n) {
+    var st = normStatus(n.status), a = parseTime(n.start), b = parseTime(n.end);
+    if (st === 'running' && !isNaN(a)) return (Date.now() - a) / 1000;
+    if (typeof n.durationSeconds === 'number' && n.durationSeconds >= 0) return n.durationSeconds;
+    if (!isNaN(a) && !isNaN(b)) return (b - a) / 1000;
+    return null;
+  }
+
+  function renderTree(autoScroll) {
+    var host = $('tree-host');
+    var hadFocus = host.contains(document.activeElement);
+    var focusedKey = hadFocus && document.activeElement.getAttribute ? document.activeElement.getAttribute('data-key') : null;
+    var s = app.state || {};
+
+    ['validation', 'deployment'].forEach(function (section) {
+      var sec = isObj(s[section]) ? s[section] : {};
+      var tree = arr(sec.tree);
+      var sig = JSON.stringify([tree, sec.status, app.sectionCollapsed[section], app.selectedKey, app.currentKey,
+        Array.from(app.expanded.entries())], function (k, v) { return k === '__key' ? undefined : v; });
+      var wrap = host.querySelector('.tree-section[data-section="' + section + '"]');
+      if (wrap && app.treeSig[section] === sig) return;
+      app.treeSig[section] = sig;
+      var fresh = buildSection(section, sec, tree);
+      if (wrap) host.replaceChild(fresh, wrap); else host.appendChild(fresh);
+    });
+
+    // keep validation above deployment
+    var v = host.querySelector('[data-section="validation"]'), d = host.querySelector('[data-section="deployment"]');
+    if (v && d && v.nextSibling !== d) host.insertBefore(v, d);
+
+    if (focusedKey) {
+      var f = host.querySelector('[data-key="' + cssEscape(focusedKey) + '"]');
+      if (f) f.focus({ preventScroll: true });
+    }
+    $('jump-current').disabled = !app.currentKey;
+    if (autoScroll) scrollToKey(app.currentKey, false);
+    tickTimers();
+  }
+
+  function cssEscape(s) {
+    if (window.CSS && CSS.escape) return CSS.escape(s);
+    return String(s).replace(/["\\]/g, '\\$&');
+  }
+
+  function buildSection(section, sec, tree) {
+    var title = section === 'validation' ? 'Validation' : 'Deployment';
+    var st = sectionStatus(sec);
+    var collapsed = !!app.sectionCollapsed[section];
+    var wrap = el('div', { class: 'tree-section', 'data-section': section });
+
+    var toggle = el('button', { type: 'button', class: 'section-toggle', 'aria-expanded': String(!collapsed),
+      'aria-controls': 'tree-' + section });
+    toggle.innerHTML = ICON.caret;
+    toggle.appendChild(el('h3', { text: title }));
+    toggle.addEventListener('click', function () {
+      app.sectionCollapsed[section] = !app.sectionCollapsed[section];
+      renderTree(false);
+      var b = $('tree-host').querySelector('[data-section="' + section + '"] .section-toggle');
+      if (b) b.focus();
+    });
+
+    var stEl = el('span', { class: 'status-text section-status', 'data-status': st });
+    stEl.innerHTML = icon(st);
+    stEl.appendChild(document.createTextNode(st === 'unknown' ? (str(sec.status) || 'Unknown') : STATUS_LABEL[st]));
+
+    var head = el('div', { class: 'section-head' }, [toggle, stEl]);
+    wrap.appendChild(head);
+
+    var agg = aggregate(tree);
+    if (!agg.total && isObj(sec.counts)) {
+      // no tree yet but the back end sent counts
+      Object.keys(sec.counts).forEach(function (k) {
+        var nk = normStatus(k);
+        var v = Number(sec.counts[k]) || 0;
+        agg[nk] = (agg[nk] || 0) + v;
+        agg.total += v;
+      });
+    }
+
+    if (agg.total) {
+      var meta = el('div', { class: 'section-meta' });
+      var done = agg.success + agg.skipped;
+      var bar = el('div', { class: 'progress', role: 'progressbar', 'aria-label': title + ' progress',
+        'aria-valuemin': '0', 'aria-valuemax': String(agg.total), 'aria-valuenow': String(done),
+        'aria-valuetext': done + ' of ' + agg.total + ' steps done' + (agg.error ? ', ' + agg.error + ' failed' : '') });
+      ['success', 'skipped', 'error', 'running'].forEach(function (k) {
+        if (agg[k]) bar.appendChild(el('span', { class: 'p-' + k, style: 'width:' + (100 * agg[k] / agg.total) + '%' }));
+      });
+      meta.appendChild(bar);
+      meta.appendChild(el('span', { class: 'progress-label', text: done + ' / ' + agg.total + ' steps done' }));
+      var counts = el('div', { class: 'counts', 'aria-label': title + ' step counts' });
+      ['success', 'running', 'error', 'skipped', 'notstarted', 'unknown'].forEach(function (k) {
+        if (!agg[k]) return;
+        var c = el('span', { class: 'count', title: STATUS_LABEL[k] });
+        c.innerHTML = icon(k);
+        c.appendChild(el('b', { text: String(agg[k]) }));
+        c.appendChild(el('span', { class: 'sr-only', text: ' ' + STATUS_LABEL[k] }));
+        counts.appendChild(c);
+      });
+      meta.appendChild(counts);
+      head.appendChild(meta);
+    }
+
+    if (collapsed) return wrap;
+
+    if (!tree.length) {
+      wrap.appendChild(el('p', { class: 'empty', id: 'tree-' + section,
+        text: st === 'notstarted' ? title + ' has not started yet.' : 'No steps reported.' }));
+      return wrap;
+    }
+
+    var ul = el('ul', { class: 'tree', role: 'tree', id: 'tree-' + section, 'aria-label': title + ' steps' });
+    var tabKey = app.focusKey[section] && app.stepIndex.has(app.focusKey[section]) ? app.focusKey[section] :
+      (app.currentKey && app.stepIndex.get(app.currentKey) && app.stepIndex.get(app.currentKey).section === section ? app.currentKey : null);
+    tree.forEach(function (n) {
+      if (!isObj(n)) return;
+      ul.appendChild(buildItem(n, 1, tabKey));
+    });
+    // ensure exactly one tabbable item, and that it is visible
+    var tabbable = ul.querySelector('[role="treeitem"][tabindex="0"]');
+    if (!tabbable || !isVisibleItem(tabbable)) {
+      if (tabbable) tabbable.setAttribute('tabindex', '-1');
+      var f = ul.querySelector('[role="treeitem"]');
+      if (f) f.setAttribute('tabindex', '0');
+    }
+    ul.addEventListener('keydown', onTreeKey);
+    wrap.appendChild(ul);
+    return wrap;
+  }
+
+  function buildItem(n, level, tabKey) {
+    var k = n.__key;
+    var st = normStatus(n.status);
+    var kids = arr(n.children).filter(isObj);
+    var hasKids = kids.length > 0;
+    var open = hasKids && isExpanded(n);
+    var dur = nodeDuration(n);
+    var name = str(n.name) || str(n.description) || '(unnamed step)';
+    var label = name + ', ' + (st === 'unknown' ? str(n.status) || 'unknown status' : STATUS_LABEL[st]) +
+      (dur !== null ? ', ' + fmtDuration(dur) : '') + (arr(n.errors).length ? ', ' + arr(n.errors).length + ' error message(s)' : '');
+
+    var li = el('li', { role: 'treeitem', 'data-key': k, 'aria-level': String(level), 'aria-label': label,
+      'aria-selected': String(app.selectedKey === k), tabindex: tabKey === k ? '0' : '-1' });
+    if (hasKids) li.setAttribute('aria-expanded', String(open));
+
+    var row = el('div', { class: 'row', 'data-status': st, 'data-current': String(app.currentKey === k) });
+    if (hasKids) {
+      var cb = el('button', { type: 'button', class: 'caret-btn', tabindex: '-1', 'aria-hidden': 'true' });
+      cb.innerHTML = ICON.caret;
+      cb.addEventListener('click', function (e) { e.stopPropagation(); toggleKey(k); });
+      row.appendChild(cb);
+    } else {
+      row.appendChild(el('span', { class: 'caret-spacer', 'aria-hidden': 'true' }));
+    }
+    var ic = el('span', { 'aria-hidden': 'true', title: STATUS_LABEL[st] || st });
+    ic.innerHTML = icon(st);
+    row.appendChild(ic);
+
+    var nameEl = el('span', { class: 'step-name' });
+    if (n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
+    nameEl.appendChild(document.createTextNode(name));
+    if (n.description && n.description !== name) nameEl.appendChild(el('span', { class: 'desc', text: str(n.description) }));
+    row.appendChild(nameEl);
+
+    var durEl = el('span', { class: 'dur' });
+    if (st === 'running' && !isNaN(parseTime(n.start))) {
+      durEl.setAttribute('data-start', String(parseTime(n.start)));
+    }
+    durEl.textContent = dur !== null ? fmtDuration(dur) : '';
+    var tt = [];
+    if (!isNaN(parseTime(n.start))) tt.push('Start ' + fmtDateTime(parseTime(n.start)));
+    if (!isNaN(parseTime(n.end))) tt.push('End ' + fmtDateTime(parseTime(n.end)));
+    if (tt.length) durEl.title = tt.join('\n');
+    row.appendChild(durEl);
+
+    row.addEventListener('click', function () { selectStep(k); });
+    li.appendChild(row);
+
+    var errs = arr(n.errors).map(str).filter(Boolean);
+    if (errs.length) {
+      var box = el('div', { class: 'step-errors', role: 'note', 'aria-label': 'Errors for ' + name });
+      errs.forEach(function (m) { box.appendChild(el('p', { text: m })); });
+      li.appendChild(box);
+    }
+
+    if (hasKids) {
+      var g = el('ul', { role: 'group' });
+      if (!open) g.hidden = true;
+      kids.forEach(function (c) { g.appendChild(buildItem(c, level + 1, tabKey)); });
+      li.appendChild(g);
+    }
+    return li;
+  }
+
+  function isVisibleItem(item) {
+    var p = item.parentElement;
+    while (p && !p.classList.contains('tree')) {
+      if (p.hidden) return false;
+      p = p.parentElement;
+    }
+    return true;
+  }
+
+  function visibleItems(tree) {
+    return Array.prototype.filter.call(tree.querySelectorAll('[role="treeitem"]'), isVisibleItem);
+  }
+
+  function focusItem(item) {
+    if (!item) return;
+    var tree = item.closest('[role="tree"]');
+    Array.prototype.forEach.call(tree.querySelectorAll('[role="treeitem"][tabindex="0"]'), function (x) { x.setAttribute('tabindex', '-1'); });
+    item.setAttribute('tabindex', '0');
+    item.focus();
+    var info = app.stepIndex.get(item.getAttribute('data-key'));
+    if (info) app.focusKey[info.section] = item.getAttribute('data-key');
+  }
+
+  function toggleKey(k, force) {
+    var info = app.stepIndex.get(k);
+    if (!info) return;
+    var now = isExpanded(info.node);
+    var next = typeof force === 'boolean' ? force : !now;
+    if (next === now) return;
+    app.expanded.set(k, next);
+    app.focusKey[info.section] = k;
+    renderTree(false);
+    var item = $('tree-host').querySelector('[data-key="' + cssEscape(k) + '"]');
+    if (item) focusItem(item);
+  }
+
+  function onTreeKey(e) {
+    var item = e.target.closest && e.target.closest('[role="treeitem"]');
+    if (!item) return;
+    var tree = e.currentTarget;
+    var items = visibleItems(tree);
+    var i = items.indexOf(item);
+    var k = item.getAttribute('data-key');
+    var hasKids = item.hasAttribute('aria-expanded');
+    var open = item.getAttribute('aria-expanded') === 'true';
+    switch (e.key) {
+      case 'ArrowDown': if (i < items.length - 1) focusItem(items[i + 1]); break;
+      case 'ArrowUp': if (i > 0) focusItem(items[i - 1]); break;
+      case 'Home': focusItem(items[0]); break;
+      case 'End': focusItem(items[items.length - 1]); break;
+      case 'ArrowRight':
+        if (hasKids && !open) toggleKey(k, true);
+        else if (hasKids && open) { var c = item.querySelector('[role="group"] > [role="treeitem"]'); if (c) focusItem(c); }
+        break;
+      case 'ArrowLeft':
+        if (hasKids && open) toggleKey(k, false);
+        else { var p = item.parentElement && item.parentElement.closest('[role="treeitem"]'); if (p) focusItem(p); }
+        break;
+      case 'Enter':
+        if (hasKids) toggleKey(k); else selectStep(k);
+        break;
+      case ' ':
+      case 'Spacebar':
+        selectStep(k);
+        break;
+      default: return;
+    }
+    e.preventDefault();
+  }
+
+  function scrollToKey(k, focus) {
+    if (!k) return;
+    var host = $('tree-host');
+    var item = host.querySelector('[data-key="' + cssEscape(k) + '"]');
+    if (!item) return;
+    var row = item.querySelector('.row') || item;
+    // scroll inside the tree panel only, never the page
+    var hr = host.getBoundingClientRect(), rr = row.getBoundingClientRect();
+    if (host.scrollHeight > host.clientHeight + 2) {
+      if (rr.top < hr.top || rr.bottom > hr.bottom) {
+        host.scrollTop += (rr.top - hr.top) - host.clientHeight / 3;
+      }
+    }
+    if (focus) focusItem(item);
+  }
+
+  function selectStep(k) {
+    var info = app.stepIndex.get(k);
+    if (!info) return;
+    if (app.selectedKey === k && app.filter.stepKey === k) {
+      clearStepFilter();
+      return;
+    }
+    app.selectedKey = k;
+    app.focusKey[info.section] = k;
+    var a = parseTime(info.node.start);
+    if (isNaN(a)) {
+      app.filter.stepKey = null;
+      announce('Step "' + str(info.node.name) + '" has no start time, so the logs cannot be filtered to it.');
+      setError('step', 'Step "' + str(info.node.name) + '" has no start time yet; the log filter needs one.');
+      setTimeout(function () { setError('step', null); }, 6000);
+    } else {
+      app.filter.stepKey = k;
+      announce('Logs filtered to step ' + str(info.node.name) + '.');
+    }
+    renderTree(false);
+    var item = $('tree-host').querySelector('[data-key="' + cssEscape(k) + '"]');
+    if (item) focusItem(item);
+    renderChips();
+    rerenderLogs();
+  }
+
+  function clearStepFilter() {
+    app.filter.stepKey = null;
+    app.selectedKey = null;
+    renderTree(false);
+    renderChips();
+    rerenderLogs();
+    announce('Step filter removed.');
+  }
+
+  function stepWindow() {
+    var k = app.filter.stepKey;
+    if (!k) return null;
+    var info = app.stepIndex.get(k);
+    if (!info) return null;
+    var a = parseTime(info.node.start), b = parseTime(info.node.end);
+    if (isNaN(a)) return null;
+    var running = normStatus(info.node.status) === 'running';
+    return { start: a - 1000, end: running || isNaN(b) ? Infinity : b + 1000, name: str(info.node.name), rawStart: a, rawEnd: running ? NaN : b };
+  }
+
+  function tickTimers() {
+    var now = Date.now();
+    var nodes = document.querySelectorAll('.dur[data-start]');
+    for (var i = 0; i < nodes.length; i++) {
+      var a = Number(nodes[i].getAttribute('data-start'));
+      nodes[i].textContent = fmtDuration((now - a) / 1000);
+    }
+  }
+
+  // ------------------------------------------------------------------ guidance
+
+  function gkey(v) { return str(v).toLowerCase().replace(/[\s_-]+/g, ''); }
+
+  function guidanceSource() {
+    var g = app.guidance;
+    return isObj(g) ? (g.phases || g.guidance || g) : g;
+  }
+
+  function guidanceModel() {
+    return (isObj(app.guidance) && (app.guidance.identityModel || app.guidance.model)) || (app.config && app.config.identityModel) || '';
+  }
+
+  function phaseGuidance(phase) {
+    var src = guidanceSource(), want = gkey(phase), hit = null;
+    if (Array.isArray(src)) {
+      for (var j = 0; j < src.length && !hit; j++) {
+        if (isObj(src[j]) && gkey(src[j].phase || src[j].name || src[j].id) === want) hit = src[j];
+      }
+    } else if (isObj(src)) {
+      Object.keys(src).forEach(function (k) { if (!hit && gkey(k) === want && isObj(src[k])) hit = src[k]; });
+    }
+    if (!hit) return null;
+    // tolerate entries still keyed by identity model: { LocalIdentity: {...}, ActiveDirectory: {...} }
+    var model = gkey(guidanceModel());
+    if (model) {
+      var sub = null;
+      Object.keys(hit).forEach(function (k) { if (!sub && gkey(k) === model && isObj(hit[k])) sub = hit[k]; });
+      if (sub) return sub;
+    }
+    return hit;
+  }
+
+  function guidancePhases() {
+    var src = guidanceSource(), out = [];
+    if (Array.isArray(src)) src.forEach(function (it) { if (isObj(it) && (it.phase || it.name)) out.push(str(it.phase || it.name).toLowerCase()); });
+    else if (isObj(src)) Object.keys(src).forEach(function (k) { if (isObj(src[k])) out.push(k.toLowerCase()); });
+    return out;
+  }
+
+  function listOf(v) {
+    if (v === null || v === undefined || v === '') return [];
+    if (Array.isArray(v)) return v.map(function (x) { return isObj(x) ? (x.path || x.name || x.text || JSON.stringify(x)) : str(x); }).filter(Boolean);
+    if (isObj(v)) return Object.keys(v).map(function (k) { return k + ': ' + str(v[k]); });
+    return [str(v)];
+  }
+
+  function pick(o, names) {
+    for (var i = 0; i < names.length; i++) {
+      if (o[names[i]] !== undefined && o[names[i]] !== null && o[names[i]] !== '') return o[names[i]];
+    }
+    return undefined;
+  }
+
+  function renderGuidance() {
+    var body = $('guidance-body'), tabs = $('guidance-tabs');
+    var cur = app.state ? normPhase(app.state.phase) : 'provisioning';
+    var model = guidanceModel();
+    var m = $('guidance-model');
+    m.textContent = model ? str(model) : '';
+    m.hidden = !model;
+
+    var available = guidancePhases();
+    var shown = ['provisioning', 'validation', 'deployment'].filter(function (p) { return available.indexOf(p) >= 0; });
+    available.forEach(function (p) { if (shown.indexOf(p) < 0) shown.push(p); });
+    // the phase that matches "now"; after the run ends, prefer a post-deployment entry, else deployment
+    var defaultView = cur;
+    if (shown.indexOf(cur) < 0 && (cur === 'done' || cur === 'failed')) {
+      defaultView = shown.filter(function (p) { return gkey(p) === 'postdeployment' || gkey(p) === 'after'; })[0] || 'deployment';
+    }
+    if (app.guidancePhase && shown.indexOf(app.guidancePhase) < 0) app.guidancePhase = null;
+    var view = app.guidancePhase || defaultView;
+
+    tabs.textContent = '';
+    tabs.hidden = shown.length < 2;
+    shown.forEach(function (p) {
+      var b = el('button', { type: 'button', 'aria-pressed': String(p === view) }, [p.charAt(0).toUpperCase() + p.slice(1)]);
+      if (p === defaultView) {
+        b.appendChild(el('span', { class: 'cur-dot', title: 'Current phase', 'aria-hidden': 'true' }));
+        b.appendChild(el('span', { class: 'sr-only', text: ' (current phase)' }));
+      }
+      b.addEventListener('click', function () {
+        app.guidancePhase = p === defaultView ? null : p;
+        renderGuidance();
+        var nb = tabs.querySelector('[aria-pressed="true"]');
+        if (nb) nb.focus();
+      });
+      tabs.appendChild(b);
+    });
+
+    body.textContent = '';
+    if (!app.guidance) {
+      body.appendChild(el('p', { class: 'muted', text: app.errors.has('guidance') ? 'Guidance is unavailable.' : 'Loading guidance\u2026' }));
+      return;
+    }
+    var g = phaseGuidance(view);
+    if (!g) {
+      body.appendChild(el('p', { class: 'muted', text: 'No guidance recorded for the ' + view + ' phase.' }));
+      return;
+    }
+    var dl = el('dl');
+    function row(label, valueNode) { dl.appendChild(el('dt', { text: label })); dl.appendChild(el('dd', null, [valueNode])); }
+
+    var account = pick(g, ['account', 'accounts', 'user', 'who', 'readBy']);
+    if (account !== undefined) row('Account', textList(listOf(account), false));
+    var where = pick(g, ['where', 'logs', 'logPaths', 'paths', 'location', 'locations', 'logLocation']);
+    if (where !== undefined) row('Where', textList(listOf(where), true));
+    var when = pick(g, ['when', 'available', 'availability', 'whenAvailable']);
+    if (when !== undefined) row('When', textList(listOf(when), false));
+    var how = pick(g, ['how', 'access', 'method']);
+    if (how !== undefined) row('How', textList(listOf(how), false));
+
+    var ver = g.verified;
+    var vEl = el('span', { class: 'pill ' + (ver === true ? 'pill-ok' : ver === false ? 'pill-warn' : 'pill-muted'),
+      text: ver === true ? 'Verified in a lab' : ver === false ? 'Not verified (documented source only)' : 'Unknown' });
+    row('Verified', vEl);
+
+    var src = pick(g, ['source', 'sources', 'reference', 'references']);
+    if (src !== undefined) {
+      var ul = el('ul');
+      listOf(src).forEach(function (s) {
+        var li = el('li');
+        if (/^https?:\/\//i.test(s)) li.appendChild(el('a', { href: s, target: '_blank', rel: 'noopener noreferrer', text: s }));
+        else li.appendChild(document.createTextNode(s));
+        ul.appendChild(li);
+      });
+      row('Source', ul);
+    }
+    body.appendChild(dl);
+    var notes = pick(g, ['notes', 'note', 'details']);
+    if (notes !== undefined) body.appendChild(el('p', { class: 'notes', text: listOf(notes).join(' ') }));
+  }
+
+  function textList(items, code) {
+    if (items.length === 1 && !code) return document.createTextNode(items[0]);
+    var ul = el('ul');
+    items.forEach(function (t) { ul.appendChild(el('li', null, [code ? el('code', { text: t }) : t])); });
+    return ul;
+  }
+
+  // ------------------------------------------------------------------ tailer + files
+
+  function applyTailer(t) {
+    if (!isObj(t)) return;
+    app.tailer = t;
+    var state = str(t.state).toLowerCase() || 'unknown';
+    var pill = $('tailer-pill');
+    pill.setAttribute('data-tailer', state);
+    var label = 'Tailer: ' + (state === 'connected' ? 'connected' : state);
+    if (state === 'connected' && t.node) label += ' to ' + t.node;
+    pill.textContent = label;
+    pill.title = t.reason ? str(t.reason) : label;
+    var bad = state === 'unavailable' || state === 'error' || state === 'disconnected';
+    $('tailer-alert').hidden = !bad;
+    $('tailer-reason').textContent = bad ? (t.reason ? str(t.reason) : 'No reason reported.') + (t.node ? ' (node ' + t.node + ')' : '') : '';
+    if (app.lastAnnounced.tailer !== null && app.lastAnnounced.tailer !== state) {
+      announce(bad ? 'Live logs unavailable: ' + str(t.reason) : 'Log tailer ' + state + '.');
+    }
+    app.lastAnnounced.tailer = state;
+  }
+
+  function applyFiles(files) {
+    var changed = false;
+    files.forEach(function (f) {
+      var p = isObj(f) ? f.path : f;
+      if (p && app.files.indexOf(String(p)) < 0) { app.files.push(String(p)); changed = true; }
+    });
+    if (changed) renderFileOptions();
+  }
+
+  function renderFileOptions() {
+    var sel = $('file-filter'), cur = sel.value;
+    var list = app.files.slice().sort(function (a, b) { return basename(a).localeCompare(basename(b)); });
+    sel.textContent = '';
+    sel.appendChild(el('option', { value: '', text: 'All files (' + list.length + ')' }));
+    list.forEach(function (p) { sel.appendChild(el('option', { value: p, title: p, text: basename(p) || p })); });
+    sel.value = list.indexOf(cur) >= 0 ? cur : '';
+    if (sel.value !== cur) { app.filter.file = ''; renderChips(); rerenderLogs(); }
+  }
+
+  // ------------------------------------------------------------------ logs
+
+  function normLevel(l, text) {
+    var k = str(l).toLowerCase();
+    if (k === 'error' || k === 'err' || k === 'fatal' || k === 'critical') return 'error';
+    if (k === 'warning' || k === 'warn') return 'warning';
+    if (k) return 'info';
+    if (/\b(error|exception|failed|fatal)\b/i.test(text)) return 'error';
+    if (/\bwarn(ing)?\b/i.test(text)) return 'warning';
+    return 'info';
+  }
+
+  function ingestLines(raw) {
+    raw = arr(raw);
+    if (!raw.length) return;
+    // a back-end restart resets seq numbers; detect and start over
+    var minSeq = Infinity;
+    raw.forEach(function (l) { if (isObj(l) && typeof l.seq === 'number' && l.seq < minSeq) minSeq = l.seq; });
+    if (minSeq !== Infinity && minSeq < app.lastSeq && (minSeq <= 1 || app.lastSeq - minSeq > 5000)) resetLogs();
+    var fresh = [];
+    var newFile = false;
+    raw.forEach(function (l) {
+      if (!isObj(l)) return;
+      var seq = typeof l.seq === 'number' ? l.seq : Number(l.seq);
+      if (!isNaN(seq)) {
+        if (seq <= app.lastSeq) return;
+        app.lastSeq = seq;
+      }
+      var text = str(l.text !== undefined ? l.text : l.message);
+      var line = { seq: seq, time: str(l.time), t: parseTime(l.time), file: str(l.file), level: normLevel(l.level, text), text: text, lc: null };
+      if (line.file && app.files.indexOf(line.file) < 0) { app.files.push(line.file); newFile = true; }
+      app.lines.push(line);
+      app.counts.all++;
+      if (line.level !== 'info') app.counts[line.level]++;
+      fresh.push(line);
+    });
+    if (!fresh.length) return;
+    if (app.lines.length > MAX_STORED_LINES) {
+      app.lines.splice(0, app.lines.length - MAX_STORED_LINES + 1000);
+      recount();
+    }
+    if (newFile) renderFileOptions();
+    renderCounts();
+    appendLogs(fresh);
+  }
+
+  function resetLogs() {
+    app.lines = [];
+    app.lastSeq = 0;
+    recount();
+    rerenderLogs();
+  }
+
+  function recount() {
+    var c = { all: 0, warning: 0, error: 0 };
+    app.lines.forEach(function (l) { c.all++; if (l.level !== 'info') c[l.level]++; });
+    app.counts = c;
+  }
+
+  function renderCounts() {
+    ['all', 'warning', 'error'].forEach(function (k) {
+      $('cnt-' + k).textContent = app.counts[k].toLocaleString();
+      var badge = $('cnt-' + k).parentElement;
+      badge.setAttribute('data-nonzero', String(app.counts[k] > 0));
+    });
+    var btns = $('level-filter').querySelectorAll('button');
+    Array.prototype.forEach.call(btns, function (b) {
+      var lv = b.getAttribute('data-level');
+      var n = lv === 'all' ? app.counts.all : lv === 'warning' ? app.counts.warning + app.counts.error : app.counts.error;
+      var base = lv === 'all' ? 'All' : lv === 'warning' ? 'Warnings+' : 'Errors';
+      b.textContent = base + ' ' + n.toLocaleString();
+      b.setAttribute('aria-label', (lv === 'warning' ? 'Warnings and errors' : base) + ', ' + n + ' lines');
+    });
+  }
+
+  function lineMatches(l, win) {
+    var f = app.filter;
+    if (f.level === 'error' && l.level !== 'error') return false;
+    if (f.level === 'warning' && l.level === 'info') return false;
+    if (f.file && l.file !== f.file) return false;
+    if (win) {
+      if (isNaN(l.t) || l.t < win.start || l.t > win.end) return false;
+    }
+    if (f.q) {
+      if (l.lc === null) l.lc = l.text.toLowerCase();
+      if (l.lc.indexOf(f.q) < 0 && l.file.toLowerCase().indexOf(f.q) < 0) return false;
+    }
+    return true;
+  }
+
+  function buildLine(l) {
+    var row = document.createElement('div');
+    row.className = 'll l-' + l.level;
+    var ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.textContent = isNaN(l.t) ? l.time.slice(0, 12) : fmtClock(l.t);
+    if (l.time) ts.title = l.time;
+    var lv = document.createElement('span');
+    lv.className = 'lv';
+    lv.textContent = l.level === 'error' ? 'ERR' : l.level === 'warning' ? 'WRN' : '';
+    var fn = document.createElement('span');
+    fn.className = 'fn';
+    fn.textContent = basename(l.file);
+    fn.title = l.file;
+    var tx = document.createElement('span');
+    tx.className = 'tx';
+    highlightInto(tx, l.text, app.filter.q);
+    row.appendChild(ts); row.appendChild(lv); row.appendChild(fn); row.appendChild(tx);
+    return row;
+  }
+
+  function highlightInto(node, text, q) {
+    if (!q) { node.textContent = text; return; }
+    var lc = text.toLowerCase(), pos = 0, i;
+    var guard = 0;
+    while ((i = lc.indexOf(q, pos)) >= 0 && guard++ < 200) {
+      if (i > pos) node.appendChild(document.createTextNode(text.slice(pos, i)));
+      var mk = document.createElement('mark');
+      mk.textContent = text.slice(i, i + q.length);
+      node.appendChild(mk);
+      pos = i + q.length;
+    }
+    if (pos < text.length) node.appendChild(document.createTextNode(text.slice(pos)));
+  }
+
+  function rerenderLogs() {
+    var view = $('log-view');
+    var win = stepWindow();
+    var matched = [];
+    for (var i = app.lines.length - 1; i >= 0 && matched.length < MAX_RENDERED_LINES; i--) {
+      if (lineMatches(app.lines[i], win)) matched.push(app.lines[i]);
+    }
+    matched.reverse();
+    var frag = document.createDocumentFragment();
+    matched.forEach(function (l) { frag.appendChild(buildLine(l)); });
+    view.textContent = '';
+    view.appendChild(frag);
+    app.rendered = matched.length;
+    app.newWhilePaused = 0;
+    updateEmpty();
+    updateLogStatus();
+    if (app.follow) view.scrollTop = view.scrollHeight;
+    updateNewLines();
+  }
+
+  function appendLogs(fresh) {
+    var view = $('log-view');
+    var win = stepWindow();
+    var frag = document.createDocumentFragment(), added = 0;
+    fresh.forEach(function (l) { if (lineMatches(l, win)) { frag.appendChild(buildLine(l)); added++; } });
+    if (!added) { updateLogStatus(); return; }
+    var empty = view.querySelector('.log-empty');
+    if (empty) empty.remove();
+    view.appendChild(frag);
+    app.rendered += added;
+    var excess = app.rendered - MAX_RENDERED_LINES;
+    if (excess > 0) {
+      var before = view.scrollHeight;
+      for (var i = 0; i < excess && view.firstChild; i++) view.removeChild(view.firstChild);
+      app.rendered -= excess;
+      if (!app.follow) view.scrollTop -= (before - view.scrollHeight); // keep the reader's place
+    }
+    if (app.follow) view.scrollTop = view.scrollHeight;
+    else app.newWhilePaused += added;
+    updateLogStatus();
+    updateNewLines();
+  }
+
+  function updateEmpty() {
+    var view = $('log-view');
+    if (app.rendered) return;
+    var msg;
+    if (!app.lines.length) {
+      var t = app.tailer && str(app.tailer.state).toLowerCase();
+      msg = t === 'unavailable' ? 'No log lines: the log tailer cannot reach the seed node (see above).' : 'Waiting for log lines\u2026';
+    } else {
+      msg = 'No lines match the current filters.';
+    }
+    view.appendChild(el('div', { class: 'log-empty', text: msg }));
+  }
+
+  function updateLogStatus() {
+    var parts = [];
+    var filtered = app.filter.level !== 'all' || app.filter.q || app.filter.file || app.filter.stepKey;
+    parts.push('Showing ' + app.rendered.toLocaleString() + (filtered ? ' matching' : '') + ' of ' + app.lines.length.toLocaleString() + ' lines');
+    if (app.rendered >= MAX_RENDERED_LINES) parts.push('newest ' + MAX_RENDERED_LINES.toLocaleString() + ' rendered; export for the full log');
+    $('log-status').textContent = parts.join(' \u00b7 ');
+  }
+
+  function updateNewLines() {
+    var b = $('new-lines');
+    if (app.follow || !app.newWhilePaused) { b.hidden = true; return; }
+    b.hidden = false;
+    b.textContent = app.newWhilePaused.toLocaleString() + ' new line' + (app.newWhilePaused === 1 ? '' : 's') + ' \u2193';
+  }
+
+  function setFollow(on) {
+    if (app.follow === on) return;
+    app.follow = on;
+    var b = $('follow-btn');
+    b.setAttribute('aria-pressed', String(on));
+    $('follow-label').textContent = on ? 'Following' : 'Paused';
+    b.title = on ? 'Auto-scroll is on. Scroll up or click to pause.' : 'Auto-scroll is paused. Click to follow the newest lines.';
+    if (on) {
+      app.newWhilePaused = 0;
+      var v = $('log-view');
+      v.scrollTop = v.scrollHeight;
+    }
+    updateNewLines();
+  }
+
+  function renderChips() {
+    var host = $('filter-chips');
+    host.textContent = '';
+    function chip(text, title, onRemove) {
+      var b = el('button', { type: 'button', 'aria-label': 'Remove filter: ' + text, title: 'Remove filter' });
+      b.innerHTML = ICON.close;
+      b.addEventListener('click', onRemove);
+      host.appendChild(el('span', { class: 'filter-chip', title: title }, [el('span', { class: 'chip-text', text: text }), b]));
+    }
+    var win = stepWindow();
+    if (win) {
+      var range = fmtClock(win.rawStart) + ' \u2013 ' + (isNaN(win.rawEnd) ? 'now' : fmtClock(win.rawEnd));
+      chip('Step: ' + win.name + ' (' + range + ')', 'Lines logged while this step ran (\u00b11 s). Log times are read as written on the node.', function () {
+        clearStepFilter();
+        var lv = $('log-view'); lv.focus();
+      });
+    }
+    if (app.filter.file) {
+      chip('File: ' + basename(app.filter.file), app.filter.file, function () {
+        app.filter.file = ''; $('file-filter').value = ''; renderChips(); rerenderLogs(); $('file-filter').focus();
+      });
+    }
+    if (app.filter.q) {
+      chip('Text: "' + $('log-search').value + '"', 'Text search', function () {
+        $('log-search').value = ''; app.filter.q = ''; renderChips(); rerenderLogs(); $('log-search').focus();
+      });
+    }
+  }
+
+  // ------------------------------------------------------------------ export
+
+  function doExport() {
+    var btn = $('export-btn');
+    btn.disabled = true;
+    var cluster = (app.state && app.state.cluster) || cfgCluster(app.config) || 'cluster';
+    var stamp = new Date().toISOString().replace(/[:]/g, '').replace(/\..+$/, '') + 'Z';
+    var name = 'azl-sonar-' + String(cluster).replace(/[^\w.-]+/g, '_') + '-' + stamp + '.json';
+    var p = DEMO ? Promise.resolve(demoExport()) : fetch('/api/export', { cache: 'no-store', credentials: 'same-origin' }).then(function (r) {
+      if (!r.ok) throw new Error('/api/export returned HTTP ' + r.status);
+      return r.blob();
+    });
+    p.then(function (data) {
+      var blob = data instanceof Blob ? data : new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      var url = URL.createObjectURL(blob);
+      var a = el('a', { href: url, download: name });
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+      setError('export', null);
+      announce('Export downloaded as ' + name + '.');
+    }).catch(function (e) {
+      setError('export', 'Export failed: ' + e.message);
+    }).then(function () { btn.disabled = false; });
+  }
+
+  // ------------------------------------------------------------------ wiring
+
+  function wire() {
+    $('theme-btn').addEventListener('click', toggleTheme);
+    if (mql) {
+      var onChange = function () { if (!storedTheme()) applyTheme(null); };
+      if (mql.addEventListener) mql.addEventListener('change', onChange); else if (mql.addListener) mql.addListener(onChange);
+    }
+    $('export-btn').addEventListener('click', doExport);
+    $('banner-close').addEventListener('click', function () {
+      app.bannerDismissed = Array.from(app.errors.values()).join('|');
+      $('banner').hidden = true;
+    });
+
+    $('jump-current').addEventListener('click', function () {
+      if (!app.currentKey) return;
+      revealKey(app.currentKey);
+      renderTree(false);
+      scrollToKey(app.currentKey, true);
+    });
+    $('collapse-all').addEventListener('click', function () {
+      app.stepIndex.forEach(function (v, k) { if (arr(v.node.children).length) app.expanded.set(k, false); });
+      renderTree(false);
+    });
+
+    var lf = $('level-filter');
+    lf.addEventListener('click', function (e) {
+      var b = e.target.closest('button[data-level]');
+      if (!b) return;
+      app.filter.level = b.getAttribute('data-level');
+      Array.prototype.forEach.call(lf.querySelectorAll('button'), function (x) { x.setAttribute('aria-pressed', String(x === b)); });
+      rerenderLogs();
+    });
+
+    var search = $('log-search'), deb = null;
+    search.addEventListener('input', function () {
+      clearTimeout(deb);
+      deb = setTimeout(function () {
+        app.filter.q = search.value.trim().toLowerCase();
+        renderChips();
+        rerenderLogs();
+      }, 160);
+    });
+    search.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { search.value = ''; app.filter.q = ''; renderChips(); rerenderLogs(); }
+    });
+
+    $('file-filter').addEventListener('change', function (e) {
+      app.filter.file = e.target.value;
+      renderChips();
+      rerenderLogs();
+    });
+
+    $('follow-btn').addEventListener('click', function () { setFollow(!app.follow); });
+    $('new-lines').addEventListener('click', function () { setFollow(true); });
+
+    var view = $('log-view'), lastTop = 0;
+    view.addEventListener('scroll', function () {
+      var atBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 24;
+      if (atBottom && !app.follow && view.scrollTop > lastTop) setFollow(true); // user scrolled back down
+      else if (!atBottom && app.follow && view.scrollTop < lastTop) setFollow(false); // user scrolled up
+      lastTop = view.scrollTop;
+    }, { passive: true });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        var t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+        e.preventDefault();
+        search.focus();
+        search.select();
+      }
+    });
+
+    setInterval(function () { tickTimers(); tickHeader(); }, 1000);
+  }
+
+  function start() {
+    wire();
+    renderCounts();
+    renderTree(false);
+    rerenderLogs();
+    if (DEMO) { startDemo(); return; }
+    setConn('connecting');
+    Promise.allSettled([loadConfig(), loadGuidance(), loadState(), loadLogs()]).then(function (res) {
+      var ok = res.some(function (r) { return r.status === 'fulfilled'; });
+      if (!ok) setConn('offline');
+      connectSSE();
+    });
+  }
+
+  // ------------------------------------------------------------------ demo mode (?demo=1): built-in sample data, no API calls
+
+  function startDemo() {
+    $('demo-badge').hidden = false;
+    setConn('demo');
+    var now = Date.now();
+    function iso(msAgo) { return new Date(now - msAgo).toISOString(); }
+    function step(id, name, status, startAgo, endAgo, children, errors, description) {
+      var st = startAgo === null ? null : iso(startAgo), en = endAgo === null ? null : iso(endAgo);
+      return { id: id, name: name, description: description || '', status: status, start: st, end: en,
+        durationSeconds: st && en ? (startAgo - endAgo) / 1000 : (st ? startAgo / 1000 : null),
+        errors: errors || [], children: children || [] };
+    }
+    var M = 60000;
+    var validation = [
+      step('1', 'Validate deployment prerequisites', 'success', 58 * M, 41 * M, [
+        step('1.1', 'Validate hardware', 'success', 58 * M, 56 * M + 42000),
+        step('1.2', 'Validate network', 'success', 56 * M + 40000, 52 * M + 10000),
+        step('1.3', 'Validate external connectivity', 'success', 52 * M + 8000, 50 * M + 30000),
+        step('1.4', 'Validate storage', 'success', 50 * M + 28000, 47 * M),
+        step('1.5', 'Validate Azure Arc registration', 'success', 46 * M + 58000, 44 * M + 20000),
+        step('1.6', 'Validate memory and processor', 'success', 44 * M + 18000, 41 * M)
+      ])
+    ];
+    var deployment = [
+      step('2', 'Deploy Azure Local', 'running', 36 * M, null, [
+        step('2.1', 'Run pre-deployment checks', 'success', 36 * M, 33 * M + 12000),
+        step('2.2', 'Configure security baseline', 'success', 33 * M + 10000, 29 * M + 52000),
+        step('2.3', 'Deploy Arc infrastructure components', 'success', 29 * M + 50000, 22 * M + 4000),
+        step('2.4', 'Configure network intents', 'skipped', null, null, null, null, 'Already applied by provisioning'),
+        step('2.5', 'Create cluster', 'running', 22 * M, null, [
+          step('2.5.1', 'Install failover clustering features', 'success', 22 * M, 18 * M + 31000),
+          step('2.5.2', 'Configure Storage Spaces Direct', 'running', 18 * M + 29000, null),
+          step('2.5.3', 'Validate cluster', 'notstarted', null, null)
+        ]),
+        step('2.6', 'Deploy Arc resource bridge', 'notstarted', null, null),
+        step('2.7', 'Install Azure Local extensions', 'notstarted', null, null)
+      ])
+    ];
+    var state = {
+      cluster: 'clus01', mode: 'Deploy', provisioningState: 'Succeeded', phase: 'deployment',
+      validation: { status: 'Success', tree: validation, counts: {} },
+      deployment: { status: 'InProgress', tree: deployment, counts: {} },
+      nodes: [
+        { name: 'node01', arcStatus: 'Connected', lastStatusChange: iso(80 * M) },
+        { name: 'node02', arcStatus: 'Connected', lastStatusChange: iso(79 * M) }
+      ],
+      current: { phase: 'deployment', stepPath: ['2', '2.5', '2.5.2'], stepName: 'Configure Storage Spaces Direct' },
+      polledAt: iso(4000)
+    };
+    applyConfig({ cluster: 'clus01', resourceGroup: 'rg-example-azl', identityModel: 'LocalIdentity', pollSeconds: 20,
+      nodes: [{ name: 'node01', seed: true }, { name: 'node02' }], logPaths: ['C:\\CloudDeployment\\Logs', 'C:\\MASLogs'] });
+    app.guidance = {
+      identityModel: 'LocalIdentity',
+      phases: {
+        provisioning: { account: 'Local administrator on each node', where: ['C:\\MASLogs'], when: 'After the operating system install finishes', source: 'Sample data (demo mode)', verified: false },
+        validation: { account: 'Deployment user on the seed node', where: ['C:\\CloudDeployment\\Logs'], when: 'From the start of Validate, on the seed node first', source: 'Sample data (demo mode)', verified: false },
+        deployment: { account: 'Deployment user on the seed node', where: ['C:\\CloudDeployment\\Logs', 'C:\\MASLogs'], when: 'Throughout Deploy; files rotate as steps change', source: 'Sample data (demo mode)', verified: false, notes: 'Demo guidance only. The real card reads data/phase-guidance.json through /api/guidance.' }
+      }
+    };
+    applyState(state);
+    applyTailer({ state: 'connected', reason: '', node: 'node01' });
+    var f1 = 'C:\\CloudDeployment\\Logs\\CloudDeployment.2026-10-10.1.log', f2 = 'C:\\MASLogs\\Lcm.log';
+    applyFiles([{ path: f1, size: 0, offset: 0 }, { path: f2, size: 0, offset: 0 }]);
+    var seq = 0;
+    function line(msAgo, file, level, text) { return { seq: ++seq, time: iso(msAgo), file: file, level: level, text: text }; }
+    ingestLines([
+      line(46 * M, f2, 'info', 'Validate Azure Arc registration: node01 Connected, node02 Connected.'),
+      line(41 * M, f2, 'info', 'Validation completed: 6 of 6 steps succeeded.'),
+      line(36 * M, f1, 'info', 'Action plan "Deploy" started on node01.'),
+      line(33 * M, f1, 'info', 'Pre-deployment checks passed.'),
+      line(30 * M, f1, 'warning', 'WARNING: Time source on node02 differs from the configured NTP server by 2 s; within tolerance.'),
+      line(22 * M + 4000, f1, 'info', 'Arc infrastructure components deployed.'),
+      line(22 * M, f1, 'info', 'Step "Create cluster" started.'),
+      line(18 * M + 31000, f1, 'info', 'Failover clustering features installed on 2 nodes.'),
+      line(18 * M + 29000, f1, 'info', 'Step "Configure Storage Spaces Direct" started.'),
+      line(15 * M, f1, 'info', 'Enabling Storage Spaces Direct on cluster clus01.'),
+      line(12 * M, f1, 'error', 'Attempt 1 failed: Get-PhysicalDisk timed out on node02. Retrying in 30 s (transient).'),
+      line(11 * M + 30000, f1, 'info', 'Attempt 2: physical disk inventory complete, 8 eligible disks.'),
+      line(6 * M, f1, 'warning', 'Warning: cache device count differs between nodes; using capacity-only tier.'),
+      line(2 * M, f1, 'info', 'Creating storage pool "SU1_Pool".')
+    ]);
+    var msgs = [
+      ['info', 'Storage pool health: Healthy.'],
+      ['info', 'Waiting for virtual disk "Infrastructure_1" to come online.'],
+      ['warning', 'Warning: storage job progress unchanged for 60 s; continuing to wait.'],
+      ['info', 'Storage job progress 42%.'],
+      ['info', 'Storage job progress 57%.'],
+      ['error', 'Retryable error: cluster resource "Infrastructure_1" is pending; will retry.'],
+      ['info', 'Storage job progress 71%.']
+    ];
+    var mi = 0;
+    setInterval(function () {
+      var m = msgs[mi++ % msgs.length];
+      ingestLines([{ seq: ++seq, time: new Date().toISOString(), file: f1, level: m[0], text: m[1] }]);
+    }, 2500);
+    setInterval(function () {
+      state.polledAt = new Date().toISOString();
+      applyState(state);
+    }, 20000);
+    app.demoExport = function () { return { config: app.config, timeline: [state], logs: app.lines.map(function (l) { return { seq: l.seq, time: l.time, file: l.file, level: l.level, text: l.text }; }) }; };
+  }
+
+  function demoExport() { return app.demoExport ? app.demoExport() : {}; }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();
