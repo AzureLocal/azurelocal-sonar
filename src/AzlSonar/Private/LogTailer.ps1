@@ -285,6 +285,8 @@ foreach ($root in $Paths) {
     $items = @(Get-ChildItem -LiteralPath $root -Recurse -Depth $RecurseDepth -File -Force -ErrorAction SilentlyContinue)
     foreach ($item in $items) {
         if (-not (Test-AzlSonarNameMatch -Name $item.Name -Include $Include -Exclude $Exclude)) { continue }
+        # NTFS does not update a directory entry's size and write time while a writer holds the file open: re-read them.
+        try { $item.Refresh() } catch { }
         $seen[$item.FullName] = $true
         if ($item.LastWriteTimeUtc -ge $windowStart) { $candidates.Add($item) }
     }
@@ -322,6 +324,7 @@ foreach ($item in $active) {
         try {
             $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
             $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
+            if ([long]$stream.Length -gt $size) { $size = [long]$stream.Length }
             if (-not $encoding) {
                 $head = New-Object byte[] ([int][Math]::Min([long]4, $size))
                 $null = $stream.Read($head, 0, $head.Length)
