@@ -45,6 +45,7 @@ function Initialize-AzlSonarSharedState {
             Tailer        = $null
             TailerJson    = 'null'
             TailerVersion = [long]0
+            Redact        = @()   # exact secret values to mask in node text (never serialized)
         })
 }
 
@@ -368,6 +369,12 @@ function Invoke-AzlSonarHttpRequest {
     $request = $Context.Request
     $response = $Context.Response
     try {
+        # A 'localhost' prefix matches the Host header, not the socket: refuse anything that is not from this machine.
+        $remote = $request.RemoteEndPoint
+        if ($null -eq $remote -or -not [System.Net.IPAddress]::IsLoopback($remote.Address)) {
+            Send-AzlSonarHttpResponse -Response $response -StatusCode 403 -ContentType 'text/plain; charset=utf-8' -Body 'AzL Sonar only answers requests from this machine.'
+            return
+        }
         if ($request.HttpMethod -ne 'GET') {
             Send-AzlSonarHttpResponse -Response $response -StatusCode 405 -ContentType 'text/plain; charset=utf-8' -Body 'Only GET is supported.' -Header @{ Allow = 'GET' }
             return
@@ -469,6 +476,7 @@ function Start-AzlSonarServer {
     $logCredential = Resolve-AzlSonarCredential -Config $config -Credential $Credential
 
     $shared = Initialize-AzlSonarSharedState
+    if ($logCredential) { $shared.Redact = @($logCredential.GetNetworkCredential().Password) | Where-Object { $_ } }
     $initial = Get-AzlSonarInitialState -Config $config
     $shared.State = $initial
     $shared.StateJson = ConvertTo-AzlSonarJson $initial

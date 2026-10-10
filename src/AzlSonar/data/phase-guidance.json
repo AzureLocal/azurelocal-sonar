@@ -36,8 +36,10 @@
       "identityModel": "LocalIdentity",
       "account": "The deployment local admin (localAdminUserName): non-built-in, with the same credentials on every node. Learn documents no separate LCM user for Local Identity.",
       "logPaths": [
-        "C:\\CloudDeployment\\Logs",
-        "C:\\MASLogs"
+        "C:\\CloudContent\\MASLogs",
+        "C:\\MASLogs",
+        "C:\\Observability",
+        "C:\\CloudDeployment\\Logs (appears later in the run)"
       ],
       "available": "Environment Checker output is written to C:\\CloudDeployment\\Logs when validation runs as part of deployment, and each run overwrites the file. Standalone checker runs write to $HOME\\.AzStackHci instead. Learn documents C:\\MASLogs\\LcmEceLiteLogs for upgrade validation only; for deployment it is unverified.",
       "access": "WinRM to the seed node by IP: TrustedHosts or HTTPS 5986, -Credential, and an account in local Administrators. CredSSP is not needed.",
@@ -49,8 +51,10 @@
       "identityModel": "ActiveDirectory",
       "account": "The local administrator (the same on every node). Learn does not say whether the deployment (LCM) user is a local admin during validation, unless the nodes were joined to the domain before deployment and it was added to Administrators.",
       "logPaths": [
-        "C:\\CloudDeployment\\Logs",
-        "C:\\MASLogs"
+        "C:\\CloudContent\\MASLogs",
+        "C:\\MASLogs",
+        "C:\\Observability",
+        "C:\\CloudDeployment\\Logs (appears later in the run)"
       ],
       "available": "Environment Checker output is written to C:\\CloudDeployment\\Logs when validation runs as part of deployment, and each run overwrites the file. C:\\MASLogs\\LcmEceLiteLogs is documented for upgrade validation only.",
       "access": "Nodes are not yet joined to the domain unless that was done before deployment, so use WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential.",
@@ -62,26 +66,32 @@
       "identityModel": "LocalIdentity",
       "account": "The deployment local admin (localAdminUserName), with the same credentials on every node.",
       "logPaths": [
-        "C:\\CloudDeployment\\Logs",
-        "C:\\MASLogs"
+        "C:\\CloudContent\\MASLogs",
+        "C:\\MASLogs",
+        "C:\\Observability",
+        "C:\\CloudDeployment\\Logs (appears later in the run)"
       ],
       "available": "During and after cloud deployment on the seed node (watch progress from the seed machine). Learn does not name the deployment log files or describe how they rotate. The limited and full Environment Checker runs happen first.",
       "access": "WinRM to the seed node by IP: TrustedHosts or HTTPS 5986, -Credential, and an account in local Administrators. Fallbacks (both are Azure writes, so opt-in only): Arc run command (preview, output capped at 4 KB, needs runCommands/write) or Arc SSH (needs Owner or Contributor and sshd running on the node).",
       "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-local-identity-with-key-vault-template?view=azloc-2609",
-      "verified": false
+      "verified": true,
+      "observed": "Seen live 10 Oct 2026 on a Local Identity Deploy pass: logs written to C:\\CloudContent\\MASLogs, C:\\MASLogs and C:\\Observability; C:\\CloudDeployment\\Logs did not exist yet ~10 min in."
     },
     {
       "phase": "deployment",
       "identityModel": "ActiveDirectory",
       "account": "The local administrator. During cloud deployment the LCM (deployment) user is added to local Administrators on the nodes, and the nodes are joined to the domain.",
       "logPaths": [
-        "C:\\CloudDeployment\\Logs",
-        "C:\\MASLogs"
+        "C:\\CloudContent\\MASLogs",
+        "C:\\MASLogs",
+        "C:\\Observability",
+        "C:\\CloudDeployment\\Logs (appears later in the run)"
       ],
       "available": "During and after cloud deployment on the seed node. Learn does not name the deployment log files or describe how they rotate.",
       "access": "Use WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential until the domain join completes. After that, Kerberos by host name with the LCM user works without TrustedHosts.",
       "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-prep-active-directory?view=azloc-2609#considerations-for-large-scale-deployments",
-      "verified": false
+      "verified": false,
+      "observed": "Seen live 10 Oct 2026 on a Local Identity Deploy pass: logs written to C:\\CloudContent\\MASLogs, C:\\MASLogs and C:\\Observability; C:\\CloudDeployment\\Logs did not exist yet ~10 min in."
     },
     {
       "phase": "post-deployment",

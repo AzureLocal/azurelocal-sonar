@@ -412,6 +412,80 @@ function Invoke-AzlSonarLogPoll {
     return Invoke-Command -Session $Session -ScriptBlock (Get-AzlSonarRemoteTailScript) -ArgumentList $arguments -ErrorAction Stop
 }
 
+function Invoke-AzlSonarLogPollSsh {
+    <#
+    .SYNOPSIS
+        Runs one tail poll on the seed node over SSH (Posh-SSH session) and returns its result.
+    .DESCRIPTION
+        For nodes that answer SSH but not WinRM from the workstation. The same read-only tail script is streamed to
+        'powershell -NoProfile -NonInteractive -Command -' on the node through stdin (no command-line length limit, no
+        file written on the node); the arguments travel with it as base64 JSON and the result comes back as JSON.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)]
+        [object]$SshSession,
+
+        [Parameter(Mandatory)]
+        [object]$Config,
+
+        [AllowNull()]
+        [hashtable]$FileState,
+
+        [bool]$FirstRun
+    )
+
+    if ($null -eq $FileState) { $FileState = @{} }
+    $logs = $Config.logs
+    $arguments = [ordered]@{
+        Paths               = [string[]]$logs.paths
+        Include             = [string[]]$logs.include
+        Exclude             = [string[]]$logs.exclude
+        RecurseDepth        = [int]$logs.recurseDepth
+        ActiveWindowMinutes = [int]$logs.activeWindowMinutes
+        FileState           = $FileState
+        MaxLines            = [int]$logs.maxLinesPerPoll
+        FirstRun            = $FirstRun
+        MaxFiles            = [int]$script:AzlSonarTail.MaxFiles
+        MaxBytesPerFile     = [int]$script:AzlSonarTail.MaxBytesPerFile
+        InitialTailBytes    = [long]$script:AzlSonarTail.InitialTailBytes
+    }
+    $toB64 = { param([string]$s) [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($s)) }
+    $scriptB64 = & $toB64 (Get-AzlSonarRemoteTailScript).ToString()
+    $argsB64 = & $toB64 ($arguments | ConvertTo-Json -Depth 6 -Compress)
+    # One statement per line: 'powershell -Command -' runs stdin line by line (Windows PowerShell 5.1 on the node).
+    $stdin = @(
+        '$ErrorActionPreference = ''Stop''; $ProgressPreference = ''SilentlyContinue'''
+        "`$u = [System.Text.Encoding]::UTF8; `$sb = [scriptblock]::Create(`$u.GetString([Convert]::FromBase64String('$scriptB64'))); `$a = `$u.GetString([Convert]::FromBase64String('$argsB64')) | ConvertFrom-Json"
+        '$fs = @{}; if ($a.FileState) { foreach ($p in $a.FileState.PSObject.Properties) { $h = @{}; foreach ($q in $p.Value.PSObject.Properties) { $h[$q.Name] = $q.Value }; $fs[$p.Name] = $h } }'
+        '$r = & $sb ([string[]]$a.Paths) ([string[]]$a.Include) ([string[]]$a.Exclude) ([int]$a.RecurseDepth) ([int]$a.ActiveWindowMinutes) $fs ([int]$a.MaxLines) ([bool]$a.FirstRun) ([int]$a.MaxFiles) ([int]$a.MaxBytesPerFile) ([long]$a.InitialTailBytes)'
+        '[Console]::Out.Write(''<<AZLSONAR>>'' + ($r | ConvertTo-Json -Depth 6 -Compress) + ''<<END>>'')'
+        'exit'
+    ) -join "`n"
+
+    $client = $SshSession.Session
+    $command = $client.CreateCommand('powershell -NoProfile -NonInteractive -Command -')
+    $command.CommandTimeout = [TimeSpan]::FromMilliseconds($script:AzlSonarTail.SessionOperationMs)
+    $async = $command.BeginExecute()
+    $stdinStream = $command.CreateInputStream()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($stdin + "`n")
+        $stdinStream.Write($bytes, 0, $bytes.Length)
+    }
+    finally { $stdinStream.Dispose() }
+    $null = $command.EndExecute($async)
+    $text = [string]$command.Result
+    $start = $text.IndexOf('<<AZLSONAR>>')
+    $end = $text.LastIndexOf('<<END>>')
+    if ($start -lt 0 -or $end -le $start) {
+        $err = ([string]$command.Error).Trim()
+        throw "The SSH tail poll returned no result (exit $($command.ExitStatus)). $($err.Substring(0, [Math]::Min(400, $err.Length)))"
+    }
+    $json = $text.Substring($start + 12, $end - $start - 12)
+    return ($json | ConvertFrom-Json -AsHashtable)
+}
+
 function ConvertTo-AzlSonarFileState {
     <#
     .SYNOPSIS
@@ -468,7 +542,7 @@ function Add-AzlSonarLogLine {
     [System.Threading.Monitor]::Enter($Shared.Lock)
     try {
         foreach ($item in $items) {
-            $text = [string](Get-AzlSonarMember $item 'text' '')
+            $text = Protect-AzlSonarText -Text ([string](Get-AzlSonarMember $item 'text' '')) -Secret $Shared.Redact
             $Shared.LogSeq = [long]$Shared.LogSeq + 1
             $Shared.Lines.Enqueue([ordered]@{
                     seq   = [long]$Shared.LogSeq
@@ -693,30 +767,56 @@ function Invoke-AzlSonarTailerLoop {
     }
 
     $session = $null
+    $ssh = $null
+    $transport = [string](Get-AzlSonarMember $Config.logs 'transport' 'auto')
     $fileState = @{}
     $firstRun = $true
     try {
         while (-not $Shared.Stop) {
-            if ($null -eq $session -or $session.State -ne 'Opened') {
-                & $status 'connecting' "Opening a PowerShell remoting session to $($seed.name) ($($seed.address))." $null
-                try {
-                    $options = New-PSSessionOption -OpenTimeout $script:AzlSonarTail.SessionOpenMs -OperationTimeout $script:AzlSonarTail.SessionOperationMs -NoMachineProfile
-                    $sessionParameters = @{ ComputerName = $seed.address; SessionOption = $options; Name = 'AzlSonar'; ErrorAction = 'Stop' }
-                    if ($null -ne $Credential) { $sessionParameters.Credential = $Credential }
-                    $session = New-PSSession @sessionParameters
+            if (($null -eq $session -or $session.State -ne 'Opened') -and ($null -eq $ssh -or -not $ssh.Connected)) {
+                $session = $null; $ssh = $null
+                $reasons = [System.Collections.Generic.List[string]]::new()
+                if ($transport -in 'auto', 'winrm') {
+                    & $status 'connecting' "Opening a PowerShell remoting session to $($seed.name) ($($seed.address))." $null
+                    try {
+                        $options = New-PSSessionOption -OpenTimeout $script:AzlSonarTail.SessionOpenMs -OperationTimeout $script:AzlSonarTail.SessionOperationMs -NoMachineProfile
+                        $sessionParameters = @{ ComputerName = $seed.address; SessionOption = $options; Name = 'AzlSonar'; ErrorAction = 'Stop' }
+                        if ($null -ne $Credential) { $sessionParameters.Credential = $Credential }
+                        $session = New-PSSession @sessionParameters
+                    }
+                    catch {
+                        $r = "WinRM: $($_.Exception.Message)"
+                        if ($trust.required -and $trust.trusted -eq $false) { $r += ' ' + $trust.message }
+                        $reasons.Add($r)
+                        $session = $null
+                    }
                 }
-                catch {
-                    $reason = "Cannot open a remoting session to $($seed.name) ($($seed.address)): $($_.Exception.Message)"
-                    if ($trust.required -and $trust.trusted -eq $false) { $reason += ' ' + $trust.message }
-                    & $status 'unavailable' $reason @{ retryInSeconds = $script:AzlSonarTail.RetrySeconds }
-                    $session = $null
+                if ($null -eq $session -and $transport -in 'auto', 'ssh') {
+                    if ($null -eq $Credential) { $reasons.Add('SSH: needs a credential (prompt, -Credential or keyvault).') }
+                    elseif (-not (Get-Module -ListAvailable -Name Posh-SSH)) { $reasons.Add('SSH: the Posh-SSH module is not installed on this workstation (Install-Module Posh-SSH -Scope CurrentUser).') }
+                    else {
+                        & $status 'connecting' "Opening an SSH session to $($seed.name) ($($seed.address))." $null
+                        try {
+                            Import-Module Posh-SSH -ErrorAction Stop
+                            $ssh = New-SSHSession -ComputerName $seed.address -Credential $Credential -AcceptKey -ConnectionTimeout ([int]($script:AzlSonarTail.SessionOpenMs / 1000)) -ErrorAction Stop -WarningAction SilentlyContinue
+                        }
+                        catch { $reasons.Add("SSH: $($_.Exception.Message)"); $ssh = $null }
+                    }
+                }
+                if ($null -eq $session -and $null -eq $ssh) {
+                    & $status 'unavailable' ("Cannot reach the logs on $($seed.name) ($($seed.address)). " + ($reasons -join ' | ')) @{ retryInSeconds = $script:AzlSonarTail.RetrySeconds }
                     Wait-AzlSonarInterval -Shared $Shared -Seconds $script:AzlSonarTail.RetrySeconds
                     continue
                 }
             }
 
             try {
-                $result = Invoke-AzlSonarLogPoll -Session $session -Config $Config -FileState $fileState -FirstRun $firstRun
+                $result = if ($null -ne $session) {
+                    Invoke-AzlSonarLogPoll -Session $session -Config $Config -FileState $fileState -FirstRun $firstRun
+                }
+                else {
+                    Invoke-AzlSonarLogPollSsh -SshSession $ssh -Config $Config -FileState $fileState -FirstRun $firstRun
+                }
                 $firstRun = $false
                 $fileState = ConvertTo-AzlSonarFileState (Get-AzlSonarMember $result 'state')
                 Add-AzlSonarLogLine -Shared $Shared -Line (ConvertTo-AzlSonarArray (Get-AzlSonarMember $result 'lines'))
@@ -733,6 +833,7 @@ function Invoke-AzlSonarTailerLoop {
                 $fileErrors = [string[]](ConvertTo-AzlSonarArray (Get-AzlSonarMember $result 'errors'))
                 $reason = if ($missing.Count -gt 0) { "Not created yet (checked every poll): $($missing -join ', ')" } else { $null }
                 & $status 'connected' $reason @{
+                    transport    = if ($null -ne $session) { 'winrm' } else { 'ssh' }
                     missingPaths = $missing
                     fileErrors   = $fileErrors
                     filesTracked = @($files).Count
@@ -742,7 +843,8 @@ function Invoke-AzlSonarTailerLoop {
             catch {
                 & $status 'unavailable' "Reading the logs on $($seed.name) failed: $($_.Exception.Message)" @{ retryInSeconds = $script:AzlSonarTail.RetrySeconds }
                 if ($null -ne $session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
-                $session = $null
+                if ($null -ne $ssh) { $null = Remove-SSHSession -SessionId $ssh.SessionId -ErrorAction SilentlyContinue }
+                $session = $null; $ssh = $null
                 Wait-AzlSonarInterval -Shared $Shared -Seconds $script:AzlSonarTail.RetrySeconds
                 continue
             }
@@ -751,5 +853,6 @@ function Invoke-AzlSonarTailerLoop {
     }
     finally {
         if ($null -ne $session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+        if ($null -ne $ssh) { $null = Remove-SSHSession -SessionId $ssh.SessionId -ErrorAction SilentlyContinue }
     }
 }

@@ -159,3 +159,33 @@ function Wait-AzlSonarInterval {
         Start-Sleep -Milliseconds 250
     }
 }
+
+function Protect-AzlSonarText {
+    <#
+    .SYNOPSIS
+        Masks secrets in text from a node or from Azure before Sonar stores, serves or exports it.
+    .DESCRIPTION
+        Replaces exact secret values (for example the credential Sonar connected with) and common secret formats:
+        password/pwd/secret/token/key assignments, Bearer tokens, storage AccountKey and SharedAccessSignature/sig values,
+        and connection-string passwords. Read-only: returns the masked text.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [AllowEmptyString()][AllowNull()][string]$Text,
+        [string[]]$Secret = @()
+    )
+    if ([string]::IsNullOrEmpty($Text)) { return [string]$Text }
+    $out = $Text
+    foreach ($s in $Secret) {
+        if (-not [string]::IsNullOrEmpty($s) -and $s.Length -ge 4) { $out = $out.Replace($s, '***') }
+    }
+    $patterns = @(
+        '(?i)(\b(?:password|passwd|pwd|secret|client_?secret|access_?token|refresh_?token|api_?key|accountkey|sharedaccesskey)\b\s*[=:]\s*)("[^"]*"|''[^'']*''|[^\s;,&]+)',
+        '(?i)(\bBearer\s+)[A-Za-z0-9\-\._~\+/]+=*',
+        '(?i)(\b(?:sig|se|skoid|sktid)=)[^&\s"]+',
+        '(?i)(-(?:Password|AsPlainText\s+-Force)\s+)("[^"]*"|''[^'']*''|\S+)'
+    )
+    foreach ($p in $patterns) { $out = [regex]::Replace($out, $p, '${1}***') }
+    return $out
+}

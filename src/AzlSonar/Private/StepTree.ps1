@@ -79,7 +79,7 @@ function ConvertTo-AzlSonarStepNode {
 
     $errors = [System.Collections.Generic.List[string]]::new()
     foreach ($item in (ConvertTo-AzlSonarArray (Get-AzlSonarMember $Step 'exception'))) {
-        $text = [string]$item
+        $text = Protect-AzlSonarText -Text ([string]$item)
         if (-not [string]::IsNullOrWhiteSpace($text)) { $errors.Add($text) }
     }
 
