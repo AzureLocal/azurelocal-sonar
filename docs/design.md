@@ -30,8 +30,10 @@ This is the contract every part of Sonar is built to (plan task S-4). Back end, 
     { "name": "node02", "address": "192.0.2.12", "arcMachineName": "node02" }
   ],
   "logs": {
-    "paths": ["C:\\CloudDeployment\\Logs", "C:\\MASLogs"],
-    "include": ["*.log", "*.txt"],
+    "paths": ["C:\\CloudContent\\MASLogs", "C:\\MASLogs", "C:\\CloudDeployment\\Logs", "C:\\Observability", "C:\\Windows\\System32\\Bootstrap\\Logs"],
+    "include": ["*.log", "*.txt", "*.xml"],
+    "exclude": ["*.etl"],
+    "activeWindowMinutes": 30,
     "maxLinesPerPoll": 500
   },
   "credential": { "source": "prompt" }
