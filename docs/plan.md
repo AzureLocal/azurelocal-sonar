@@ -43,4 +43,4 @@ Status vocabulary: Backlog · In progress · Blocked (say on what) · Done (unve
 - Two nodes provisioned with simplified machine provisioning; edge machine lifecycle seen live: `Creating → AwaitingConnection → Provisioning (onboarding to Arc) → ReadyForOs → InstallingOs (Initialize, DownloadOs, PrepareOs, RebootOs, InstallExtensions, Finalize) → Provisioned`, plus the `jobs/ProvisionOs` step list.
 - Deployment model: Local Identity with Key Vault (no AD). The cluster-operations local admin is a non-built-in account on every node.
 - Arc machine names after provisioning are device IDs, not host names; Sonar must map host name ↔ Arc resource (S-8: read from the edge machine's `ProvisionOs` target, else `arcMachineResourceId`).
-- Second run on 12.2609: the OS installed and the machines connected to Arc, then `InstallExtensions` failed with *Failed to download extension AzureEdgeRemoteSupport: unable to connect to the remote server* (the S-8 failure case).
+- A `ProvisionOs` job can fail after the OS is installed and the machines are connected to Arc (for example at `InstallExtensions`); Sonar must show the failing step and its error inline (the S-8 failure case).

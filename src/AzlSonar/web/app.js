@@ -2078,7 +2078,7 @@
   }
 
   // ?demo=1&route=simplified: three machines on simplified machine provisioning (one provisioned, one installing the
-  // OS, one failed at InstallExtensions with the error seen on a real 12.2609 run). ?demo=1&route=oem: two machines on
+  // OS, one failed at InstallExtensions with an extension download error). ?demo=1&route=oem: two machines on
   // the OEM image route during Arc registration (node01 updating its OS image, in Download; node02 bootstrapping, in
   // ArcConfiguration > ArcRegistration). Step names as the nodes report them (read live 11 Oct 2026). Sample data
   // only; no API calls.

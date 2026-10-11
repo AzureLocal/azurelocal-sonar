@@ -6,9 +6,9 @@ Set-StrictMode -Version Latest
 # The two ways Azure Local machines get ready before the cluster deployment (plan task S-8):
 #  - simplified machine provisioning: edge machines (api 2025-12-01-preview) with their jobs/ProvisionOs. The fixtures in
 #    tests/fixtures are the recorded live responses of the 10 Oct 2026 run (copied from azurelocal-ztp, neutral ids);
-#    job-provisionos-failed.json is derived from them with the InstallExtensions failure seen on the 12.2609 run
-#    ('Failed to download extension AzureEdgeRemoteSupport: unable to connect to the remote server'; the middle of the message and the
-#    error code were not recorded, so both are placeholders).
+#    job-provisionos-failed.json is derived from them with a sample InstallExtensions failure (an extension download
+#    error: 'Failed to download extension AzureEdgeRemoteSupport: unable to connect to the remote server'; the message
+#    and the error code are placeholders).
 #  - OEM image + Arc registration: no edge machines; the Arc machine carries the host name. Arc registration is read
 #    on the node (OS image update and bootstrap, tests/fixtures/arc-*.json) and in Azure (the Arc machine); the four
 #    mandatory extensions (Microsoft.HybridCompute/machines/extensions, api 2024-07-10) install during Validate and
@@ -161,7 +161,7 @@ Describe 'Simplified machine provisioning (edge machines, recorded live shapes)'
         Should -Invoke -ModuleName AzlSonar -CommandName Invoke-AzRestMethod -ParameterFilter { $Method -ne 'GET' } -Times 0 -Exactly
     }
 
-    It 'the real InstallExtensions failure: step and job error inline, node error, phase failed' {
+    It 'an InstallExtensions failure: step and job error inline, node error, phase failed' {
         Add-ArmRoute 'edgeMachines/node-01/jobs/ProvisionOs\?' (New-SonarArmResponse 200 (Get-Fixture 'job-provisionos-succeeded.json'))
         Add-ArmRoute 'edgeMachines/node-02/jobs/ProvisionOs\?' (New-SonarArmResponse 200 (Get-Fixture 'job-provisionos-failed.json'))
         Add-ArmRoute 'edgeMachines\?' (New-EdgeList 'edge-machine-provisioned.json', 'edge-machine-installing-os.json')
