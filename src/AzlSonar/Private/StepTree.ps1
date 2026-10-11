@@ -6,6 +6,9 @@ function ConvertTo-AzlSonarStepStatus {
         Normalises an Azure Local step status to notstarted, running, success, error, skipped or unknown.
     .DESCRIPTION
         Case-insensitive; spaces, dashes and underscores are ignored ('Not Started' = 'NotStarted').
+        Also maps the edge machine job statuses (DeploymentSuccess, DeploymentFailed, DeploymentInProgress and the
+        Validation* equivalents), lifecycle stage statuses (Completed) and Arc extension provisioning states
+        (Creating, Updating, Accepted, Canceled).
         Values that are not recognised map to 'unknown'; callers keep the raw value in rawStatus.
     #>
     [CmdletBinding()]
@@ -25,12 +28,23 @@ function ConvertTo-AzlSonarStepStatus {
         'success' { return 'success' }
         'succeeded' { return 'success' }
         'completed' { return 'success' }
+        'deploymentsuccess' { return 'success' }
+        'validationsuccess' { return 'success' }
         'inprogress' { return 'running' }
         'running' { return 'running' }
         'provisioning' { return 'running' }
+        'creating' { return 'running' }
+        'updating' { return 'running' }
+        'accepted' { return 'running' }
+        'deploymentinprogress' { return 'running' }
+        'validationinprogress' { return 'running' }
         'error' { return 'error' }
         'failed' { return 'error' }
         'failure' { return 'error' }
+        'canceled' { return 'error' }
+        'cancelled' { return 'error' }
+        'deploymentfailed' { return 'error' }
+        'validationfailed' { return 'error' }
         'skipped' { return 'skipped' }
     }
     return 'unknown'
@@ -282,10 +296,12 @@ function Get-AzlSonarCurrentStep {
 function Get-AzlSonarPhase {
     <#
     .SYNOPSIS
-        Works out the deployment phase: provisioning, validation, deployment, done or failed.
+        Works out the deployment phase: provisioning or arc-registration, validation, deployment, done or failed.
     .DESCRIPTION
         deployment when the deployment status has steps, else validation when the validation status has steps,
-        else provisioning. A deployment that succeeded is done; an error in the active phase is failed.
+        else the machine-readiness phase of the route: provisioning (simplified machine provisioning) or
+        arc-registration (OEM image + Arc registration), passed in -ProvisioningPhase. A deployment that succeeded is
+        done; an error in the active phase (including -ProvisioningStatus error) is failed.
         Returns { phase, activePhase } where activePhase is the phase without done/failed.
     #>
     [CmdletBinding()]
@@ -303,11 +319,17 @@ function Get-AzlSonarPhase {
         [object[]]$DeploymentTree,
 
         [AllowNull()]
-        [string]$DeploymentStatus
+        [string]$DeploymentStatus,
+
+        [ValidateSet('provisioning', 'arc-registration')]
+        [string]$ProvisioningPhase = 'provisioning',
+
+        [AllowNull()]
+        [string]$ProvisioningStatus
     )
 
-    $active = 'provisioning'
-    $status = 'notstarted'
+    $active = $ProvisioningPhase
+    $status = if ($ProvisioningStatus) { $ProvisioningStatus } else { 'notstarted' }
     if ((ConvertTo-AzlSonarArray $DeploymentTree).Count -gt 0) {
         $active = 'deployment'
         $status = $DeploymentStatus
@@ -319,6 +341,6 @@ function Get-AzlSonarPhase {
 
     $phase = $active
     if ($active -eq 'deployment' -and $status -eq 'success') { $phase = 'done' }
-    elseif ($active -ne 'provisioning' -and $status -eq 'error') { $phase = 'failed' }
+    elseif ($status -eq 'error') { $phase = 'failed' }
     return [ordered]@{ phase = $phase; activePhase = $active }
 }

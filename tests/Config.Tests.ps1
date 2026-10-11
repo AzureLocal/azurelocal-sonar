@@ -242,9 +242,41 @@ Describe 'Read-AzlSonarConfig' {
 
         It 'defaults arcMachineName to the node name and credential source to prompt' {
             $script:minimalConfig.nodes[0].arcMachineName | Should -Be 'node01'
+            $script:minimalConfig.nodes[0].arcMachineNameSet | Should -BeFalse -Because 'the poller may resolve it (simplified provisioning names it <device-id>-1)'
             $script:minimalConfig.credential.source | Should -Be 'prompt'
             $script:minimalConfig.identityModel | Should -Be 'ActiveDirectory'
         }
+
+        It 'defaults provisioningRoute to auto' {
+            $script:minimalConfig.provisioningRoute | Should -Be 'auto'
+        }
+    }
+
+    It 'keeps an explicit arcMachineName and marks it as set' {
+        $config = New-SonarConfigObject
+        $config.nodes[0] | Add-Member -NotePropertyName arcMachineName -NotePropertyValue '11111111-1111-1111-1111-111111111111-1' -Force
+        $read = Read-AzlSonarConfig -Json (ConvertTo-SonarConfigJson $config)
+        $read.nodes[0].arcMachineName | Should -Be '11111111-1111-1111-1111-111111111111-1'
+        $read.nodes[0].arcMachineNameSet | Should -BeTrue
+        $read.nodes[1].arcMachineNameSet | Should -BeFalse
+    }
+
+    It 'accepts provisioningRoute <Route> (normalised to lower case)' -TestCases @(
+        @{ Route = 'auto'; Expected = 'auto' }
+        @{ Route = 'simplified'; Expected = 'simplified' }
+        @{ Route = 'oem-image'; Expected = 'oem-image' }
+        @{ Route = 'OEM-Image'; Expected = 'oem-image' }
+    ) {
+        param($Route, $Expected)
+        $config = New-SonarConfigObject
+        $config.provisioningRoute = $Route
+        (Read-AzlSonarConfig -Json (ConvertTo-SonarConfigJson $config)).provisioningRoute | Should -Be $Expected
+    }
+
+    It 'rejects an unknown provisioningRoute' {
+        $config = New-SonarConfigObject
+        $config.provisioningRoute = 'ztp'
+        { Read-AzlSonarConfig -Json (ConvertTo-SonarConfigJson $config) } | Should -Throw '*provisioningRoute must be auto, simplified or oem-image.*'
     }
 
     It 'keeps logs.transport (the tailer reads it; it was dropped before)' {
@@ -287,5 +319,6 @@ Describe 'ConvertTo-AzlSonarPublicConfig' {
         }
         $public.startedAt | Should -Be '2026-10-10T18:00:00Z'
         $public.serverId | Should -Be 'abc123'
+        $public.provisioningRoute | Should -Be 'auto'
     }
 }

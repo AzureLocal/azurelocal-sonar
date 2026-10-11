@@ -1,6 +1,6 @@
 # AzL Sonar
 
-**Real-time monitor for Azure Local deployments.** Follow a deployment while it runs: every step and its status, and the live deployment logs from the seed node, in a modern local web view. PowerShell back end; nothing to install. Read-only.
+**Real-time monitor for Azure Local deployments.** Follow a deployment while it runs: how each machine gets ready (simplified machine provisioning or OEM image + Arc registration), every validation and deployment step and its status, and the live deployment logs from the seed node, in a modern local web view. PowerShell back end; nothing to install. Read-only.
 
 Beacon checks the environment before deployment. Sonar listens to the deployment as it happens.
 
@@ -9,6 +9,7 @@ Beacon checks the environment before deployment. Sonar listens to the deployment
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [Configuration reference](#configuration-reference)
+- [How the machines get ready: the two routes](#how-the-machines-get-ready-the-two-routes)
 - [What each phase shows](#what-each-phase-shows)
 - [Where the logs are](#where-the-logs-are)
 - [Which account reads the logs](#which-account-reads-the-logs)
@@ -25,7 +26,7 @@ On the workstation or jump server that runs Sonar:
 | --- | --- |
 | **PowerShell 7.4 or later** | The back end is a PowerShell 7 module (`#Requires -Version 7.4`). Windows PowerShell 5.1 cannot run it. |
 | **Az.Accounts, signed in** (`Connect-AzAccount`) | Sonar reads Azure through the signed-in Az PowerShell context (`Invoke-AzRestMethod`). It stops at start if nobody is signed in. |
-| **Read access to the resource group** (Reader is enough) | The step tree comes from `deploymentSettings`, the node status from the Arc machines, provisioning from `edgeMachines`. All GETs. |
+| **Read access to the resource group** (Reader is enough) | The step tree comes from `deploymentSettings`, the node status and the mandatory extensions from the Arc machines, provisioning from `edgeMachines`. All GETs. On simplified machine provisioning, the Arc machine Sonar follows is the one the edge machine names; if it sits in another resource group, Reader there too. |
 | **For live logs:** WinRM to the seed node | PowerShell remoting on 5985/5986 with an account in the node's local Administrators. Workgroup (Local Identity) nodes, and any node reached by IP address, need the address in this workstation's WinRM `TrustedHosts` (Sonar checks it and tells you; it never changes it). |
 | **or** SSH to the seed node with **Posh-SSH** | When WinRM is blocked, Sonar uses SSH (`Install-Module Posh-SSH -Scope CurrentUser`). `sshd` must run on the node (node preparation enables it) and a credential is required. |
 | Az.KeyVault | Only when `credential.source` is `keyvault`. |
@@ -67,19 +68,16 @@ There is nothing to install: no service, no database, no build step.
      "resourceGroup": "rg-example-azl",
      "clusterName": "clus01",
      "identityModel": "LocalIdentity",
+     "provisioningRoute": "auto",
      "nodes": [
-       { "name": "node01", "address": "192.0.2.11", "arcMachineName": "node01", "seed": true },
-       { "name": "node02", "address": "192.0.2.12", "arcMachineName": "node02" }
+       { "name": "node01", "address": "192.0.2.11", "seed": true },
+       { "name": "node02", "address": "192.0.2.12" }
      ],
      "credential": { "source": "prompt" }
    }
    ```
 
-   Find each node's Arc resource name (simplified machine provisioning names it `<device-id>-1`):
-
-   ```powershell
-   Get-AzConnectedMachine -ResourceGroupName '<resource group>' | Select-Object Name, MachineFqdn, Status
-   ```
+   You do not need the Arc machine names: on simplified machine provisioning Sonar reads them from the edge machines (`<device-id>-1`), on the OEM image route the Arc machine carries the host name. Set `nodes[].arcMachineName` only to override that.
 
 3. For a workgroup node or an IP address, make sure the seed node is in `TrustedHosts` (elevated, appends to the list; Sonar never changes it):
 
@@ -102,7 +100,7 @@ There is nothing to install: no service, no database, no build step.
 | `-Credential` | (none) | The log account; overrides `credential.source`. |
 | `-NoBrowser` | off | Do not open the browser. |
 
-Add `?demo=1` to the page URL to see the page with built-in sample data (no API calls).
+Add `?demo=1` to the page URL to see the page with built-in sample data (no API calls): a running deployment. `?demo=1&route=simplified` shows three machines on simplified machine provisioning (one provisioned, one installing the OS, one failed at `InstallExtensions`); `?demo=1&route=oem` shows two machines on the OEM image route (one ready, one installing its mandatory extensions).
 
 ## Configuration reference
 
@@ -115,12 +113,13 @@ Unknown fields are ignored. Sonar validates the file at start and lists every pr
 | `clusterName` | yes | | The `Microsoft.AzureStackHCI/clusters` resource name. |
 | `apiVersion` | no | `2025-09-15-preview` | api-version for `clusters/deploymentSettings`. |
 | `edgeApiVersion` | no | `2025-12-01-preview` | api-version for `edgeMachines` and their `jobs` (they do not exist in older versions). |
+| `provisioningRoute` | no | `auto` | How the machines get ready before deployment: `simplified` (simplified machine provisioning, edge machines), `oem-image` (OEM image + Arc registration; edge machines are never read) or `auto` (simplified when edge machines for the configured nodes exist in the resource group, else oem-image). See [the two routes](#how-the-machines-get-ready-the-two-routes). |
 | `identityModel` | yes | | `LocalIdentity` or `ActiveDirectory`. Picks the account guidance and whether `TrustedHosts` is needed. |
 | `pollSeconds` | no | `20` | Azure poll interval, 5 to 3600 seconds. |
 | `nodes` | yes | | At least one node. |
 | `nodes[].name` | yes | | Host name, unique. |
 | `nodes[].address` | yes | | Host name or IP address Sonar connects to for logs (seed node only). |
-| `nodes[].arcMachineName` | no | the node name | Arc resource name; simplified machine provisioning names it after the device (`<device-id>-1`). |
+| `nodes[].arcMachineName` | no | resolved | Arc resource name, only to override Sonar. Without it: on the simplified route, the Arc machine the node's edge machine names (the `ProvisionOs` job's target, else `properties.arcMachineResourceId`; `<device-id>-1`); on the OEM image route, the node name. |
 | `nodes[].seed` | no | `false` | The node whose logs are tailed. At most one; when none is marked, the first node is used (with a warning). |
 | `logs.paths` | no | `C:\CloudContent\MASLogs`, `C:\MASLogs`, `C:\CloudDeployment\Logs`, `C:\Observability`, `C:\Windows\System32\Bootstrap\Logs` | Folders tailed on the seed node. A folder that does not exist yet is checked again at every folder listing. |
 | `logs.include` | no | `*.log`, `*.txt`, `*.xml` | File name patterns to tail (at least one). |
@@ -138,17 +137,34 @@ Unknown fields are ignored. Sonar validates the file at start and lists every pr
 
 Fixed limits (not configurable): the folders are listed (`Get-ChildItem`) on every 3rd log poll or after 60 s, whichever comes first, and the known active files are tailed in between; at most 300 active files and 2000 tracked files; 1 MiB per file per poll; a file already present at start is read from 16 KiB before its end; the back end keeps the last 5000 log lines and up to 5000 state snapshots; at most 10 browser tabs stream at once.
 
+## How the machines get ready: the two routes
+
+Before the cluster deployment starts, each machine has to run the Azure Stack HCI OS and be registered with Azure Arc with the mandatory extensions. Azure Local has two ways to get there, and Sonar follows both:
+
+| | Simplified machine provisioning (preview) | OEM image + Arc registration |
+| --- | --- | --- |
+| How it works | You claim the machine in Azure; Azure installs the OS and onboards it. Each machine is an edge machine (`Microsoft.AzureStackHCI/edgeMachines`, api `2025-12-01-preview`) with a `jobs/ProvisionOs` job. | The machine runs the OS from the OEM image; you run `Invoke-AzStackHciArcInitialization` on it. There are no edge machines. |
+| Phase in Sonar | **Provisioning** | **Arc registration** |
+| Progress | Edge machine lifecycle `Creating` → `AwaitingConnection` → `Provisioning` → `ReadyForOs` → `InstallingOs` → `Provisioned` (`lifecycleDetails.lifecycleStatus`), with `provisioningState` and `machineState`; the lifecycle stages and sub-stages; the `ProvisionOs` job steps (`CreatedTargetArcMachine` … `BootIntoTargetOS` … `InstallExtensions`, `DeleteUnusedRoleAssignments`, `DeleteUnusedArcMachine`) with each step's `exception[]`; the job status (`DeploymentSuccess`, `DeploymentFailed`) and its `properties.error`. | The Arc machine appears (`Microsoft.HybridCompute/machines`, api `2024-07-10`) → status `Connected` → the mandatory extensions `AzureEdgeDeviceManagement`, `AzureEdgeLifecycleManager`, `AzureEdgeRemoteSupport`, `AzureEdgeTelemetryAndDiagnostics` go `Creating` → `Succeeded` (or `Failed`, with `instanceView.status.message`). |
+| Arc machine name | `<device-id>-1`, read from the edge machine (the job's target `provisioningRequest.onboardingConfiguration.resourceId`, else `properties.arcMachineResourceId`). While the OS installs, `arcMachineResourceId` points at the maintenance environment's `ROE1-…` machine in a managed resource group, which is why the job target comes first. | The host name. |
+| Ready when | Lifecycle `Provisioned` and the job `DeploymentSuccess`. | `Connected` and all four extensions `Succeeded`. |
+
+`provisioningRoute` picks the route (`auto` by default: simplified when edge machines for the configured nodes exist, else OEM image). With `auto`, edge machines that match no configured node (by name, host name or an explicit `arcMachineName`) do not count; Sonar says so in the warnings.
+
 ## What each phase shows
 
-The header shows the current phase, worked out from what Azure reports:
+The header shows the current phase, worked out from what Azure reports, in this order: deployment, else validation, else the machine-readiness phase of the route (provisioning or Arc registration):
 
 | Phase | When | What Sonar shows |
 | --- | --- | --- |
-| **Provisioning** | No validation or deployment steps yet | The Arc status of every node (header chips) and the logs from `C:\Windows\System32\Bootstrap\Logs` once the OS is installed. Sonar already reads the edge machines (simplified machine provisioning: provisioning state, machine state, connectivity, the `ProvisionOs` job's step tree and `percentComplete`) into `/api/state` and the export; drawing them on the page is plan task S-8. |
+| **Provisioning** (simplified route) | No validation or deployment steps yet | The **Provisioning** panel: one entry per machine with its lifecycle chip, Sonar's progress estimate (from the lifecycle and the finished job steps; the job's own `percentComplete` is in the tooltip, because it read 50 even after success in recorded responses), the Arc machine it resolved, and the tree of lifecycle stages and `ProvisionOs` steps with live timers and errors inline. Logs from `C:\Windows\System32\Bootstrap\Logs` once the OS is installed. |
+| **Arc registration** (OEM image route) | No validation or deployment steps yet | The same panel titled **Arc registration**: per machine, *Arc machine registered*, *Arc agent Connected* and each mandatory extension as a step, with its status, live timer and the extension's error message. Logs from `C:\Windows\System32\Bootstrap\Logs`. |
 | **Validation** | `reportedProperties.validationStatus` has steps | The validation step tree: each step's status, start, end, duration and error text, the running step with a live timer, progress counts. |
 | **Deployment** | `reportedProperties.deploymentStatus` has steps | The nested deployment step tree (steps within steps), with the same detail, and the live logs from the seed node. |
 | **Done** | The deployment succeeded | The finished trees with durations; the logs stay on the node. |
-| **Failed** | The active phase reports an error | The failed step with its exception text expanded inline; select it to filter the logs to its time window. |
+| **Failed** | The active phase reports an error (a failed machine counts during provisioning and Arc registration) | The failed step with its exception text expanded inline; select it to filter the logs to its time window. The phase chip names the phase that failed (`Failed: Provisioning`). |
+
+The Provisioning / Arc registration panel collapses once validation starts; open it again with its *Machines* toggle. The machine data stays in `/api/state` (`provisioning`) and in the export.
 
 Live logs: every line with its time, level (errors and warnings highlighted; zero-count summaries such as `Failed: 0` are not flagged) and file; filters by level, text, file and step. A line with its own timestamp is placed by that time (converted to UTC with the node's offset); a line without one is placed by the time Sonar received it and marked `~` (approximate). **Export** downloads one JSON bundle: config without secrets, the latest state, the change-only state timeline, the log lines and metadata that says how much the caps dropped.
 
@@ -162,11 +178,11 @@ Confirmed on a real two-node Azure Local 2609 deployment with Local Identity (10
 | `C:\MASLogs` | `BareMetal_*`, `Install-LCMController_*`, `LCMECELiteLogs\summary.*.log.xml` | From the start of Deploy |
 | `C:\Observability` | `OSConfig\*`, `ObsScheduledTaskTranscripts\*`, `CredScanLogs\*` | From the start of Deploy |
 | `C:\CloudDeployment\Logs` | Environment Checker and cloud deployment logs (Learn names the folder, not the files) | **Not there** about 10 minutes into Deploy; appears later in the run. Sonar keeps checking. |
-| `C:\Windows\System32\Bootstrap\Logs` | `setup.log`, `arcInstallLog-*.txt`, `AzStackHci.ArcConnection.Debug.log\PowerShell_transcript.*`, ETW `*.etl` (skipped) | Provisioning: bootstrap and Arc registration |
+| `C:\Windows\System32\Bootstrap\Logs` | `setup.log`, `arcInstallLog-*.txt`, `AzStackHci.ArcConnection.Debug.log\PowerShell_transcript.*`, ETW `*.etl` (skipped) | Provisioning and Arc registration: bootstrap, Arc agent install, the registration transcript |
 
 **How far to trust the log-access card.** Each entry on the card carries a confidence badge. **Confirmed on Azure Local 2609 (Local Identity)** means the folders and the account were checked on a real deployment. **From Microsoft docs — not yet confirmed** means the entry comes from Microsoft Learn only (today: every Active Directory entry, and the provisioning, validation and post-deployment phases); on your version or identity model the details may differ. Either way Sonar watches every known log folder, so it still finds the logs; if an entry is wrong for you, please open an issue.
 
-Also on the nodes, not tailed by default (add them to `logs.paths` if you need them): `C:\ProgramData\AzureConnectedMachineAgent\Log` (`himds.log`, `azcmagent.log`) and `C:\ProgramData\GuestConfig\ext_mgr_logs`, `extension_logs` (Arc agent and extensions). Before the OS is installed, the maintenance environment keeps its logs under `/var/log`; get them through the Configurator app support package.
+Also on the nodes, not tailed by default (add them to `logs.paths` if you need them; on the OEM image route the agent log is worth adding while the machines register): `C:\ProgramData\AzureConnectedMachineAgent\Log` (`himds.log`, `azcmagent.log`) and `C:\ProgramData\GuestConfig\ext_mgr_logs`, `extension_logs` (Arc agent and extensions). Before the OS is installed, the maintenance environment keeps its logs under `/var/log`; get them through the Configurator app support package.
 
 ## Which account reads the logs
 
@@ -175,11 +191,12 @@ Learn does not document the permissions on these folders; members of the node's 
 | Phase | Local Identity | Active Directory |
 | --- | --- | --- |
 | Provisioning (OS installed) | The local admin set when provisioning, or the non-built-in local admin you created with the same credentials on every node | The local administrator (same on every node); if the nodes were joined to the domain before deployment (2604+), the deployment user added to local Administrators |
+| Arc registration (OEM image) | The built-in `Administrator` until the deployment local admin exists, then the deployment local admin | The built-in `Administrator` until the deployment admin exists, then the local administrator used for deployment (or the deployment user, if the nodes were joined to the domain beforehand) |
 | Validation | The deployment local admin (`localAdminUserName`), non-built-in | The local administrator |
 | Deployment | The deployment local admin | The local administrator; the LCM (deployment) user is added to local Administrators during deployment |
 | After deployment | The deployment local admin; `RecoveryAdmin` (password in Key Vault) | The LCM user; the local administrator |
 
-Do not use the built-in `Administrator`: deployment renames it to `ASBuiltInAdmin`, so it stops working mid-run (Sonar warns at start). Azure side: Reader on the resource group is enough for everything Sonar does.
+Do not use the built-in `Administrator` for validation or deployment: deployment renames it to `ASBuiltInAdmin`, so it stops working mid-run (Sonar warns at start). It is fine while the machines register with Arc. Azure side: Reader on the resource group is enough for everything Sonar does.
 
 ## Read-only and security model
 
@@ -197,7 +214,9 @@ Do not use the built-in `Administrator`: deployment renames it to `ASBuiltInAdmi
 | --- | --- |
 | `No Azure sign-in found in this PowerShell session` | Run `Connect-AzAccount` in the same PowerShell 7 window, then start Sonar again. |
 | `Az PowerShell (Az.Accounts) is not installed` | `Install-Module Az.Accounts -Scope CurrentUser`. |
-| `GET deploymentSettings ... failed` (403 or 404 on the subscription) | Wrong subscription in the Az context or no access: `Set-AzContext -Subscription <id>` and check you have Reader on the resource group. A 404 on `deploymentSettings` alone is normal before the deployment starts (phase: provisioning). |
+| `GET deploymentSettings ... failed` (403 or 404 on the subscription) | Wrong subscription in the Az context or no access: `Set-AzContext -Subscription <id>` and check you have Reader on the resource group. A 404 on `deploymentSettings` alone is normal before the deployment starts (phase: provisioning or Arc registration). |
+| The page shows **Arc registration** but you use simplified machine provisioning | With `provisioningRoute: auto`, no edge machine matched a configured node. Name the nodes after the edge machines (or their host names), or set `provisioningRoute` to `simplified`. The warnings say how many edge machines matched nothing. |
+| A machine stays **NotRegistered** on the OEM image route | No Arc machine with the node's name in the resource group: run `Invoke-AzStackHciArcInitialization` on the node, or set `nodes[].arcMachineName` if you registered it under another name. |
 | Logs unavailable: `... is not in the WinRM client TrustedHosts list` | Workgroup (Local Identity) nodes and IP addresses use NTLM. In an elevated session: `Set-Item WSMan:\localhost\Client\TrustedHosts -Value '<address>' -Concatenate -Force`. Check with `Get-Item WSMan:\localhost\Client\TrustedHosts`. |
 | Logs unavailable: `WinRM: Access is denied` | The account is not a local admin on the node, or it is a local account that is not the built-in Administrator and the node filters its token (`LocalAccountTokenFilterPolicy` must be 1; it was 1 on the lab nodes). Use the deployment local admin, not `Administrator`. |
 | Logs unavailable: WinRM cannot connect (timeout, firewall, `5985`) | WinRM is blocked from this workstation. Install Posh-SSH (`Install-Module Posh-SSH -Scope CurrentUser`) and keep `logs.transport` at `auto`, or set it to `ssh`. SSH needs a credential (prompt, `-Credential` or Key Vault) and `sshd` running on the node. |

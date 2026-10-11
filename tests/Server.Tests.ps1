@@ -168,13 +168,13 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
         @($s.nodes).Count | Should -Be 2
     }
 
-    It 'GET /api/guidance returns the four phases for the identity model' {
+    It 'GET /api/guidance returns the five phases for the identity model' {
         $r = Invoke-SonarRequest '/api/guidance'
         $r.Status | Should -Be 200
         $g = $r.Body | ConvertFrom-Json
         $g.identityModel | Should -Be 'LocalIdentity'
         $g.available | Should -BeTrue
-        @($g.phases.PSObject.Properties.Name) | Should -Be @('provisioning', 'validation', 'deployment', 'post-deployment')
+        @($g.phases.PSObject.Properties.Name) | Should -Be @('provisioning', 'arc-registration', 'validation', 'deployment', 'post-deployment')
     }
 
     It 'GET /api/logs returns tailer, files and every line' {
@@ -562,7 +562,7 @@ Describe 'Start-AzlSonarServer end to end (random port, mocked poller and tailer
         $results['/api/state'].Status | Should -Be 200
         ($results['/api/state'].Body | ConvertFrom-Json).phase | Should -Be 'provisioning'
         $results['/api/guidance'].Status | Should -Be 200
-        @(($results['/api/guidance'].Body | ConvertFrom-Json).phases.PSObject.Properties.Name).Count | Should -Be 4
+        @(($results['/api/guidance'].Body | ConvertFrom-Json).phases.PSObject.Properties.Name).Count | Should -Be 5
         $results['/api/logs'].Status | Should -Be 200
         ($results['/api/logs'].Body | ConvertFrom-Json).PSObject.Properties.Name | Should -Be @('server', 'lastSeq', 'tailer', 'files', 'lines')
         ($results['/api/logs'].Body | ConvertFrom-Json).server | Should -Be ($results['/api/config'].Body | ConvertFrom-Json).serverId

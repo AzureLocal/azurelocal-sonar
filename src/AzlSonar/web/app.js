@@ -10,12 +10,23 @@
   var POLL_MS = 5000;              // fallback polling interval
   var SSE_MAX_BACKOFF_MS = 30000;
   var THEME_KEY = 'azlsonar.theme';
-  var PHASES = ['provisioning', 'validation', 'deployment', 'done', 'failed'];
+  var PHASES = ['provisioning', 'arc-registration', 'validation', 'deployment', 'done', 'failed'];
+  var PHASE_LABEL = {
+    provisioning: 'Provisioning', 'arc-registration': 'Arc registration', validation: 'Validation',
+    deployment: 'Deployment', done: 'Done', failed: 'Failed', 'post-deployment': 'Post-deployment'
+  };
+  var ROUTE_LABEL = { simplified: 'Simplified machine provisioning (preview)', 'oem-image': 'OEM image + Arc registration' };
   var STATUS_LABEL = {
     notstarted: 'Not started', running: 'In progress', success: 'Succeeded',
     error: 'Failed', skipped: 'Skipped', unknown: 'Unknown'
   };
   var DEMO = typeof location !== 'undefined' && /(?:^|[?&])demo=(?:1|true|yes)(?:&|$)/i.test(location.search);
+  // ?demo=1&route=simplified|oem shows the machine-readiness phase of that route instead of a running deployment.
+  var DEMO_ROUTE = (function () {
+    if (typeof location === 'undefined') return '';
+    var m = /(?:^|[?&])route=(simplified|oem|oem-image)(?:&|$)/i.exec(location.search);
+    return m ? (m[1].toLowerCase() === 'simplified' ? 'simplified' : 'oem-image') : '';
+  })();
 
   // ------------------------------------------------------------------ state
 
@@ -34,11 +45,13 @@
     follow: true,
     newWhilePaused: 0,
     rendered: 0,
-    treeSig: { validation: null, deployment: null },
+    treeSig: { provisioning: null, validation: null, deployment: null },
     expanded: new Map(),        // key -> bool (user choice)
-    sectionCollapsed: { validation: false, deployment: false },
+    sectionCollapsed: { provisioning: false, validation: false, deployment: false },
+    provAutoCollapsed: false,   // the provisioning section was collapsed once validation started
+    provTree: [],               // one synthetic tree item per machine (provisioningTreeOf)
     stepIndex: new Map(),       // key -> { node, section, parentKey }
-    focusKey: { validation: null, deployment: null },
+    focusKey: { provisioning: null, validation: null, deployment: null },
     selectedKey: null,
     currentKey: null,
     lastAutoKey: null,
@@ -321,6 +334,77 @@
     return selected && arr(list).indexOf(selected) >= 0 ? selected : '';
   }
 
+  // ------------------------------------------------------------------ provisioning (pure; also run by tests under Node)
+
+  function phaseLabel(p) {
+    var k = str(p).toLowerCase();
+    return PHASE_LABEL[k] || (k ? k.charAt(0).toUpperCase() + k.slice(1) : '');
+  }
+
+  // The header chip: the phase, and for a failed run the phase that failed ("Failed: Arc registration").
+  function phaseChipText(state) {
+    if (!isObj(state)) return '—';
+    var p = normPhase(state.phase);
+    if (p === 'unknown') return 'unknown';
+    var active = str(state.activePhase).toLowerCase();
+    if (p === 'failed' && active && active !== 'failed') return 'Failed: ' + phaseLabel(active);
+    return phaseLabel(p);
+  }
+
+  // One tree item per machine, its children the machine's provisioning tree (lifecycle stages + ProvisionOs job, or
+  // Arc machine + mandatory extensions). The item carries the machine summary in .prov for the panel.
+  function provisioningTreeOf(state) {
+    var prov = isObj(state) && isObj(state.provisioning) ? state.provisioning : null;
+    if (!prov) return [];
+    return arr(prov.nodes).filter(isObj).map(function (n) {
+      var exts = arr(n.extensions).filter(isObj);
+      return {
+        id: str(n.name), name: str(n.name), description: str(n.lifecycleMessage),
+        status: normStatus(n.status), start: n.start || null, end: n.end || null,
+        errors: arr(n.errors).map(str).filter(Boolean), children: arr(n.tree),
+        prov: {
+          route: str(n.route || prov.route), lifecycle: str(n.lifecycle) || 'Unknown',
+          percent: typeof n.percent === 'number' ? Math.max(0, Math.min(100, n.percent)) : null,
+          reportedPercent: typeof n.reportedPercent === 'number' ? n.reportedPercent : null,
+          arcMachineName: str(n.arcMachineName), arcSource: str(n.arcSource), arcStatus: str(n.arcStatus),
+          edgeMachineName: str(n.edgeMachineName),
+          extensionsReady: exts.filter(function (e) { return normStatus(e.status) === 'success'; }).length,
+          extensionsTotal: exts.length
+        }
+      };
+    });
+  }
+
+  // Machines by status for the section head: { total, ready, failed, running, waiting }.
+  function provisioningSummary(tree) {
+    var s = { total: 0, ready: 0, failed: 0, running: 0, waiting: 0 };
+    arr(tree).forEach(function (n) {
+      if (!isObj(n)) return;
+      s.total++;
+      var st = normStatus(n.status);
+      if (st === 'success') s.ready++; else if (st === 'error') s.failed++; else if (st === 'running') s.running++; else s.waiting++;
+    });
+    return s;
+  }
+
+  // The provisioning section is collapsed once (when validation or deployment starts); the user can open it again.
+  function provisioningCollapse(activePhase, alreadyCollapsed) {
+    var a = str(activePhase).toLowerCase();
+    if (a === 'validation' || a === 'deployment') return alreadyCollapsed ? 'keep' : 'collapse';
+    if (a === 'provisioning' || a === 'arc-registration') return alreadyCollapsed ? 'expand' : 'keep';
+    return 'keep';
+  }
+
+  // Where an Arc machine name came from, for the tooltip.
+  function arcSourceText(src) {
+    return {
+      config: 'from nodes[].arcMachineName in the config',
+      'edgeMachine.job': 'from the edge machine (ProvisionOs target: provisioningRequest.onboardingConfiguration.resourceId)',
+      edgeMachine: 'from the edge machine (properties.arcMachineResourceId)',
+      nodeName: 'the node name (Invoke-AzStackHciArcInitialization names the Arc machine after the host)'
+    }[str(src)] || '';
+  }
+
   app.store = createLogStore(MAX_STORED_LINES);
 
   if (typeof module === 'object' && module && module.exports && typeof document === 'undefined') {
@@ -328,7 +412,9 @@
       createLogStore: createLogStore, logStoreReset: logStoreReset, logStoreIngest: logStoreIngest,
       logStoreStreamOpened: logStoreStreamOpened, logStoreStreamClosed: logStoreStreamClosed,
       stepWindowOf: stepWindowOf, windowSignature: windowSignature, lineInWindow: lineInWindow, stepFilterChange: stepFilterChange,
-      fileOptionList: fileOptionList, keptFileSelection: keptFileSelection, normLevel: normLevel, parseTime: parseTime
+      fileOptionList: fileOptionList, keptFileSelection: keptFileSelection, normLevel: normLevel, parseTime: parseTime,
+      normStatus: normStatus, phaseLabel: phaseLabel, phaseChipText: phaseChipText, provisioningTreeOf: provisioningTreeOf,
+      provisioningSummary: provisioningSummary, provisioningCollapse: provisioningCollapse, arcSourceText: arcSourceText
     };
     return;
   }
@@ -581,7 +667,7 @@
     var phase = app.state ? normPhase(s.phase) : 'unknown';
     var chip = $('phase-chip');
     chip.setAttribute('data-phase', phase);
-    chip.textContent = phase === 'unknown' ? (app.state ? 'unknown' : '\u2014') : phase;
+    chip.textContent = app.state ? phaseChipText(s) : '\u2014';
 
     var ov = overallStatus();
     var st = $('overall-status');
@@ -594,7 +680,7 @@
 
     if (app.state) {
       if (app.lastAnnounced.phase !== null && app.lastAnnounced.phase !== phase) {
-        announce('Phase changed to ' + phase + '. Status: ' + ov.label + '.');
+        announce('Phase changed to ' + phaseChipText(s) + '. Status: ' + ov.label + '.');
       } else if (app.lastAnnounced.status !== null && app.lastAnnounced.status !== ov.label) {
         announce('Status: ' + ov.label + '.');
       }
@@ -632,8 +718,16 @@
       if (k === 'unknown') label = str(isObj(s[phase]) ? s[phase].status : '') || 'Unknown';
       return { key: k, label: label };
     }
+    if (isObj(s.provisioning) && arr(s.provisioning.nodes).length) {
+      var sum = provisioningSummary(app.provTree);
+      var pk = normStatus(s.provisioning.status);
+      var what = phaseLabel(s.provisioning.phase || phase);
+      var plabel = what + ': ' + sum.ready + ' of ' + sum.total + ' machine' + (sum.total === 1 ? '' : 's') + ' ready';
+      if (sum.failed) plabel += ', ' + sum.failed + ' failed';
+      return { key: pk, label: plabel };
+    }
     var ps = normStatus(s.provisioningState);
-    return { key: ps === 'notstarted' ? 'unknown' : ps, label: s.provisioningState ? 'Provisioning: ' + s.provisioningState : 'Provisioning' };
+    return { key: ps === 'notstarted' ? 'unknown' : ps, label: s.provisioningState ? phaseLabel(phase) + ': ' + s.provisioningState : phaseLabel(phase) };
   }
 
   function elapsedRange() {
@@ -652,6 +746,7 @@
     }
     walk(isObj(s.validation) ? s.validation.tree : null);
     walk(isObj(s.deployment) ? s.deployment.tree : null);
+    if (min === Infinity) walk(app.provTree);   // before validation: time since the machines started getting ready
     if (min === Infinity) return null;
     var phase = normPhase(s.phase);
     var open = running || (phase !== 'done' && phase !== 'failed' && overallStatus().key === 'running');
@@ -688,6 +783,8 @@
       var cur = byName.get(k) || { name: n.name, seed: !!n.seed };
       cur.arcStatus = n.arcStatus;
       cur.lastStatusChange = n.lastStatusChange;
+      cur.arcMachineName = n.arcMachineName;
+      cur.arcSource = n.arcSource;
       byName.set(k, cur);
     });
     ul.textContent = '';
@@ -696,6 +793,7 @@
       var tip = n.name + ': Azure Arc ' + arc;
       var lt = parseTime(n.lastStatusChange);
       if (!isNaN(lt)) tip += ' since ' + fmtDateTime(lt);
+      if (n.arcMachineName && n.arcMachineName !== n.name) tip += '\nArc machine ' + n.arcMachineName + (arcSourceText(n.arcSource) ? ' (' + arcSourceText(n.arcSource) + ')' : '');
       ul.appendChild(el('li', { class: 'node-chip', 'data-arc': arc.toLowerCase(), title: tip }, [
         el('span', { class: 'dot', 'aria-hidden': 'true' }),
         el('span', { text: n.name }),
@@ -713,7 +811,12 @@
     var filterKey = app.filter.stepKey;
     var windowBefore = filterKey ? windowSignature(stepWindow()) : null;
     app.state = s;
+    app.provTree = provisioningTreeOf(s);
+    var collapse = provisioningCollapse(s.activePhase || (normPhase(s.phase) === 'failed' ? '' : s.phase), app.provAutoCollapsed);
+    if (collapse === 'collapse') { app.sectionCollapsed.provisioning = true; app.provAutoCollapsed = true; }
+    else if (collapse === 'expand') { app.sectionCollapsed.provisioning = false; app.provAutoCollapsed = false; }
     app.stepIndex = new Map();
+    indexSection('provisioning');
     indexSection('validation');
     indexSection('deployment');
     var stillIndexed = !!filterKey && app.stepIndex.has(filterKey);
@@ -764,16 +867,17 @@
         walk(n.children, k);
       });
     }
-    walk(isObj(sec) ? sec.tree : null, section);
+    walk(section === 'provisioning' ? app.provTree : (isObj(sec) ? sec.tree : null), section);
   }
 
   function findCurrentKey() {
     var s = app.state, cur = isObj(s.current) ? s.current : null;
     // 1. follow current.stepPath (ids or names) in the named phase
     if (cur && Array.isArray(cur.stepPath) && cur.stepPath.length) {
-      var secs = cur.phase === 'validation' || cur.phase === 'deployment' ? [cur.phase] : ['deployment', 'validation'];
+      var secs = cur.phase === 'validation' || cur.phase === 'deployment' ? [cur.phase] :
+        (cur.phase === 'provisioning' || cur.phase === 'arc-registration' ? ['provisioning'] : ['deployment', 'validation']);
       for (var si = 0; si < secs.length; si++) {
-        var nodes = isObj(s[secs[si]]) ? arr(s[secs[si]].tree) : [], found = null;
+        var nodes = secs[si] === 'provisioning' ? app.provTree : (isObj(s[secs[si]]) ? arr(s[secs[si]].tree) : []), found = null;
         for (var d = 0; d < cur.stepPath.length; d++) {
           var want = str(isObj(cur.stepPath[d]) ? (cur.stepPath[d].id || cur.stepPath[d].name) : cur.stepPath[d]);
           var match = null;
@@ -800,6 +904,7 @@
     ['deployment', 'validation'].forEach(function (sec) {
       if (!best && isObj(s[sec])) walk(s[sec].tree, 0);
     });
+    if (!best && (s.activePhase === 'provisioning' || s.activePhase === 'arc-registration')) walk(app.provTree, 0);
     if (best) return best.__key;
     // 3. by name
     if (cur && cur.stepName) {
@@ -860,20 +965,25 @@
 
   function renderTree(autoScroll) {
     var host = $('tree-host');
-    var hadFocus = host.contains(document.activeElement);
-    var focusedKey = hadFocus && document.activeElement.getAttribute ? document.activeElement.getAttribute('data-key') : null;
+    var provHost = $('prov-host');
+    var active = document.activeElement;
+    var hadFocus = host.contains(active) || provHost.contains(active);
+    var focusedKey = hadFocus && active.getAttribute ? active.getAttribute('data-key') : null;
     var s = app.state || {};
 
-    ['validation', 'deployment'].forEach(function (section) {
-      var sec = isObj(s[section]) ? s[section] : {};
-      var tree = arr(sec.tree);
-      var sig = JSON.stringify([tree, sec.status, app.sectionCollapsed[section], app.selectedKey, app.currentKey,
+    renderProvisioningPanel();
+    ['provisioning', 'validation', 'deployment'].forEach(function (section) {
+      var sec = section === 'provisioning' ? (isObj(s.provisioning) ? s.provisioning : {}) : (isObj(s[section]) ? s[section] : {});
+      var tree = section === 'provisioning' ? app.provTree : arr(sec.tree);
+      var target = section === 'provisioning' ? provHost : host;
+      var sig = JSON.stringify([tree, sec.status, sec.phase, app.sectionCollapsed[section], app.selectedKey, app.currentKey,
         Array.from(app.expanded.entries())], function (k, v) { return k === '__key' ? undefined : v; });
-      var wrap = host.querySelector('.tree-section[data-section="' + section + '"]');
+      var wrap = target.querySelector('.tree-section[data-section="' + section + '"]');
       if (wrap && app.treeSig[section] === sig) return;
       app.treeSig[section] = sig;
+      if (section === 'provisioning' && !tree.length) { if (wrap) wrap.remove(); return; }
       var fresh = buildSection(section, sec, tree);
-      if (wrap) host.replaceChild(fresh, wrap); else host.appendChild(fresh);
+      if (wrap) target.replaceChild(fresh, wrap); else target.appendChild(fresh);
     });
 
     // keep validation above deployment
@@ -881,12 +991,32 @@
     if (v && d && v.nextSibling !== d) host.insertBefore(v, d);
 
     if (focusedKey) {
-      var f = host.querySelector('[data-key="' + cssEscape(focusedKey) + '"]');
+      var f = treeItem(focusedKey);
       if (f) f.focus({ preventScroll: true });
     }
     $('jump-current').disabled = !app.currentKey;
     if (autoScroll) scrollToKey(app.currentKey, false);
     tickTimers();
+  }
+
+  // The panel above the step tree: shown while the state has machines to follow (both routes).
+  function renderProvisioningPanel() {
+    var s = app.state || {}, prov = isObj(s.provisioning) ? s.provisioning : null;
+    var panel = $('prov-panel');
+    panel.hidden = !app.provTree.length;
+    if (!prov) return;
+    $('prov-title').textContent = phaseLabel(prov.phase || (prov.route === 'oem-image' ? 'arc-registration' : 'provisioning'));
+    var r = $('prov-route');
+    r.textContent = ROUTE_LABEL[str(prov.route)] || '';
+    r.hidden = !r.textContent;
+    r.title = prov.routeSource === 'auto' ? 'Picked automatically (provisioningRoute auto): ' +
+      (prov.route === 'simplified' ? 'edge machines found for the nodes' : 'no edge machines for the nodes') : 'Set by provisioningRoute in the config';
+  }
+
+  // A tree item by key, in either tree host.
+  function treeItem(k) {
+    var sel = '[data-key="' + cssEscape(k) + '"]';
+    return $('tree-host').querySelector(sel) || $('prov-host').querySelector(sel);
   }
 
   function cssEscape(s) {
@@ -895,8 +1025,9 @@
   }
 
   function buildSection(section, sec, tree) {
-    var title = section === 'validation' ? 'Validation' : 'Deployment';
-    var st = sectionStatus(sec);
+    var isProv = section === 'provisioning';
+    var title = isProv ? 'Machines' : section === 'validation' ? 'Validation' : 'Deployment';
+    var st = isProv ? normStatus(sec.status) : sectionStatus(sec);
     var collapsed = !!app.sectionCollapsed[section];
     var wrap = el('div', { class: 'tree-section', 'data-section': section });
 
@@ -907,7 +1038,7 @@
     toggle.addEventListener('click', function () {
       app.sectionCollapsed[section] = !app.sectionCollapsed[section];
       renderTree(false);
-      var b = $('tree-host').querySelector('[data-section="' + section + '"] .section-toggle');
+      var b = (section === 'provisioning' ? $('prov-host') : $('tree-host')).querySelector('[data-section="' + section + '"] .section-toggle');
       if (b) b.focus();
     });
 
@@ -917,6 +1048,34 @@
 
     var head = el('div', { class: 'section-head' }, [toggle, stEl]);
     wrap.appendChild(head);
+
+    if (isProv) {
+      var sum = provisioningSummary(tree);
+      var pmeta = el('div', { class: 'section-meta' });
+      var pbar = el('div', { class: 'progress', role: 'progressbar', 'aria-label': phaseLabel(sec.phase) + ' progress',
+        'aria-valuemin': '0', 'aria-valuemax': String(sum.total), 'aria-valuenow': String(sum.ready),
+        'aria-valuetext': sum.ready + ' of ' + sum.total + ' machines ready' + (sum.failed ? ', ' + sum.failed + ' failed' : '') });
+      [['success', sum.ready], ['error', sum.failed], ['running', sum.running]].forEach(function (x) {
+        if (x[1]) pbar.appendChild(el('span', { class: 'p-' + x[0], style: 'width:' + (100 * x[1] / sum.total) + '%' }));
+      });
+      pmeta.appendChild(pbar);
+      pmeta.appendChild(el('span', { class: 'progress-label', text: sum.ready + ' / ' + sum.total + ' machines ready' +
+        (sum.failed ? ' \u00b7 ' + sum.failed + ' failed' : '') + (sum.running ? ' \u00b7 ' + sum.running + ' in progress' : '') }));
+      head.appendChild(pmeta);
+      if (collapsed) return wrap;
+      var pul = el('ul', { class: 'tree', role: 'tree', id: 'tree-' + section, 'aria-label': phaseLabel(sec.phase) + ' by machine' });
+      var ptab = app.focusKey[section] && app.stepIndex.has(app.focusKey[section]) ? app.focusKey[section] : null;
+      tree.forEach(function (n) { if (isObj(n)) pul.appendChild(buildItem(n, 1, ptab)); });
+      var pfirst = pul.querySelector('[role="treeitem"][tabindex="0"]');
+      if (!pfirst || !isVisibleItem(pfirst)) {
+        if (pfirst) pfirst.setAttribute('tabindex', '-1');
+        var pf = pul.querySelector('[role="treeitem"]');
+        if (pf) pf.setAttribute('tabindex', '0');
+      }
+      pul.addEventListener('keydown', onTreeKey);
+      wrap.appendChild(pul);
+      return wrap;
+    }
 
     var agg = aggregate(tree);
     if (!agg.total && isObj(sec.counts)) {
@@ -1009,9 +1168,10 @@
     row.appendChild(ic);
 
     var nameEl = el('span', { class: 'step-name' });
-    if (n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
+    var inProv = (app.stepIndex.get(k) || {}).section === 'provisioning';   // provisioning ids are Sonar's own, not fullStepIndex
+    if (!inProv && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
     nameEl.appendChild(document.createTextNode(name));
-    if (n.description && n.description !== name) nameEl.appendChild(el('span', { class: 'desc', text: str(n.description) }));
+    if (n.description && n.description !== name && !isObj(n.prov)) nameEl.appendChild(el('span', { class: 'desc', text: str(n.description) }));
     row.appendChild(nameEl);
 
     var durEl = el('span', { class: 'dur' });
@@ -1027,6 +1187,7 @@
 
     row.addEventListener('click', function () { selectStep(k); });
     li.appendChild(row);
+    if (isObj(n.prov)) li.appendChild(buildProvMeta(n, st));
 
     var errs = arr(n.errors).map(str).filter(Boolean);
     if (errs.length) {
@@ -1042,6 +1203,30 @@
       li.appendChild(g);
     }
     return li;
+  }
+
+  // Under a machine row: lifecycle chip, progress, Arc machine and (OEM route) the extension count.
+  function buildProvMeta(n, st) {
+    var p = n.prov;
+    var meta = el('div', { class: 'prov-meta' });
+    meta.appendChild(el('span', { class: 'lc-chip', 'data-status': st, title: 'Lifecycle' + (n.description ? ': ' + n.description : '') , text: p.lifecycle }));
+    if (p.percent !== null) {
+      var pct = el('span', { class: 'prov-pct', 'data-status': st,
+        title: 'Sonar\'s estimate from the lifecycle and the finished steps' + (p.reportedPercent !== null ? '; the job reports percentComplete ' + p.reportedPercent : '') });
+      var bar = el('span', { class: 'progress', role: 'progressbar', 'aria-label': n.name + ' progress', 'aria-valuemin': '0',
+        'aria-valuemax': '100', 'aria-valuenow': String(p.percent) });
+      bar.appendChild(el('span', { class: 'p-fill', style: 'width:' + p.percent + '%' }));
+      pct.appendChild(bar);
+      pct.appendChild(document.createTextNode(p.percent + '%'));
+      meta.appendChild(pct);
+    }
+    if (p.arcMachineName) {
+      meta.appendChild(el('span', { class: 'prov-arc', title: arcSourceText(p.arcSource) || 'Arc machine',
+        text: 'Arc ' + p.arcMachineName + (p.arcStatus ? ' (' + p.arcStatus + ')' : '') }));
+    }
+    if (p.extensionsTotal) meta.appendChild(el('span', { text: 'Extensions ' + p.extensionsReady + '/' + p.extensionsTotal }));
+    if (n.description) meta.appendChild(el('span', { class: 'prov-msg', text: n.description }));
+    return meta;
   }
 
   function isVisibleItem(item) {
@@ -1076,7 +1261,7 @@
     app.expanded.set(k, next);
     app.focusKey[info.section] = k;
     renderTree(false);
-    var item = $('tree-host').querySelector('[data-key="' + cssEscape(k) + '"]');
+    var item = treeItem(k);
     if (item) focusItem(item);
   }
 
@@ -1116,9 +1301,9 @@
 
   function scrollToKey(k, focus) {
     if (!k) return;
-    var host = $('tree-host');
-    var item = host.querySelector('[data-key="' + cssEscape(k) + '"]');
+    var item = treeItem(k);
     if (!item) return;
+    var host = item.closest('.panel-body') || $('tree-host');
     var row = item.querySelector('.row') || item;
     // scroll inside the tree panel only, never the page
     var hr = host.getBoundingClientRect(), rr = row.getBoundingClientRect();
@@ -1150,7 +1335,7 @@
       announce('Logs filtered to step ' + str(info.node.name) + '.');
     }
     renderTree(false);
-    var item = $('tree-host').querySelector('[data-key="' + cssEscape(k) + '"]');
+    var item = treeItem(k);
     if (item) focusItem(item);
     renderChips();
     rerenderLogs();
@@ -1245,11 +1430,18 @@
     m.hidden = !model;
 
     var available = guidancePhases();
-    var shown = ['provisioning', 'validation', 'deployment'].filter(function (p) { return available.indexOf(p) >= 0; });
+    // only the machine-readiness phase of the route Sonar follows (provisioning or arc-registration)
+    var route = app.state && isObj(app.state.provisioning) ? str(app.state.provisioning.route) : '';
+    var hide = route === 'simplified' ? 'arc-registration' : route === 'oem-image' ? 'provisioning' : '';
+    available = available.filter(function (p) { return p !== hide; });
+    var shown = ['provisioning', 'arc-registration', 'validation', 'deployment'].filter(function (p) { return available.indexOf(p) >= 0; });
     available.forEach(function (p) { if (shown.indexOf(p) < 0) shown.push(p); });
-    // the phase that matches "now"; after the run ends, prefer a post-deployment entry, else deployment
+    // the phase that matches "now"; a failed run shows the phase that failed; after the run ends, prefer a
+    // post-deployment entry, else deployment
     var defaultView = cur;
-    if (shown.indexOf(cur) < 0 && (cur === 'done' || cur === 'failed')) {
+    var activeNow = app.state ? str(app.state.activePhase).toLowerCase() : '';
+    if (cur === 'failed' && activeNow && shown.indexOf(activeNow) >= 0) defaultView = activeNow;
+    else if (shown.indexOf(cur) < 0 && (cur === 'done' || cur === 'failed')) {
       defaultView = shown.filter(function (p) { return gkey(p) === 'postdeployment' || gkey(p) === 'after'; })[0] || 'deployment';
     }
     if (app.guidancePhase && shown.indexOf(app.guidancePhase) < 0) app.guidancePhase = null;
@@ -1258,7 +1450,7 @@
     tabs.textContent = '';
     tabs.hidden = shown.length < 2;
     shown.forEach(function (p) {
-      var b = el('button', { type: 'button', 'aria-pressed': String(p === view) }, [p.charAt(0).toUpperCase() + p.slice(1)]);
+      var b = el('button', { type: 'button', 'aria-pressed': String(p === view) }, [phaseLabel(p)]);
       if (p === defaultView) {
         b.appendChild(el('span', { class: 'cur-dot', title: 'Current phase', 'aria-hidden': 'true' }));
         b.appendChild(el('span', { class: 'sr-only', text: ' (current phase)' }));
@@ -1279,7 +1471,7 @@
     }
     var g = phaseGuidance(view);
     if (!g) {
-      body.appendChild(el('p', { class: 'muted', text: 'No guidance recorded for the ' + view + ' phase.' }));
+      body.appendChild(el('p', { class: 'muted', text: 'No guidance recorded for the ' + phaseLabel(view) + ' phase.' }));
       return;
     }
     var dl = el('dl');
@@ -1299,7 +1491,7 @@
     var vBox = el('div');
     vBox.appendChild(el('span', { class: 'pill ' + (ver === true ? 'pill-ok' : ver === false ? 'pill-warn' : 'pill-muted'),
       text: ver === true ? 'Confirmed on ' + confirmedOn : ver === false ? 'From Microsoft docs — not yet confirmed' : 'Unknown' }));
-    if (ver === true && typeof g.observed === 'string' && g.observed) vBox.appendChild(el('p', { class: 'guide-note', text: g.observed }));
+    if (typeof g.observed === 'string' && g.observed) vBox.appendChild(el('p', { class: 'guide-note', text: g.observed }));
     if (ver !== true) vBox.appendChild(el('p', { class: 'guide-note', text: 'If the logs are not where this says, Sonar still finds them: it watches every known log folder. Please open an issue on GitHub so this entry can be corrected.' }));
     row('Confidence', vBox);
 
@@ -1715,6 +1907,7 @@
         errors: errors || [], children: children || [] };
     }
     var M = 60000;
+    if (DEMO_ROUTE) { startRouteDemo(DEMO_ROUTE, iso, step, M); return; }
     var validation = [
       step('1', 'Validate deployment prerequisites', 'success', 58 * M, 41 * M, [
         step('1.1', 'Validate hardware', 'success', 58 * M, 56 * M + 42000),
@@ -1798,6 +1991,141 @@
       var nowIso = new Date().toISOString();
       applyLogBatch([{ seq: ++seq, time: nowIso, received: nowIso, timeSource: 'line', file: f1, level: m[0], text: m[1] }], { source: 'live' });
     }, 2500);
+    setInterval(function () {
+      state.polledAt = new Date().toISOString();
+      applyState(state);
+    }, 20000);
+    app.demoExport = function () { return { config: app.config, timeline: [state], logs: app.store.lines.map(function (l) { return { seq: l.seq, time: l.time, received: l.received, timeSource: l.timeSource, file: l.file, level: l.level, text: l.text }; }) }; };
+  }
+
+  // ?demo=1&route=simplified: three machines on simplified machine provisioning (one provisioned, one installing the
+  // OS, one failed at InstallExtensions with the error seen on a real 12.2609 run). ?demo=1&route=oem: two machines on
+  // the OEM image route (one ready, one installing its mandatory extensions). Sample data only; no API calls.
+  function startRouteDemo(route, iso, step, M) {
+    var simplified = route === 'simplified';
+    var EXT = ['AzureEdgeDeviceManagement', 'AzureEdgeLifecycleManager', 'AzureEdgeRemoteSupport', 'AzureEdgeTelemetryAndDiagnostics'];
+    var JOB = ['CreatedTargetArcMachine', 'CopiedSiteSettings', 'SetupPermissions', 'ArcNotificationSent', 'Initialize',
+      'ResolveConfiguration', 'DownloadOSArtifacts', 'SBEDiscoveryDownload', 'SetupHybridComputeRP', 'PrepareTargetOSProvisioning',
+      'InitiateTargetOSProvisioning', 'PrepareK3sShutdown', 'BootIntoTargetOS', 'ValidateStagedArtifacts', 'InvokeTPAUpdate',
+      'ReportUpdateStatus', 'ProvisionOs', 'InstallExtensions', 'DeleteUnusedRoleAssignments', 'DeleteUnusedArcMachine'];
+    var FAIL = 'Failed to download extension AzureEdgeRemoteSupport: unable to connect to the remote server';
+    var SUBS = [['Initialize', 'Initialize Resource'], ['DownloadOs', 'Download OS'], ['PrepareOs', 'Prepare OS'],
+      ['RebootOs', 'Reboot into OS'], ['InstallExtensions', 'Install required Arc extensions'], ['Finalize', 'Finalize system configuration']];
+
+    // cur: index of the current item (-1: all finished); curStatus: running or error
+    function steps(prefix, names, startAgo, per, cur, curStatus, errors) {
+      return names.map(function (nm, i) {
+        var name = Array.isArray(nm) ? nm[0] : nm, desc = Array.isArray(nm) ? nm[1] : '';
+        var a = startAgo - i * per, b = a - per;
+        if (cur < 0 || i < cur) return step(prefix + i, name, 'success', a, b, null, null, desc);
+        if (i === cur) return step(prefix + i, name, curStatus, a, curStatus === 'running' ? null : b, null, curStatus === 'error' ? errors : null, desc);
+        return step(prefix + i, name, 'notstarted', null, null, null, null, desc);
+      });
+    }
+    function machine(name, idx, cur, curStatus, jobCur, lifecycle) {
+      var t0 = (75 - idx * 6) * M;
+      var stages = [
+        step('lifecycle.0', 'ProvisionMachine', 'success', t0, t0 - 9 * M, steps('lifecycle.0.', [['RegisterMachine', 'Register machine with onboarding service'],
+          ['ArcEnableMaintenanceEnvironment', 'Arc enable maintenance environment'], ['InstallExtensions', 'Install required Arc extensions']], t0, 3 * M, -1), null, 'Provision machine'),
+        step('lifecycle.1', 'InstallOs', cur < 0 ? 'success' : curStatus, t0 - 10 * M, cur < 0 ? t0 - 58 * M : null,
+          steps('lifecycle.1.', SUBS, t0 - 10 * M, 8 * M, cur, curStatus, [FAIL]), null, 'Install OS')
+      ];
+      var jobStatus = jobCur < 0 ? 'success' : curStatus;
+      var job = step('job', 'ProvisionOs job', jobStatus, t0 - 10 * M, jobCur < 0 ? t0 - 58 * M : (jobStatus === 'error' ? 2 * M : null),
+        steps('job.', JOB, t0 - 10 * M, 2 * M + 20000, jobCur, curStatus, [FAIL]), jobStatus === 'error' ? ['InstallExtensionsFailed: ' + FAIL] : null,
+        'edgeMachines/jobs/ProvisionOs');
+      var done = jobCur < 0 ? JOB.length : jobCur;
+      var status = jobCur < 0 ? 'success' : curStatus;
+      return {
+        name: name, route: 'simplified', lifecycle: lifecycle,
+        lifecycleMessage: lifecycle === 'Provisioned' ? 'Machine has been successfully provisioned.' : 'Installing OS in progress. Wait for the operation to complete.',
+        status: status, percent: lifecycle === 'Provisioned' ? 100 : Math.min(95, Math.round(25 + 70 * done / JOB.length)), reportedPercent: 50,
+        arcMachineName: '00000000-0000-0000-0000-00000000000' + idx + '-1', arcSource: 'edgeMachine.job',
+        arcStatus: lifecycle === 'Provisioned' || status === 'error' ? 'Connected' : 'Disconnected',
+        extensions: EXT.map(function (e) { return { name: e, status: lifecycle === 'Provisioned' ? 'success' : 'notstarted' }; }),
+        start: iso(t0), end: status === 'running' ? null : iso(status === 'error' ? 2 * M : t0 - 58 * M),
+        errors: status === 'error' ? ['ProvisionOs: InstallExtensionsFailed: ' + FAIL] : [], tree: stages.concat([job])
+      };
+    }
+    function oemMachine(name, idx, extDone, extRunning) {
+      var t0 = (40 - idx * 5) * M;
+      var tree = [
+        step('arc', 'Arc machine registered', 'success', null, t0, null, null, 'Microsoft.HybridCompute/machines/' + name + ' (Invoke-AzStackHciArcInitialization)'),
+        step('arc.connected', 'Arc agent Connected', 'success', null, t0 - M, null, null, 'Microsoft.HybridCompute/machines properties.status')
+      ].concat(EXT.map(function (e, i) {
+        if (i < extDone) return step('ext.' + e, e, 'success', t0 - 2 * M - i * 3 * M, t0 - 4 * M - i * 3 * M, null, null, 'Mandatory Azure Local extension');
+        if (i === extRunning) return step('ext.' + e, e, 'running', 4 * M, null, null, null, 'Mandatory Azure Local extension');
+        return step('ext.' + e, e, 'notstarted', null, null, null, null, 'Mandatory Azure Local extension');
+      }));
+      var ready = extDone === EXT.length;
+      return {
+        name: name, route: 'oem-image', lifecycle: ready ? 'Ready' : 'InstallingExtensions',
+        lifecycleMessage: ready ? 'Arc machine Connected and every mandatory extension Succeeded.' : 'Installing the mandatory extensions (' + extDone + ' of 4 succeeded).',
+        status: ready ? 'success' : 'running', percent: Math.round(100 * (2 + extDone) / 6), reportedPercent: null,
+        arcMachineName: name, arcSource: 'nodeName', arcStatus: 'Connected',
+        extensions: EXT.map(function (e, i) { return { name: e, status: i < extDone ? 'success' : i === extRunning ? 'running' : 'notstarted' }; }),
+        start: iso(t0), end: ready ? iso(t0 - 4 * M - (EXT.length - 1) * 3 * M) : null, errors: [], tree: tree
+      };
+    }
+
+    var names = simplified ? ['node01', 'node02', 'node03'] : ['node01', 'node02'];
+    var provNodes = simplified ?
+      [machine('node01', 1, -1, 'success', -1, 'Provisioned'), machine('node02', 2, 3, 'running', 12, 'InstallingOs'), machine('node03', 3, 4, 'error', 17, 'InstallingOs')] :
+      [oemMachine('node01', 1, 4, -1), oemMachine('node02', 2, 1, 1)];
+    var phase = simplified ? 'provisioning' : 'arc-registration';
+    var provStatus = simplified ? 'error' : 'running';
+    var state = {
+      cluster: 'clus01', mode: null, provisioningState: null,
+      phase: simplified ? 'failed' : phase, activePhase: phase,
+      provisioning: { route: route, routeSource: 'auto', phase: phase, status: provStatus, nodes: provNodes },
+      validation: { status: 'notstarted', tree: [], counts: {} },
+      deployment: { status: 'notstarted', tree: [], counts: {} },
+      nodes: provNodes.map(function (n) { return { name: n.name, arcStatus: n.arcStatus, arcMachineName: n.arcMachineName, arcSource: n.arcSource, lastStatusChange: iso(30 * M) }; }),
+      current: simplified ? { phase: phase, stepPath: ['node02', 'job', 'job.12'], stepName: 'BootIntoTargetOS' } :
+        { phase: phase, stepPath: ['node02', 'ext.AzureEdgeLifecycleManager'], stepName: 'AzureEdgeLifecycleManager' },
+      warnings: [],
+      polledAt: iso(4000)
+    };
+    applyConfig({ cluster: 'clus01', resourceGroup: 'rg-example-azl', identityModel: 'LocalIdentity', pollSeconds: 20, provisioningRoute: 'auto',
+      nodes: names.map(function (n, i) { return { name: n, seed: i === 0 }; }), logPaths: ['C:\\Windows\\System32\\Bootstrap\\Logs'] });
+    app.guidance = {
+      identityModel: 'LocalIdentity',
+      phases: {
+        provisioning: { account: 'The local administrator given when provisioning, on each node', where: ['C:\\Windows\\System32\\Bootstrap\\Logs'], when: 'Once the Azure Stack HCI OS is installed', source: 'Sample data (demo mode)', verified: false },
+        'arc-registration': { account: 'The built-in Administrator until the deployment local admin exists, then the deployment local admin', where: ['C:\\Windows\\System32\\Bootstrap\\Logs', 'C:\\ProgramData\\AzureConnectedMachineAgent\\Log'], when: 'From Invoke-AzStackHciArcInitialization onward', source: 'Sample data (demo mode)', verified: false },
+        validation: { account: 'The deployment local admin', where: ['C:\\CloudDeployment\\Logs'], when: 'From the start of Validate', source: 'Sample data (demo mode)', verified: false },
+        deployment: { account: 'The deployment local admin', where: ['C:\\CloudDeployment\\Logs', 'C:\\MASLogs'], when: 'Throughout Deploy', source: 'Sample data (demo mode)', verified: false, notes: 'Demo guidance only. The real card reads data/phase-guidance.json through /api/guidance.' }
+      }
+    };
+    applyState(state);
+    applyTailer({ state: 'connected', reason: '', node: 'node01' });
+    var f1 = 'C:\\Windows\\System32\\Bootstrap\\Logs\\setup.log';
+    var f2 = 'C:\\Windows\\System32\\Bootstrap\\Logs\\arcInstallLog-20261010.txt';
+    var f3 = 'C:\\Windows\\System32\\Bootstrap\\Logs\\AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.node01.20261010170000.txt';
+    applyFiles([{ path: f1 }, { path: f2 }, { path: f3 }]);
+    var seq = 0;
+    function line(msAgo, file, level, text) { return { seq: ++seq, time: iso(msAgo), received: iso(msAgo), timeSource: 'line', file: file, level: level, text: text }; }
+    applyLogBatch(simplified ? [
+      line(20 * M, f1, 'info', 'Bootstrap service started on node01.'),
+      line(19 * M, f2, 'info', 'Azure Connected Machine agent installed.'),
+      line(18 * M, f3, 'info', 'Connecting node01 to Azure Arc as 00000000-0000-0000-0000-000000000001-1.'),
+      line(12 * M, f1, 'info', 'Mandatory extensions reported Succeeded.'),
+      line(9 * M, f1, 'info', 'Machine provisioned.')
+    ] : [
+      line(40 * M, f3, 'info', 'Invoke-AzStackHciArcInitialization started for node01.'),
+      line(39 * M, f2, 'info', 'Azure Connected Machine agent installed.'),
+      line(38 * M, f3, 'info', 'node01 connected to Azure Arc.'),
+      line(30 * M, f1, 'warning', 'Warning: the proxy bypass list is empty; using direct connections.'),
+      line(20 * M, f1, 'info', 'Mandatory extensions reported Succeeded on node01.')
+    ], { source: 'live' });
+    var msgs = simplified ? [['info', 'Bootstrap heartbeat: healthy.'], ['info', 'Waiting for the next provisioning task.']] :
+      [['info', 'Bootstrap heartbeat: healthy.'], ['info', 'Extension status check: AzureEdgeLifecycleManager Creating.']];
+    var mi = 0;
+    setInterval(function () {
+      var m = msgs[mi++ % msgs.length];
+      var nowIso = new Date().toISOString();
+      applyLogBatch([{ seq: ++seq, time: nowIso, received: nowIso, timeSource: 'line', file: f1, level: m[0], text: m[1] }], { source: 'live' });
+    }, 4000);
     setInterval(function () {
       state.polledAt = new Date().toISOString();
       applyState(state);

@@ -118,6 +118,7 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
 
     It 'Arc machine 404 is NotFound, not a warning' {
         Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation (Get-SonarValidationFixture) -Deployment ([pscustomobject]@{})))
+        Add-ArmRoute 'machines/node01/extensions\?' (New-SonarArmResponse 200 @{ value = @() })
         Add-ArmRoute 'machines/node01\?' (New-SonarArmResponse 200 (Get-ArcBody -Status 'Connected'))
         Add-ArmRoute 'machines/node02\?' (New-SonarArmResponse 404 @{ error = @{ code = 'ResourceNotFound'; message = 'not found' } })
         Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 400 $null)
@@ -137,6 +138,7 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
     It 'Arc machine 403 becomes a warning and the node stays Unknown' {
         Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation ([pscustomobject]@{}) -Deployment ([pscustomobject]@{})))
         Add-ArmRoute 'machines/node01\?' (New-SonarArmResponse 403 @{ error = @{ code = 'AuthorizationFailed'; message = 'no read access' } })
+        Add-ArmRoute 'machines/node02/extensions\?' (New-SonarArmResponse 200 @{ value = @() })
         Add-ArmRoute 'machines/node02\?' (New-SonarArmResponse 200 (Get-ArcBody))
         Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 404 $null)
         $state = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
@@ -144,16 +146,20 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
         $state.warnings | Should -Contain 'Arc machine node01: no read access'
     }
 
-    It 'edgeMachines 400 and 404 are ignored silently' -TestCases @(@{ Code = 400 }, @{ Code = 404 }) {
+    It 'edgeMachines 400 and 404 are ignored silently (auto route falls back to the OEM image route)' -TestCases @(@{ Code = 400 }, @{ Code = 404 }) {
         param($Code)
         Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation ([pscustomobject]@{}) -Deployment ([pscustomobject]@{})))
+        Add-ArmRoute '/extensions\?' (New-SonarArmResponse 200 @{ value = @() })
         Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
         Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse $Code @{ error = @{ code = 'NoRegisteredProviderFound'; message = 'api version not supported' } })
         $state = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
         @($state.edgeMachines).Count | Should -Be 0
         @($state.warnings).Count | Should -Be 0
-        $state.phase | Should -Be 'provisioning'
-        @($state.current.stepPath).Count | Should -Be 0
+        $state.provisioning.route | Should -Be 'oem-image'
+        $state.provisioning.routeSource | Should -Be 'auto'
+        $state.phase | Should -Be 'arc-registration'
+        $state.current.phase | Should -Be 'arc-registration'
+        $state.current.stepPath[0] | Should -BeIn @('node01', 'node02') -Because 'the Arc registration tree starts with the node name'
     }
 
     It 'edgeMachines 500 becomes a warning' {
@@ -164,7 +170,10 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
         $state.warnings | Should -Contain 'edgeMachines: internal'
     }
 
-    It 'provisioning: edge machine ProvisionOs job gives the current step with the machine name first' {
+    It 'provisioning: an explicit arcMachineName still maps the edge machine; the current step starts with the node name' {
+        $configObject = New-SonarConfigObject
+        $configObject.nodes[0] | Add-Member -NotePropertyName arcMachineName -NotePropertyValue 'node01' -Force
+        $explicitConfig = Read-AzlSonarConfig -Json (ConvertTo-SonarConfigJson $configObject)
         $edgeList = @{ value = @(@{
                     name       = 'dev-0001-1'
                     id         = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.AzureStackHCI/edgeMachines/dev-0001-1'
@@ -182,16 +191,20 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
         Add-ArmRoute 'jobs/ProvisionOs\?' (New-SonarArmResponse 200 $job)
         Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 200 $edgeList)
 
-        $state = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
+        $state = Get-AzlSonarDeploymentState -Config $explicitConfig -Now $script:Now
         $state.phase | Should -Be 'provisioning'
+        $state.provisioning.route | Should -Be 'simplified'
         ($state.warnings -match 'deploymentSettings for clus01 not found yet') | Should -Not -BeNullOrEmpty
         @($state.edgeMachines).Count | Should -Be 1
         $state.edgeMachines[0].node | Should -Be 'node01'
         $state.edgeMachines[0].arcMachineName | Should -Be 'node01'
         $state.edgeMachines[0].provisionOsJob.percentComplete | Should -Be 40
         $state.edgeMachines[0].provisionOsJob.deployment.status | Should -Be 'running'
+        $state.nodes[0].arcSource | Should -Be 'config'
+        $state.provisioning.nodes[0].reportedPercent | Should -Be 40
+        $state.provisioning.nodes[1].lifecycle | Should -Be 'NotCreated'
         $state.current.phase | Should -Be 'provisioning'
-        $state.current.stepPath | Should -Be @('dev-0001-1', '1')
+        $state.current.stepPath | Should -Be @('node01', 'job', 'job.1')
         $state.current.stepName | Should -Be 'InstallingOs'
     }
 

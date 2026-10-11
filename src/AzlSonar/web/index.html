@@ -75,6 +75,15 @@
 
   <main id="main" class="layout">
     <div class="col-left">
+      <section id="prov-panel" class="panel panel-prov" aria-labelledby="prov-title" hidden>
+        <div class="panel-head">
+          <h2 id="prov-title">Provisioning</h2>
+          <span id="prov-route" class="pill pill-muted"></span>
+        </div>
+        <p class="hint" id="prov-hint">How each machine gets ready before validation: the lifecycle, the steps Azure reports and their errors.</p>
+        <div id="prov-host" class="panel-body scroll" aria-describedby="prov-hint"></div>
+      </section>
+
       <section id="steps-panel" class="panel panel-steps" aria-labelledby="steps-title">
         <div class="panel-head">
           <h2 id="steps-title">Steps</h2>

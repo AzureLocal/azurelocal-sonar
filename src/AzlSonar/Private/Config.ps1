@@ -61,6 +61,11 @@ function Test-AzlSonarConfig {
         $problems.Add('identityModel must be LocalIdentity or ActiveDirectory.')
     }
 
+    $route = Get-AzlSonarMember $Config 'provisioningRoute'
+    if ($null -ne $route -and [string]$route -notin @('auto', 'simplified', 'oem-image')) {
+        $problems.Add('provisioningRoute must be auto, simplified or oem-image.')
+    }
+
     $pollSeconds = Get-AzlSonarMember $Config 'pollSeconds'
     if ($null -ne $pollSeconds) {
         $pollValue = 0
@@ -170,8 +175,11 @@ function Read-AzlSonarConfig {
     .SYNOPSIS
         Reads, validates and normalises a Sonar config file (sonar.config.json).
     .DESCRIPTION
-        Applies the documented defaults (apiVersion, edgeApiVersion, pollSeconds, log paths, include and exclude
-        patterns, recurseDepth, activeWindowMinutes, maxLinesPerPoll, logs.pollSeconds, logs.transport, credential source) and marks the seed node. Throws one error listing every problem
+        Applies the documented defaults (apiVersion, edgeApiVersion, provisioningRoute, pollSeconds, log paths, include and
+        exclude patterns, recurseDepth, activeWindowMinutes, maxLinesPerPoll, logs.pollSeconds, logs.transport, credential
+        source) and marks the seed node. nodes[].arcMachineName is optional: when it is missing, arcMachineName holds the
+        node name and arcMachineNameSet is $false, so the poller may resolve the real Arc machine (simplified machine
+        provisioning names it <device-id>-1, read from the edge machine's arcMachineResourceId). Throws one error listing every problem
         when the config is not valid. Never reads secrets: Key Vault secret names are kept as names only.
     .PARAMETER Path
         Path to the JSON config file.
@@ -180,8 +188,9 @@ function Read-AzlSonarConfig {
     .EXAMPLE
         $config = Read-AzlSonarConfig -Path ./config/clus01.json
     .OUTPUTS
-        PSCustomObject with subscriptionId, resourceGroup, clusterName, apiVersion, edgeApiVersion, identityModel,
-        pollSeconds, nodes[], seedNode, logs, credential.
+        PSCustomObject with subscriptionId, resourceGroup, clusterName, apiVersion, edgeApiVersion, provisioningRoute,
+        identityModel, pollSeconds, nodes[] (name, address, arcMachineName, arcMachineNameSet, seed), seedNode, logs,
+        credential.
     #>
     [CmdletBinding(DefaultParameterSetName = 'Path')]
     [OutputType([pscustomobject])]
@@ -219,14 +228,16 @@ function Read-AzlSonarConfig {
     $seedName = $null
     foreach ($node in (ConvertTo-AzlSonarArray $raw.nodes)) {
         $name = [string]$node.name
-        $arcName = [string](Get-AzlSonarMember $node 'arcMachineName' $name)
+        $arcValue = Get-AzlSonarMember $node 'arcMachineName'
+        $arcName = if ($null -ne $arcValue) { [string]$arcValue } else { $name }
         $isSeed = [bool](Get-AzlSonarMember $node 'seed' $false)
         if ($isSeed) { $seedName = $name }
         $nodes.Add([pscustomobject]@{
-                name           = $name
-                address        = [string]$node.address
-                arcMachineName = $arcName
-                seed           = $isSeed
+                name              = $name
+                address           = [string]$node.address
+                arcMachineName    = $arcName
+                arcMachineNameSet = $null -ne $arcValue
+                seed              = $isSeed
             })
     }
     if (-not $seedName) {
@@ -269,6 +280,7 @@ function Read-AzlSonarConfig {
         clusterName    = [string]$raw.clusterName
         apiVersion     = [string](Get-AzlSonarMember $raw 'apiVersion' '2025-09-15-preview')
         edgeApiVersion = [string](Get-AzlSonarMember $raw 'edgeApiVersion' '2025-12-01-preview')
+        provisioningRoute = ([string](Get-AzlSonarMember $raw 'provisioningRoute' 'auto')).ToLowerInvariant()
         identityModel  = $identityModel
         pollSeconds    = $pollSeconds
         nodes          = $nodeArray
@@ -283,7 +295,8 @@ function ConvertTo-AzlSonarPublicConfig {
     <#
     .SYNOPSIS
         The config as served by /api/config and the export bundle: no secrets, no secret names, no addresses.
-        { clusterName, cluster, resourceGroup, identityModel, nodes[{name, seed}], logs{paths[]}, pollSeconds, startedAt, serverId }
+        { clusterName, cluster, resourceGroup, identityModel, provisioningRoute, nodes[{name, seed}], logs{paths[]}, pollSeconds,
+          startedAt, serverId }
     #>
     [CmdletBinding()]
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
@@ -306,6 +319,7 @@ function ConvertTo-AzlSonarPublicConfig {
         cluster       = $Config.clusterName
         resourceGroup = $Config.resourceGroup
         identityModel = $Config.identityModel
+        provisioningRoute = $Config.provisioningRoute
         nodes         = @($nodes)
         logs          = [ordered]@{ paths = [string[]]@($Config.logs.paths) }
         pollSeconds   = $Config.pollSeconds

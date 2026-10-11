@@ -94,8 +94,9 @@ function Resolve-AzlSonarCredential {
     }
 
     if ($null -ne $result -and (Test-AzlSonarBuiltInAdministrator -UserName $result.UserName)) {
-        Write-Warning ("The log account is 'Administrator'. Deployment renames the built-in Administrator (ASBuiltInAdmin), " +
-            'so this account may stop working mid-deployment. Use the non-built-in local admin (Local Identity) or the deployment account.')
+        Write-Warning ("The log account is 'Administrator'. That is fine while the machines are prepared (Arc registration), but deployment " +
+            'renames the built-in Administrator (ASBuiltInAdmin), so this account may stop working mid-deployment. For Validate and Deploy ' +
+            'use the non-built-in local admin (Local Identity) or the deployment account.')
     }
     return $result
 }

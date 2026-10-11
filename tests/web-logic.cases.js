@@ -237,4 +237,68 @@ test('zero-count summaries are not problems (fallback for lines without a level)
   eq(m.normLevel('warning', 'whatever'), 'warning', 'a level from the back end wins');
 });
 
+// ---------------------------------------------------------------- S-8: provisioning panel (both routes)
+
+function provState(phase, activePhase, route, nodes) {
+  return { phase: phase, activePhase: activePhase, provisioning: { route: route, phase: route === 'oem-image' ? 'arc-registration' : 'provisioning', status: 'running', nodes: nodes } };
+}
+
+test('phase labels: Provisioning, Arc registration; a failed run names the phase that failed', function () {
+  eq(m.phaseLabel('provisioning'), 'Provisioning');
+  eq(m.phaseLabel('arc-registration'), 'Arc registration');
+  eq(m.phaseLabel('validation'), 'Validation');
+  eq(m.phaseChipText({ phase: 'arc-registration', activePhase: 'arc-registration' }), 'Arc registration');
+  eq(m.phaseChipText({ phase: 'provisioning' }), 'Provisioning', 'older back ends without activePhase');
+  eq(m.phaseChipText({ phase: 'failed', activePhase: 'provisioning' }), 'Failed: Provisioning');
+  eq(m.phaseChipText({ phase: 'failed', activePhase: 'deployment' }), 'Failed: Deployment');
+  eq(m.phaseChipText({ phase: 'done', activePhase: 'deployment' }), 'Done');
+});
+
+test('provisioningTreeOf: one item per machine with the tree as children and the summary in .prov', function () {
+  var jobStep = { id: 'job.17', name: 'InstallExtensions', status: 'error', errors: ['Failed to download extension AzureEdgeRemoteSupport: unable to connect to the remote server'], children: [] };
+  var tree = m.provisioningTreeOf(provState('failed', 'provisioning', 'simplified', [
+    { name: 'node-01', route: 'simplified', lifecycle: 'Provisioned', status: 'success', percent: 100, reportedPercent: 50, arcMachineName: '0000-1', arcSource: 'edgeMachine.job',
+      extensions: [{ name: 'AzureEdgeDeviceManagement', status: 'success' }, { name: 'AzureEdgeLifecycleManager', status: 'success' }], tree: [] },
+    { name: 'node-02', lifecycle: 'InstallingOs', lifecycleMessage: 'Installing OS in progress.', status: 'error', percent: 140,
+      errors: ['ProvisionOs: InstallExtensionsFailed: x'], start: '2026-10-10T17:53:31Z', tree: [{ id: 'job', name: 'ProvisionOs job', status: 'error', children: [jobStep] }] },
+    null
+  ]));
+  eq(tree.length, 2, 'null entries are skipped');
+  eq(tree[0].id, 'node-01');
+  eq(tree[0].status, 'success');
+  eq(tree[0].prov.lifecycle, 'Provisioned');
+  eq(tree[0].prov.reportedPercent, 50);
+  eq(tree[0].prov.extensionsReady + '/' + tree[0].prov.extensionsTotal, '2/2');
+  eq(tree[1].prov.percent, 100, 'percent is clamped to 0..100');
+  eq(tree[1].prov.route, 'simplified', 'route falls back to the provisioning route');
+  eq(tree[1].description, 'Installing OS in progress.');
+  eq(tree[1].errors, ['ProvisionOs: InstallExtensionsFailed: x']);
+  eq(tree[1].children[0].children[0].errors, ['Failed to download extension AzureEdgeRemoteSupport: unable to connect to the remote server']);
+  eq(m.provisioningTreeOf({ phase: 'deployment' }), [], 'no provisioning data: no items');
+});
+
+test('provisioningSummary counts machines by status', function () {
+  var tree = m.provisioningTreeOf(provState('arc-registration', 'arc-registration', 'oem-image', [
+    { name: 'a', status: 'success' }, { name: 'b', status: 'running' }, { name: 'c', status: 'error' }, { name: 'd', status: 'notstarted' }, { name: 'e', status: 'unknown' }
+  ]));
+  eq(m.provisioningSummary(tree), { total: 5, ready: 1, failed: 1, running: 1, waiting: 2 });
+});
+
+test('the provisioning section collapses once when validation starts and opens again for a new provisioning run', function () {
+  eq(m.provisioningCollapse('provisioning', false), 'keep');
+  eq(m.provisioningCollapse('arc-registration', false), 'keep');
+  eq(m.provisioningCollapse('validation', false), 'collapse');
+  eq(m.provisioningCollapse('validation', true), 'keep', 'the user may have opened it again');
+  eq(m.provisioningCollapse('deployment', true), 'keep');
+  eq(m.provisioningCollapse('provisioning', true), 'expand');
+  eq(m.provisioningCollapse('', false), 'keep');
+});
+
+test('Arc machine name sources are explained', function () {
+  eq(/edge machine/.test(m.arcSourceText('edgeMachine.job')), true);
+  eq(/arcMachineName/.test(m.arcSourceText('config')), true);
+  eq(/host/.test(m.arcSourceText('nodeName')), true);
+  eq(m.arcSourceText('bogus'), '');
+});
+
 process.stdout.write(JSON.stringify(cases));

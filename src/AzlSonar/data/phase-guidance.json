@@ -32,6 +32,34 @@
       "verified": false
     },
     {
+      "phase": "arc-registration",
+      "identityModel": "LocalIdentity",
+      "account": "The built-in Administrator (the account the OEM image or the OS setup gives you) until the deployment local admin exists; after that the deployment local admin (non-built-in, same credentials on every node). The built-in Administrator is renamed ASBuiltInAdmin when deployment starts, so switch accounts before Validate/Deploy.",
+      "logPaths": [
+        "C:\\Windows\\System32\\Bootstrap\\Logs",
+        "C:\\ProgramData\\AzureConnectedMachineAgent\\Log"
+      ],
+      "available": "From the moment Invoke-AzStackHciArcInitialization runs on the node: setup.log and arcInstallLog-*.txt (Arc agent install) and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.* (the registration transcript) under Bootstrap\\Logs; himds.log and azcmagent.log under AzureConnectedMachineAgent\\Log once the Connected Machine agent is installed. The mandatory extensions (AzureEdgeDeviceManagement, AzureEdgeLifecycleManager, AzureEdgeRemoteSupport, AzureEdgeTelemetryAndDiagnostics) then install; their logs are under C:\\ProgramData\\GuestConfig\\extension_logs. Learn also offers Get-ArcBootstrapStatus and Collect-ArcBootstrapSupportLogs on the node.",
+      "access": "WinRM to the node IP (NTLM): add the node to the workstation's TrustedHosts or use HTTPS 5986, and always pass -Credential. A non-built-in local admin may also need LocalAccountTokenFilterPolicy=1 on the node. RDP or the console also work at this stage.",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-without-azure-arc-gateway?view=azloc-2609#step-3-run-registration-script",
+      "verified": false,
+      "observed": "Seen live 10 Oct 2026 on a 2609 Local Identity node (read later, during Deploy, as the deployment local admin): C:\\Windows\\System32\\Bootstrap\\Logs holds setup.log, arcInstallLog-*.txt and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.*. Not yet checked during an Arc registration itself or with the built-in Administrator."
+    },
+    {
+      "phase": "arc-registration",
+      "identityModel": "ActiveDirectory",
+      "account": "The built-in Administrator (the account the OEM image or the OS setup gives you) until the deployment admin exists; after that the local administrator used for deployment (the same on every node). If the nodes were joined to the domain before deployment (2604 or later), the deployment (LCM) user once it is in local Administrators. The built-in Administrator is renamed ASBuiltInAdmin when deployment starts.",
+      "logPaths": [
+        "C:\\Windows\\System32\\Bootstrap\\Logs",
+        "C:\\ProgramData\\AzureConnectedMachineAgent\\Log"
+      ],
+      "available": "From the moment Invoke-AzStackHciArcInitialization runs on the node: setup.log and arcInstallLog-*.txt (Arc agent install) and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.* (the registration transcript) under Bootstrap\\Logs; himds.log and azcmagent.log under AzureConnectedMachineAgent\\Log once the Connected Machine agent is installed. The mandatory extensions (AzureEdgeDeviceManagement, AzureEdgeLifecycleManager, AzureEdgeRemoteSupport, AzureEdgeTelemetryAndDiagnostics) then install; their logs are under C:\\ProgramData\\GuestConfig\\extension_logs. Learn also offers Get-ArcBootstrapStatus and Collect-ArcBootstrapSupportLogs on the node.",
+      "access": "The nodes are normally still in a workgroup: WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential. Kerberos by host name only if the nodes were joined to the domain beforehand.",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-without-azure-arc-gateway?view=azloc-2609#step-3-run-registration-script",
+      "verified": false,
+      "observed": "Seen live 10 Oct 2026 on a 2609 Local Identity node (read later, during Deploy, as the deployment local admin): C:\\Windows\\System32\\Bootstrap\\Logs holds setup.log, arcInstallLog-*.txt and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.*. Not yet checked during an Arc registration itself or with the built-in Administrator."
+    },
+    {
       "phase": "validation",
       "identityModel": "LocalIdentity",
       "account": "The deployment local admin (localAdminUserName): non-built-in, with the same credentials on every node. Learn documents no separate LCM user for Local Identity.",

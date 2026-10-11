@@ -4,16 +4,20 @@ Sonar has three parts, all started by one script (`Start-AzlSonar.ps1`) in one P
 
 | Part | What it does | Source |
 | --- | --- | --- |
-| Azure poller | Every `pollSeconds` (20 s): reads the deployment's step trees (validation and deployment) from `deploymentSettings/default`, the Arc machine of every node, and, best effort, the edge machines of the resource group with their `ProvisionOs` job (simplified machine provisioning) | Azure Resource Manager GETs through the signed-in Az PowerShell context, the same resources the portal reads |
+| Azure poller | Every `pollSeconds` (20 s): reads the deployment's step trees (validation and deployment) from `deploymentSettings/default`, the edge machines of the resource group with their `ProvisionOs` job (simplified machine provisioning), the Arc machine of every node and, on the OEM image route, each Arc machine's mandatory extensions | Azure Resource Manager GETs through the signed-in Az PowerShell context, the same resources the portal reads |
 | Log tailer | Follows the deployment log files on the seed node as they grow | One read-only script per poll over PowerShell remoting (WinRM), or over SSH with Posh-SSH when WinRM is blocked |
 | Web view | Step tree, live log stream with filters, phase and node status, log access guidance, export | Static page served from `http://localhost:<port>/`, live updates over Server-Sent Events, polling fallback |
 
 ## Phases Sonar follows
 
-1. **Provisioning**: before any validation step is reported. Node Arc status in the header; the edge machines and their `ProvisionOs` job are read into the state and the export (drawing them is plan task S-8).
+1. **Provisioning** or **Arc registration**: before any validation step is reported, how each machine gets ready. Sonar follows both routes (`provisioningRoute`, `auto` by default):
+   - **Simplified machine provisioning** (preview, phase *Provisioning*): each machine is an edge machine. Sonar shows its lifecycle (`Creating` → `AwaitingConnection` → `Provisioning` → `ReadyForOs` → `InstallingOs` → `Provisioned`), the lifecycle stages, and the `ProvisionOs` job's steps with their errors (for example `InstallExtensions` failing with *Failed to download extension AzureEdgeRemoteSupport: unable to connect to the remote server*). The Arc machine is named after the device (`<device-id>-1`); Sonar reads the name from the edge machine, so the config does not need it.
+   - **OEM image + Arc registration** (phase *Arc registration*): no edge machines. The node is registered with `Invoke-AzStackHciArcInitialization` and its Arc machine carries the host name. Sonar shows the Arc machine appearing, turning `Connected`, and the four mandatory extensions (`AzureEdgeDeviceManagement`, `AzureEdgeLifecycleManager`, `AzureEdgeRemoteSupport`, `AzureEdgeTelemetryAndDiagnostics`) going from `Creating` to `Succeeded`, or `Failed` with the extension's message.
+
+   The panel collapses once validation starts and can be opened again.
 2. **Validation**: every validation step with its status, times, duration and errors.
 3. **Deployment**: every deployment step and sub-step, with the live logs from the seed node.
-4. **Done** or **Failed**: the deployment succeeded, or the active phase reported an error (the failed step's exception text is shown inline).
+4. **Done** or **Failed**: the deployment succeeded, or the active phase reported an error (the failed step's exception text is shown inline; a failed machine counts during provisioning and Arc registration, and the chip says which phase failed).
 
 ## Live logs
 

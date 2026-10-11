@@ -4,11 +4,12 @@
   "clusterName": "clus01",
   "apiVersion": "2025-09-15-preview",
   "edgeApiVersion": "2025-12-01-preview",
+  "provisioningRoute": "auto",
   "identityModel": "LocalIdentity",
   "pollSeconds": 20,
   "nodes": [
-    { "name": "node01", "address": "192.0.2.11", "arcMachineName": "node01", "seed": true },
-    { "name": "node02", "address": "192.0.2.12", "arcMachineName": "node02" }
+    { "name": "node01", "address": "192.0.2.11", "seed": true },
+    { "name": "node02", "address": "192.0.2.12" }
   ],
   "logs": {
     "paths": [

@@ -23,6 +23,12 @@ Describe 'ConvertTo-AzlSonarStepStatus' {
         @{ Raw = 'Error'; Expected = 'error' }
         @{ Raw = 'Failed'; Expected = 'error' }
         @{ Raw = 'Skipped'; Expected = 'skipped' }
+        @{ Raw = 'DeploymentSuccess'; Expected = 'success' }
+        @{ Raw = 'DeploymentFailed'; Expected = 'error' }
+        @{ Raw = 'DeploymentInProgress'; Expected = 'running' }
+        @{ Raw = 'ValidationFailed'; Expected = 'error' }
+        @{ Raw = 'Creating'; Expected = 'running' }
+        @{ Raw = 'Canceled'; Expected = 'error' }
         @{ Raw = 'Paused'; Expected = 'unknown' }
     ) {
         param($Raw, $Expected)

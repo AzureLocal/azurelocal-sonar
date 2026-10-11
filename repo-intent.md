@@ -9,7 +9,7 @@ The Azure portal shows an Azure Local deployment as a coarse progress view that 
 - the full step tree of validation and deployment (each step, sub-step, status, start and end time, duration, errors) as Azure reports it;
 - the live deployment log files on the seed node, streamed as they are written, with filtering and highlighting of warnings and errors;
 - which account to use to read those logs at each phase, and when they become available (before, during and after deployment);
-- the provisioning phase that comes before it (simplified machine provisioning: edge machine lifecycle, OS install, Arc onboarding).
+- how the machines get ready before it, on either route: simplified machine provisioning (edge machine lifecycle, OS install, Arc onboarding) or OEM image + Arc registration (Arc machine, mandatory extensions).
 
 It is a script you run, not a product you install: `Start-AzlSonar.ps1` starts a local PowerShell back end and opens the browser. Read-only by design: Sonar observes; it never changes the deployment.
 

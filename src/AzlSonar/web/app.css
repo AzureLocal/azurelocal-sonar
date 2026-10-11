@@ -242,11 +242,11 @@ a { color: var(--accent); }
 .phase-chip {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 1px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 700;
-  text-transform: capitalize;
   background: var(--surface-3); color: var(--text-2);
 }
 .phase-chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.phase-chip[data-phase="provisioning"] { background: var(--warn-soft); color: var(--warn); }
+.phase-chip[data-phase="provisioning"],
+.phase-chip[data-phase="arc-registration"] { background: var(--warn-soft); color: var(--warn); }
 .phase-chip[data-phase="validation"] { background: var(--run-soft); color: var(--run); }
 .phase-chip[data-phase="deployment"] { background: var(--accent-soft); color: var(--accent); }
 .phase-chip[data-phase="done"] { background: var(--ok-soft); color: var(--ok); }
@@ -330,6 +330,7 @@ a { color: var(--accent); }
 .hint { margin: 0 14px 8px; font-size: 12px; color: var(--muted); }
 
 .panel-steps .panel-body { max-height: 70vh; }
+.panel-prov .panel-body { max-height: 60vh; }
 .panel-logs { height: 75vh; min-height: 420px; }
 
 @media (min-width: 1100px) {
@@ -342,6 +343,8 @@ a { color: var(--accent); }
   }
   .col-left { min-height: 0; }
   .panel-steps { flex: 1; min-height: 0; }
+  .panel-prov { flex: none; max-height: 48%; }
+  .panel-prov .panel-body { max-height: none; flex: 1; }
   .panel-steps .panel-body { max-height: none; flex: 1; }
   .panel-guidance { flex: none; max-height: 42%; }
   .panel-guidance .guidance-body { flex: 1; min-height: 0; overflow: auto; }
@@ -357,6 +360,26 @@ a { color: var(--accent); }
 }
 
 /* ---------- Step tree ---------- */
+
+/* Provisioning panel: one top-level tree item per machine with its lifecycle, progress and Arc machine. */
+.prov-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;
+  margin: 0 6px 4px 50px; font-size: 12px; color: var(--muted);
+}
+.lc-chip {
+  display: inline-flex; align-items: center; padding: 0 8px; border-radius: 999px;
+  font-weight: 600; font-size: 12px; background: var(--idle-soft); color: var(--text-2);
+}
+.lc-chip[data-status="running"] { background: var(--run-soft); color: var(--run); }
+.lc-chip[data-status="success"] { background: var(--ok-soft); color: var(--ok); }
+.lc-chip[data-status="error"] { background: var(--err-soft); color: var(--err); }
+.prov-pct { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.prov-pct .progress { width: 90px; }
+.prov-pct .p-fill { background: var(--run); }
+.prov-pct[data-status="success"] .p-fill { background: var(--ok); }
+.prov-pct[data-status="error"] .p-fill { background: var(--err); }
+.prov-arc { overflow-wrap: anywhere; }
+.prov-msg { flex-basis: 100%; color: var(--text-2); }
 
 .tree-section + .tree-section { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 
@@ -579,7 +602,7 @@ a { color: var(--accent); }
 }
 
 @media (forced-colors: active) {
-  .progress span, .conn-dot, .node-chip .dot { forced-color-adjust: none; }
+  .progress span, .conn-dot, .node-chip .dot, .prov-pct .p-fill { forced-color-adjust: none; }
   .row[data-current="true"] { outline: 1px solid CanvasText; }
 }
 

@@ -48,7 +48,7 @@ To look at the page without a deployment, open `http://localhost:8642/?demo=1` (
 
 ## Configuration
 
-One JSON file per cluster: subscription, resource group, cluster name, identity model (`LocalIdentity` or `ActiveDirectory`), the nodes (name, address, Arc resource name, which one is the seed), the log folders and limits, and where the log account comes from (`prompt`, `parameter` or `keyvault` with secret names). No secret ever goes in the file.
+One JSON file per cluster: subscription, resource group, cluster name, identity model (`LocalIdentity` or `ActiveDirectory`), how the machines get ready (`provisioningRoute`: `auto`, `simplified` or `oem-image`), the nodes (name, address, which one is the seed; the Arc resource name only to override what Sonar resolves), the log folders and limits, and where the log account comes from (`prompt`, `parameter` or `keyvault` with secret names). No secret ever goes in the file.
 
 ```json
 {
@@ -56,9 +56,10 @@ One JSON file per cluster: subscription, resource group, cluster name, identity 
   "resourceGroup": "rg-example-azl",
   "clusterName": "clus01",
   "identityModel": "LocalIdentity",
+  "provisioningRoute": "auto",
   "nodes": [
-    { "name": "node01", "address": "192.0.2.11", "arcMachineName": "node01", "seed": true },
-    { "name": "node02", "address": "192.0.2.12", "arcMachineName": "node02" }
+    { "name": "node01", "address": "192.0.2.11", "seed": true },
+    { "name": "node02", "address": "192.0.2.12" }
   ],
   "credential": { "source": "prompt" }
 }
@@ -68,7 +69,7 @@ Every field, its default and its limits are in the [README configuration referen
 
 ## Which account
 
-Use the non-built-in deployment local admin (Local Identity) or the local administrator (Active Directory). Do not use the built-in `Administrator`: deployment renames it to `ASBuiltInAdmin`. The page's **Log access** card shows the account, folders and timing for each phase and your identity model.
+Use the non-built-in deployment local admin (Local Identity) or the local administrator (Active Directory). Do not use the built-in `Administrator` for validation and deployment: deployment renames it to `ASBuiltInAdmin` (it is fine while the machines register with Arc). The page's **Log access** card shows the account, folders and timing for each phase and your identity model.
 
 ## If something does not work
 

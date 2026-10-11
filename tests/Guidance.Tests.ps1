@@ -11,7 +11,7 @@ BeforeAll {
     Import-SonarTestModule
     $script:GuidancePath = Join-Path $script:SonarModuleRoot 'data/phase-guidance.json'
     $script:GuidanceDoc = Get-Content -LiteralPath $script:GuidancePath -Raw | ConvertFrom-Json -Depth 32
-    $script:AllPhases = @('provisioning', 'validation', 'deployment', 'post-deployment')
+    $script:AllPhases = @('provisioning', 'arc-registration', 'validation', 'deployment', 'post-deployment')
 }
 
 Describe 'Get-AzlSonarPhaseGuidance for <Model>' -ForEach $script:Models {
@@ -25,7 +25,7 @@ Describe 'Get-AzlSonarPhaseGuidance for <Model>' -ForEach $script:Models {
         $script:g.version | Should -Be $script:GuidanceDoc.version
     }
 
-    It 'returns all four phases in order' {
+    It 'returns all five phases in order' {
         @($script:g.phases.Keys) | Should -Be $script:AllPhases
     }
 

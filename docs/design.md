@@ -23,11 +23,12 @@ This is the contract every part of Sonar is built to (plan task S-4). Back end, 
   "clusterName": "clus01",
   "apiVersion": "2025-09-15-preview",
   "edgeApiVersion": "2025-12-01-preview",
+  "provisioningRoute": "auto",
   "identityModel": "LocalIdentity",
   "pollSeconds": 20,
   "nodes": [
-    { "name": "node01", "address": "192.0.2.11", "arcMachineName": "node01", "seed": true },
-    { "name": "node02", "address": "192.0.2.12", "arcMachineName": "node02" }
+    { "name": "node01", "address": "192.0.2.11", "seed": true },
+    { "name": "node02", "address": "192.0.2.12" }
   ],
   "logs": {
     "paths": ["C:\\CloudContent\\MASLogs", "C:\\MASLogs", "C:\\CloudDeployment\\Logs", "C:\\Observability", "C:\\Windows\\System32\\Bootstrap\\Logs"],
@@ -43,22 +44,41 @@ This is the contract every part of Sonar is built to (plan task S-4). Back end, 
 }
 ```
 
-`identityModel`: `LocalIdentity` or `ActiveDirectory`. `credential.source`: `prompt` (Get-Credential at start), `parameter` (`-Credential`), or `keyvault` with `vault`, `usernameSecret`, `passwordSecret` (read once at start with Az.KeyVault; never logged, never sent to the page). `arcMachineName` maps a host name to its Arc resource name (simplified machine provisioning names it `<device-id>-1`). `logs.pollSeconds` defaults to the top-level `pollSeconds`. `logs.transport`: `auto` (WinRM, then SSH), `winrm` or `ssh`. Every field and its default is listed in the README.
+`identityModel`: `LocalIdentity` or `ActiveDirectory`. `credential.source`: `prompt` (Get-Credential at start), `parameter` (`-Credential`), or `keyvault` with `vault`, `usernameSecret`, `passwordSecret` (read once at start with Az.KeyVault; never logged, never sent to the page). `provisioningRoute`: `simplified`, `oem-image` or `auto` (default; see *Machine readiness* below). `nodes[].arcMachineName` is optional and overrides the Arc machine Sonar resolves; the normalised config keeps `arcMachineName` (the node name when not given) and `arcMachineNameSet` (whether the config gave it). `logs.pollSeconds` defaults to the top-level `pollSeconds`. `logs.transport`: `auto` (WinRM, then SSH), `winrm` or `ssh`. Every field and its default is listed in the README.
 
 ## Azure poller (read-only)
 
 Uses the signed-in Az PowerShell context (`Invoke-AzRestMethod`). Every `pollSeconds`:
 
 1. `GET .../providers/Microsoft.AzureStackHCI/clusters/{cluster}/deploymentSettings/default?api-version={apiVersion}` → `properties.deploymentMode`, `properties.provisioningState`, `properties.reportedProperties.validationStatus` and `.deploymentStatus`. Each status object is `{ status, steps[] }`; a step is `{ name, description, fullStepIndex, startTimeUtc, endTimeUtc, status, steps[]?, exception[]? }` (steps nest; `exception` is an array of strings). Either status object can be `{}` (not started). Learn documents `Error`, `Success`, `InProgress`; the lab also shows `Not Started`. Normalisation is case-insensitive and tolerant: unknown values become `unknown` with the raw value kept in `rawStatus`.
-2. `GET .../providers/Microsoft.HybridCompute/machines/{arcMachineName}?api-version=2024-07-10` per node → `properties.status` (Connected/Disconnected), `properties.lastStatusChange`, `properties.agentVersion`.
-3. Optional, best effort (ignore 404/400): `GET .../providers/Microsoft.AzureStackHCI/edgeMachines?api-version={edgeApiVersion}` (edge machines exist from 2025-12-01-preview; their ProvisionOs jobs use the same step-tree shape plus `percentComplete`) in the resource group → each edge machine's `properties.provisioningState` and lifecycle (provisioning phase).
+2. Unless `provisioningRoute` is `oem-image`, best effort (ignore 404/400): `GET .../providers/Microsoft.AzureStackHCI/edgeMachines?api-version={edgeApiVersion}` (edge machines exist from 2025-12-01-preview) in the resource group, and for each `GET {edge machine id}/jobs/ProvisionOs?api-version={edgeApiVersion}` (404 before it is submitted; then `properties.operationDetails[name=ProvisionOs].status` stands in).
+3. The route and each node's Arc machine (see *Machine readiness*), then `GET {arc machine resource id}?api-version=2024-07-10` per node → `properties.status` (Connected/Disconnected), `properties.lastStatusChange`, `properties.agentVersion`, `systemData.createdAt`.
+4. OEM image route only, for each Arc machine that exists: `GET {arc machine resource id}/extensions?api-version=2024-07-10` → the four mandatory extensions.
 
 `ConvertTo-AzlSonarStepTree` turns a status object into a flat-or-nested normalized tree:
 `{ id (fullStepIndex), name, description, status (normalized: notstarted|running|success|error|skipped), start, end, durationSeconds, errors[], children[] }`. Durations: end−start; running steps use now−start.
 
 `Get-AzlSonarDeploymentState` returns
-`{ cluster, mode, provisioningState, phase (provisioning|validation|deployment|done|failed), validation{ status, tree[] , counts{} }, deployment{ status, tree[], counts{} }, nodes[{ name, arcStatus, lastStatusChange }], current { phase, stepPath[] , stepName }, polledAt }`.
-`current` = the deepest step with status running (else the last finished step). `phase`: deployment if deploymentStatus has steps, else validation if validationStatus has steps, else provisioning.
+`{ cluster, mode, provisioningState, phase (provisioning|arc-registration|validation|deployment|done|failed), activePhase, provisioning{ route, routeSource, phase, status, nodes[] }, validation{ status, tree[] , counts{} }, deployment{ status, tree[], counts{} }, nodes[{ name, arcMachineName, arcMachineResourceId, arcSource, arcStatus, lastStatusChange, agentVersion, registeredAt }], edgeMachines[], current { phase, stepPath[] , stepName }, warnings[], pollError, polledAt }`.
+`current` = the deepest step with status running (else the last finished step). `phase`: deployment if deploymentStatus has steps, else validation if validationStatus has steps, else the machine-readiness phase of the route (provisioning or arc-registration). `done` when the deployment succeeded; `failed` when the active phase is in error (for the machine-readiness phase: any machine in error). `activePhase` is the phase without done/failed. In the machine-readiness phase, `stepPath` starts with the node name (one synthetic parent per machine).
+
+### Machine readiness: the two routes (plan task S-8)
+
+**Route.** `provisioningRoute` `simplified` or `oem-image` as configured (`routeSource: config`); `auto` (`routeSource: auto`) picks simplified when at least one edge machine maps to a configured node, else oem-image (with a warning when edge machines exist but none map). An edge machine maps to a node by its name, its host name (`siteDetails.deviceConfiguration.hostName`, else the job's `provisioningRequest.deviceConfiguration.hostName`), or its Arc machine name against an explicit `arcMachineName`.
+
+**Arc machine per node** (`arcSource`): an explicit `arcMachineName` always wins (`config`; read in the config's resource group, or at the edge machine's id when the names match). Otherwise, simplified route: the `ProvisionOs` job's `provisioningRequest.onboardingConfiguration.resourceId` (`edgeMachine.job`, the `<device-id>-1` target), else the edge machine's `properties.arcMachineResourceId` (`edgeMachine`; while the OS installs this is the maintenance environment's `ROE1-…` machine in a managed resource group). OEM image route or no edge machine: the node name in the config's resource group (`nodeName`). Ids read from Azure are used only when they match `/subscriptions/*/resourceGroups/*/providers/Microsoft.HybridCompute/machines/*`.
+
+**`provisioning.nodes[]`** (one per configured node): `{ name, route, exists, edgeMachineName, lifecycle, lifecycleMessage, status (notstarted|running|success|error|unknown), percent, reportedPercent, provisioningState, machineState, connectivityStatus, arcMachineName, arcMachineResourceId, arcSource, arcStatus, job{ status, operationStatus, provisioningState, start, end, error }, extensions[{ name, present, rawStatus, status, message, start, end }], start, end, errors[], tree[] }`. Tree nodes have the `ConvertTo-AzlSonarStepTree` shape, with ids set by Sonar.
+
+| | Simplified (`provisioning`) | OEM image (`arc-registration`) |
+| --- | --- | --- |
+| `lifecycle` | `lifecycleDetails.lifecycleStatus.status` (`Creating`, `AwaitingConnection`, `Provisioning`, `ReadyForOs`, `InstallingOs`, `Provisioned`); `NotCreated` without an edge machine | `NotRegistered` (no Arc machine), `Registered` (not Connected), `Connected`, `InstallingExtensions`, `Ready` (all four Succeeded), `Failed` (an extension Failed or the agent Expired), `Unknown` (the Arc machine could not be read) |
+| `tree` | the lifecycle stages with their sub-stages (ids `lifecycle.N`, `lifecycle.N.M`), then one `ProvisionOs job` node (id `job`; status from the job `status`, e.g. `DeploymentSuccess`/`DeploymentFailed`; errors = `properties.error` as `code: message`) whose children are the job's `reportedProperties` validation and deployment steps (ids `job.N`) with their `exception[]` | `Arc machine registered` (`arc`), `Arc agent Connected` (`arc.connected`), then each mandatory extension (`ext.<name>`: `properties.provisioningState`, start `systemData.createdAt`, end `systemData.lastModifiedAt` or `instanceView.status.time`, error `instanceView.status.message`) |
+| `status` | error when the lifecycle, `provisioningState` or `machineState` failed, the job failed or has an error, or any tree node is in error; success when `Provisioned` and the job succeeded; notstarted without an edge machine; else running | from `lifecycle`: Ready success, Failed error, NotRegistered notstarted, Unknown unknown, else running |
+| `percent` | Sonar's estimate: Creating 0, AwaitingConnection 5, Provisioning 15, ReadyForOs 25, InstallingOs 25 + 70 × finished/reported job steps (max 95), Provisioned 100. `reportedPercent` is the job's `percentComplete` (recorded responses showed 50 both mid-run and after success, so it is not drawn) | finished tree steps / 6 |
+| `extensions` | from the edge machine's `reportedProperties.extensionProfile.extensions` (by the extension resource name), informational | the four tree steps above |
+
+`provisioning.status` rolls the machines up: error if any, success when all, running when any running or done, else notstarted. Timestamps `0001-01-01T00:00:00Z` mean "not set" and the `MM/dd/yyyy HH:mm:ss` form some job steps use is read as UTC. The response shapes are the recorded live responses of the 10 Oct 2026 simplified provisioning run (`tests/fixtures`); the OEM image shapes follow the HybridCompute REST reference and are not yet checked live.
 
 ### State timeline (change-only, capped)
 
@@ -88,14 +108,14 @@ Times with `Z` or an offset are exact. Times without one are node-local and conv
 
 ## Phase guidance (`data/phase-guidance.json`)
 
-Per phase and identity model: which account reads the node logs, where the logs are, when they exist, and the source. Documented sources only; anything not confirmed in a lab is marked `"verified": false`.
+Per phase and identity model: which account reads the node logs, where the logs are, when they exist, and the source. Phases: `provisioning`, `arc-registration`, `validation`, `deployment`, `post-deployment`. Documented sources only; anything not confirmed in a lab is marked `"verified": false` (an `observed` note may say what was seen live short of confirming the entry).
 
 ## HTTP API (localhost only, `http://localhost:{port}/`)
 
 | Route | Returns |
 | --- | --- |
 | `GET /` , `/app.js`, `/app.css` | the page |
-| `GET /api/config` | config without secrets: cluster, resourceGroup, identityModel, nodes (name, seed), log paths, pollSeconds, `startedAt`, `serverId` |
+| `GET /api/config` | config without secrets: cluster, resourceGroup, identityModel, provisioningRoute, nodes (name, seed), log paths, pollSeconds, `startedAt`, `serverId` |
 | `GET /api/state` | latest `Get-AzlSonarDeploymentState` result |
 | `GET /api/guidance` | phase guidance for the configured identity model |
 | `GET /api/logs?since={seq}` | `{ server, lastSeq, tailer: {state, reason, node, activeFiles[], ...}, files[{path, size, offset, lastWriteUtc}], lines[] }` — lines with seq > since (ring buffer of the last 5000) |
@@ -126,7 +146,7 @@ The server binds `http://localhost:{port}/` only and answers loopback clients on
 
 ## Page
 
-Header: cluster, phase chip, overall status, elapsed time, last poll, node chips (Arc status), theme toggle. Left: step tree for validation and deployment (collapsible, status icon, duration, live timer on the running step, errors expanded inline; clicking a step filters the log pane to that step's time window). Right: live log pane (auto-scroll with pause, level filter, text search, file filter, error/warning highlight, count badges). Bottom/side: phase guidance card (account, log location, when available). Export button downloads `/api/export`. Accessible: keyboard navigation, focus visible, ARIA live region for status changes. Works at 1280 px and on a narrow window.
+Header: cluster, phase chip (`Provisioning`, `Arc registration`, `Validation`, `Deployment`, `Done`, or `Failed: <phase>`), overall status, elapsed time, last poll, node chips (Arc status; the tooltip names the resolved Arc machine and where its name came from), theme toggle. Left, above the step tree: the **Provisioning** / **Arc registration** panel (S-8), shown while the state has machines: route pill, a *Machines* section (collapsible; collapsed once when validation or deployment starts) with one tree item per machine (lifecycle chip, progress bar with Sonar's percent, Arc machine, extension count, lifecycle message, the machine's tree with live timers and errors inline; same keyboard and log-filter behaviour as the step tree). Then the step tree for validation and deployment (collapsible, status icon, duration, live timer on the running step, errors expanded inline; clicking a step filters the log pane to that step's time window). Right: live log pane (auto-scroll with pause, level filter, text search, file filter, error/warning highlight, count badges). Bottom/side: phase guidance card (account, log location, when available). Export button downloads `/api/export`. Accessible: keyboard navigation, focus visible, ARIA live region for status changes. Works at 1280 px and on a narrow window. Demo mode: `?demo=1` (a running deployment), `?demo=1&route=simplified`, `?demo=1&route=oem`.
 
 **Log sequencing.** The page keeps lines in seq order and deduplicates by seq for one back-end instance. Catch-up (`/api/logs?since=`) and live (SSE `log`) batches are merged in seq order. The catch-up cursor is kept apart from the highest live seq: it moves with `/api/logs` answers (`lastSeq`), and with the live stream only once the stream's `hello.since` is at or before it, so a live line that arrives first never makes the page skip the lines in between. A back-end restart is detected by a new `server` id (log batches, `hello`) or a new `/api/config` `serverId`/`startedAt` (checked on every SSE reconnect and every fallback poll): the page drops what it holds and fetches `since=0`.
 

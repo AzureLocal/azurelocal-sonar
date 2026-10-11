@@ -34,7 +34,7 @@ Status vocabulary: Backlog · In progress · Blocked (say on what) · Done (unve
 | S-5 | Build v0.1: back end (Azure poller, log tailer, SSE), page (step tree, live log pane, filters), `Start-AzlSonar.ps1`, config file, README | Done (unverified) (10 Oct; e88fea9, c6772a8, d1b889f; GPT review blockers fixed; should-fixes in progress) | AI |
 | S-6 | Tests: Pester for the back end (mocked ARM and node responses), PSScriptAnalyzer clean, page smoke test | Done (unverified) (10 Oct; 278 Pester tests pass, analyzer clean; 3e54f52) | AI |
 | S-7 | Live test against the NIC 2026 lab cluster deployment (`nic26-clus01`): follow Validate and Deploy end to end; screenshots | In progress (10 Oct 23:47; Sonar live on the nic26-clus01 Deploy pass, screenshot E17/20261010-2347) | AI |
-| S-8 | Provisioning view: follow simplified machine provisioning (edge machine lifecycle, OS install, Arc onboarding) — the stages proven on 10 Oct | Backlog | AI |
+| S-8 | Provisioning view: follow both ways the machines get ready — simplified machine provisioning (edge machine lifecycle, lifecycle stages, `ProvisionOs` steps and errors) and OEM image + Arc registration (Arc machine, Connected, the four mandatory extensions); `provisioningRoute` (auto/simplified/oem-image); Arc machine names resolved from the edge machine (`<device-id>-1`) instead of assumed; `arc-registration` phase and guidance; page panel with demo data for both routes | Done (unverified) (11 Oct; Pester with the recorded 10 Oct edge machine responses and a derived InstallExtensions failure; page checked in demo mode only; OEM image route and the live page not yet run against Azure) | AI |
 | S-9 | Export bundle: timeline JSON, collected logs, HTML report | Backlog | AI |
 | S-10 | Docs site and session material: how to run it, what each phase means, account guidance; demo in the Azure Local session alongside Beacon | Backlog | AI |
 
@@ -42,4 +42,5 @@ Status vocabulary: Backlog · In progress · Blocked (say on what) · Done (unve
 
 - Two nodes provisioned with simplified machine provisioning; edge machine lifecycle seen live: `Creating → AwaitingConnection → Provisioning (onboarding to Arc) → ReadyForOs → InstallingOs (Initialize, DownloadOs, PrepareOs, RebootOs, InstallExtensions, Finalize) → Provisioned`, plus the `jobs/ProvisionOs` step list.
 - Deployment model: Local Identity with Key Vault (no AD). The cluster-operations local admin is a non-built-in account on every node.
-- Arc machine names after provisioning are device IDs, not host names; Sonar must map host name ↔ Arc resource.
+- Arc machine names after provisioning are device IDs, not host names; Sonar must map host name ↔ Arc resource (S-8: read from the edge machine's `ProvisionOs` target, else `arcMachineResourceId`).
+- Second run on 12.2609: the OS installed and the machines connected to Arc, then `InstallExtensions` failed with *Failed to download extension AzureEdgeRemoteSupport: unable to connect to the remote server* (the S-8 failure case).
