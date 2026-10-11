@@ -1295,9 +1295,13 @@
     if (how !== undefined) row('How', textList(listOf(how), false));
 
     var ver = g.verified;
-    var vEl = el('span', { class: 'pill ' + (ver === true ? 'pill-ok' : ver === false ? 'pill-warn' : 'pill-muted'),
-      text: ver === true ? 'Verified in a lab' : ver === false ? 'Not verified (documented source only)' : 'Unknown' });
-    row('Verified', vEl);
+    var confirmedOn = typeof g.confirmedOn === 'string' && g.confirmedOn ? g.confirmedOn : 'a real deployment';
+    var vBox = el('div');
+    vBox.appendChild(el('span', { class: 'pill ' + (ver === true ? 'pill-ok' : ver === false ? 'pill-warn' : 'pill-muted'),
+      text: ver === true ? 'Confirmed on ' + confirmedOn : ver === false ? 'From Microsoft docs — not yet confirmed' : 'Unknown' }));
+    if (ver === true && typeof g.observed === 'string' && g.observed) vBox.appendChild(el('p', { class: 'guide-note', text: g.observed }));
+    if (ver !== true) vBox.appendChild(el('p', { class: 'guide-note', text: 'If the logs are not where this says, Sonar still finds them: it watches every known log folder. Please open an issue on GitHub so this entry can be corrected.' }));
+    row('Confidence', vBox);
 
     var src = pick(g, ['source', 'sources', 'reference', 'references']);
     if (src !== undefined) {

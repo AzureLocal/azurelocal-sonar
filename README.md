@@ -154,7 +154,7 @@ Live logs: every line with its time, level (errors and warnings highlighted; zer
 
 ## Where the logs are
 
-Verified live on 10 Oct 2026 on the `nic26-clus01` seed node during a Local Identity Deploy pass, read as the non-built-in deployment local admin (see [docs/research.md](docs/research.md)):
+Confirmed on a real two-node Azure Local 2609 deployment with Local Identity (10 Oct 2026), on the seed node during the Deploy pass, read as the non-built-in deployment local admin (see [docs/research.md](docs/research.md)):
 
 | Folder | What is there | When |
 | --- | --- | --- |
@@ -163,6 +163,8 @@ Verified live on 10 Oct 2026 on the `nic26-clus01` seed node during a Local Iden
 | `C:\Observability` | `OSConfig\*`, `ObsScheduledTaskTranscripts\*`, `CredScanLogs\*` | From the start of Deploy |
 | `C:\CloudDeployment\Logs` | Environment Checker and cloud deployment logs (Learn names the folder, not the files) | **Not there** about 10 minutes into Deploy; appears later in the run. Sonar keeps checking. |
 | `C:\Windows\System32\Bootstrap\Logs` | `setup.log`, `arcInstallLog-*.txt`, `AzStackHci.ArcConnection.Debug.log\PowerShell_transcript.*`, ETW `*.etl` (skipped) | Provisioning: bootstrap and Arc registration |
+
+**How far to trust the log-access card.** Each entry on the card carries a confidence badge. **Confirmed on Azure Local 2609 (Local Identity)** means the folders and the account were checked on a real deployment. **From Microsoft docs — not yet confirmed** means the entry comes from Microsoft Learn only (today: every Active Directory entry, and the provisioning, validation and post-deployment phases); on your version or identity model the details may differ. Either way Sonar watches every known log folder, so it still finds the logs; if an entry is wrong for you, please open an issue.
 
 Also on the nodes, not tailed by default (add them to `logs.paths` if you need them): `C:\ProgramData\AzureConnectedMachineAgent\Log` (`himds.log`, `azcmagent.log`) and `C:\ProgramData\GuestConfig\ext_mgr_logs`, `extension_logs` (Arc agent and extensions). Before the OS is installed, the maintenance environment keeps its logs under `/var/log`; get them through the Configurator app support package.
 

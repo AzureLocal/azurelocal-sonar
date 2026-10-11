@@ -582,3 +582,6 @@ a { color: var(--accent); }
   .progress span, .conn-dot, .node-chip .dot { forced-color-adjust: none; }
   .row[data-current="true"] { outline: 1px solid CanvasText; }
 }
+
+/* Confidence note under the log-access badge */
+.guide-note { margin: 6px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--muted, inherit); }

@@ -65,6 +65,8 @@ function Get-AzlSonarPhaseGuidance {
             when     = Get-AzlSonarMember $entry 'available'
             how      = Get-AzlSonarMember $entry 'access'
             verified = [bool](Get-AzlSonarMember $entry 'verified' $false)
+            confirmedOn = Get-AzlSonarMember $entry 'confirmedOn'
+            observed = Get-AzlSonarMember $entry 'observed'
             source   = Get-AzlSonarMember $entry 'source'
         }
         $exact[$name] = $isExact

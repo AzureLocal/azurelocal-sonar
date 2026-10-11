@@ -75,7 +75,8 @@
       "access": "WinRM to the seed node by IP: TrustedHosts or HTTPS 5986, -Credential, and an account in local Administrators. Fallbacks (both are Azure writes, so opt-in only): Arc run command (preview, output capped at 4 KB, needs runCommands/write) or Arc SSH (needs Owner or Contributor and sshd running on the node).",
       "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-local-identity-with-key-vault-template?view=azloc-2609",
       "verified": true,
-      "observed": "Seen live 10 Oct 2026 on a Local Identity Deploy pass: logs written to C:\\CloudContent\\MASLogs, C:\\MASLogs and C:\\Observability; C:\\CloudDeployment\\Logs did not exist yet ~10 min in."
+      "observed": "Seen live 10 Oct 2026 on a Local Identity Deploy pass: logs written to C:\\CloudContent\\MASLogs, C:\\MASLogs and C:\\Observability; C:\\CloudDeployment\\Logs did not exist yet ~10 min in.",
+      "confirmedOn": "Azure Local 2609 (Local Identity)"
     },
     {
       "phase": "deployment",
