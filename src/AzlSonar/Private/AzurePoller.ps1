@@ -196,7 +196,8 @@ function Get-AzlSonarArcMachineStatus {
 function Get-AzlSonarArcExtension {
     <#
     .SYNOPSIS
-        The mandatory Azure Local extensions of one Arc machine (OEM image + Arc registration route).
+        The mandatory Azure Local extensions of one Arc machine (OEM image route; read once a validation exists:
+        the extensions install during cluster Validate, not during Arc registration).
     .DESCRIPTION
         GETs {arc machine}/extensions (api 2024-07-10) and returns one entry per mandatory extension
         (AzureEdgeDeviceManagement, AzureEdgeLifecycleManager, AzureEdgeRemoteSupport, AzureEdgeTelemetryAndDiagnostics):
@@ -627,11 +628,357 @@ function ConvertTo-AzlSonarSimplifiedNode {
     return $entry
 }
 
+function Get-AzlSonarNodeErrorText {
+    <#
+    .SYNOPSIS
+        The texts of a node-reported Errors[] (strings, or objects with a message), masked with Protect-AzlSonarText.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [AllowNull()][object]$Errors,
+        [AllowNull()][AllowEmptyCollection()][string[]]$Secret = @()
+    )
+
+    $texts = foreach ($item in (ConvertTo-AzlSonarArray $Errors)) {
+        $text = $null
+        if ($item -is [string]) { $text = $item }
+        else {
+            foreach ($key in 'Message', 'ErrorMessage', 'Exception', 'Description', 'Detail') {
+                $value = Get-AzlSonarMember $item $key
+                if ($null -ne $value -and [string]$value) { $text = [string]$value; break }
+            }
+            if (-not $text) { $text = ConvertTo-Json -InputObject $item -Depth 6 -Compress -WarningAction SilentlyContinue }
+        }
+        $text = Protect-AzlSonarText -Text ([string]$text) -Secret $Secret
+        if (-not [string]::IsNullOrWhiteSpace($text)) { $text.Trim() }
+    }
+    return , [string[]]@($texts)
+}
+
+function ConvertTo-AzlSonarNodeStatusStep {
+    <#
+    .SYNOPSIS
+        One entry a node status cmdlet reports ({ Name, Status, Message, Errors[], DetailedResponse[], StartTime,
+        EndTime }) as a raw step for ConvertTo-AzlSonarStepTree; DetailedResponse[] become the nested steps.
+    .DESCRIPTION
+        The node's own step names are kept (-Name overrides only the top entry). NotStarted entries get no times:
+        their StartTime is the time of the call. A failed entry carries Errors[] (or its Message when Errors[] is
+        empty) as exception; other entries show Message in the description. Messages and errors are masked.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][object]$Entry,
+        [Parameter(Mandatory)][string]$Id,
+        [string]$Name,
+        [string]$Description,
+        [AllowNull()][AllowEmptyCollection()][string[]]$Secret = @()
+    )
+
+    $rawStatus = Get-AzlSonarMember $Entry 'Status'
+    $status = ConvertTo-AzlSonarStepStatus $rawStatus
+    $message = [string](Get-AzlSonarMember $Entry 'Message' '')
+    $message = if ($message) { (Protect-AzlSonarText -Text $message -Secret $Secret).Trim() } else { '' }
+    $errors = [string[]](Get-AzlSonarNodeErrorText -Errors (Get-AzlSonarMember $Entry 'Errors') -Secret $Secret)
+    if ($null -eq $errors) { $errors = [string[]]@() }
+    if ($status -eq 'error' -and $errors.Count -eq 0 -and $message) { $errors = @($message) }
+    $children = ConvertTo-AzlSonarArray (Get-AzlSonarMember $Entry 'DetailedResponse')
+    $steps = for ($i = 0; $i -lt $children.Count; $i++) {
+        ConvertTo-AzlSonarNodeStatusStep -Entry $children[$i] -Id "$Id.$i" -Secret $Secret
+    }
+    $entryName = [string](Get-AzlSonarMember $Entry 'Name' '')
+    $parts = @($Description, $(if ($message -and $status -ne 'error') { $message })) | Where-Object { $_ }
+    return [pscustomobject]@{
+        name          = if ($Name) { $Name } elseif ($entryName) { $entryName } else { "Step $Id" }
+        description   = (@($parts) -join ' - ')
+        fullStepIndex = $Id
+        startTimeUtc  = if ($status -eq 'notstarted') { $null } else { Get-AzlSonarMember $Entry 'StartTime' }
+        endTimeUtc    = if ($status -in 'success', 'error', 'skipped') { Get-AzlSonarMember $Entry 'EndTime' } else { $null }
+        status        = $rawStatus
+        exception     = @($errors)
+        steps         = @($steps | Where-Object { $null -ne $_ })
+    }
+}
+
+function Measure-AzlSonarLeafProgress {
+    <#
+    .SYNOPSIS
+        Leaf steps of a tree node: { done (success/skipped), total, current } where current is the path of names
+        (below the node) to the deepest running step, or $null.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([AllowNull()][System.Collections.IDictionary]$Node)
+
+    $result = @{ done = 0; total = 0; current = $null }
+    if ($null -eq $Node) { return $result }
+    $best = @{ depth = -1; path = $null }
+    $walk = {
+        param($Items, [string[]]$Path)
+        foreach ($n in (ConvertTo-AzlSonarArray $Items)) {
+            $here = @($Path + [string]$n['name'])
+            if ([string]$n['status'] -eq 'running' -and $here.Count -gt $best.depth) { $best.depth = $here.Count; $best.path = $here }
+            $kids = ConvertTo-AzlSonarArray $n['children']
+            if ($kids.Count -eq 0) {
+                $result.total++
+                if ([string]$n['status'] -in 'success', 'skipped') { $result.done++ }
+            }
+            else { & $walk $kids $here }
+        }
+    }
+    & $walk $Node['children'] @()
+    if ($null -ne $best.path) { $result.current = $best.path -join ' > ' }
+    return $result
+}
+
+function Get-AzlSonarFailedStepText {
+    <#
+    .SYNOPSIS
+        'Group > Step: error' for every failed step under a tree node that carries error text (the node itself too).
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param([AllowNull()][System.Collections.IDictionary]$Node)
+
+    if ($null -eq $Node) { return , [string[]]@() }
+    $out = [System.Collections.Generic.List[string]]::new()
+    $walk = {
+        param($N, [string[]]$Path)
+        $here = @($Path + [string]$N['name'])
+        if ([string]$N['status'] -eq 'error') {
+            foreach ($e in (ConvertTo-AzlSonarArray $N['errors'])) { $out.Add(('{0}: {1}' -f ($here -join ' > '), $e)) }
+        }
+        foreach ($c in (ConvertTo-AzlSonarArray $N['children'])) { & $walk $c $here }
+    }
+    & $walk $Node @()
+    if ($out.Count -eq 0 -and [string]$Node['status'] -eq 'error') { $out.Add("$($Node['name']): Failed") }
+    return , [string[]]$out.ToArray()
+}
+
+function New-AzlSonarArcProbeGroup {
+    <#
+    .SYNOPSIS
+        The 'OS image update' or 'Bootstrap' group of one node on the OEM image route: the tree the node reports
+        (Get-ArcZeroDaySolutionUpdateStatus or Get-ArcBootstrapStatus), or a placeholder that says why it is missing.
+    .OUTPUTS
+        Hashtable { Node (tree node); State (read | notAvailable | noData | notRead) }
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Builds an in-memory record only.')]
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)][ValidateSet('update', 'bootstrap')][string]$Kind,
+        [AllowNull()][System.Collections.IDictionary]$Probe,
+        [AllowNull()][AllowEmptyCollection()][string[]]$Secret = @(),
+        [datetime]$Now = [datetime]::UtcNow
+    )
+
+    $command = if ($Kind -eq 'update') { $script:AzlSonarProbe.UpdateCommand } else { $script:AzlSonarProbe.BootstrapCommand }
+    $label = if ($Kind -eq 'update') { 'OS image update' } else { 'Bootstrap' }
+    $available = if ($null -ne $Probe -and $Probe.Contains("${Kind}Available")) { $Probe["${Kind}Available"] } else { $null }
+    $json = if ($null -ne $Probe -and $Probe.Contains("${Kind}Json")) { [string]$Probe["${Kind}Json"] } else { '' }
+    $response = Get-AzlSonarNodeStatusResponse -Json $json
+    if ($null -ne $response) {
+        $about = if ($Kind -eq 'update') { "$command (zero-day solution update; runs only when the OEM image is not the latest)" } else { $command }
+        $raw = ConvertTo-AzlSonarNodeStatusStep -Entry $response -Id $Kind -Name $label -Description $about -Secret $Secret
+        $state = 'read'
+    }
+    else {
+        $failure = if ($null -ne $Probe -and $Probe.Contains("${Kind}Error") -and $Probe["${Kind}Error"]) { Protect-AzlSonarText -Text ([string]$Probe["${Kind}Error"]) -Secret $Secret } else { $null }
+        if ($available -eq $false) {
+            $state = 'notAvailable'; $rawStatus = 'NotAvailable'
+            $about = "$command is not on this node (not an OEM image with the AzureEdgeBootstrap module)."
+        }
+        elseif ($null -ne $Probe -and $Probe['lastSuccessUtc']) {
+            $state = 'noData'; $rawStatus = 'NoData'
+            $about = "$command gave no status" + $(if ($failure) { ": $failure" } else { '.' })
+        }
+        else {
+            $state = 'notRead'; $rawStatus = 'NotRead'
+            $why = if ($null -ne $Probe -and $Probe['reason']) { ': ' + (Protect-AzlSonarText -Text ([string]$Probe['reason']) -Secret $Secret) } else { '.' }
+            $about = "$command not read from the node yet$why"
+        }
+        $raw = [pscustomobject]@{ name = $label; description = $about; fullStepIndex = $Kind; status = $rawStatus; startTimeUtc = $null; endTimeUtc = $null; exception = @(); steps = @() }
+    }
+    return @{ Node = @(ConvertTo-AzlSonarStepTree -StatusObject @($raw) -Now $Now)[0]; State = $state }
+}
+
 function ConvertTo-AzlSonarOemNode {
     <#
     .SYNOPSIS
-        The arc-registration entry of one node on the OEM image route: Arc machine present, Connected, and each
-        mandatory extension as a step.
+        The arc-registration entry of one node on the OEM image route: what Invoke-AzStackHciArcInitialization does,
+        in three groups - OS image update, Bootstrap, Azure registration.
+    .DESCRIPTION
+        OS image update: Get-ArcZeroDaySolutionUpdateStatus read on the node (Scan, Download, Install; only when the
+        OEM image is not the latest - Learn: 40-45 minutes, then a reboot, then Invoke-AzStackHciArcInitialization runs
+        again). Bootstrap: Get-ArcBootstrapStatus read on the node (NetworkConfig ... ArcConfiguration with
+        ArtifactsUpload, ConnectivityValidation, ArcRegistration, ArcExtensionInstall). Both come from -Probe (the node
+        probe record, see Update-AzlSonarNodeProbeEntry) and keep the node's own step names. Azure registration: the
+        Arc machine exists and its agent is Connected (-Arc, read from Azure).
+        lifecycle: NotStarted, UpdatingOsImage, Bootstrapping, Registered (Arc Connected and bootstrap Succeeded, or
+        the bootstrap status cannot be read on this node), Failed (errors inline) or Unknown (Arc machine unreadable
+        and nothing read on the node). A node that stops answering keeps its last data and says since when.
+        The mandatory extensions are not part of this phase: they install during cluster Validate.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
+    param(
+        [Parameter(Mandatory)][object]$Node,
+        [AllowNull()][object]$Arc,
+        [AllowNull()][System.Collections.IDictionary]$Probe,
+        [AllowNull()][AllowEmptyCollection()][string[]]$Secret = @(),
+        [datetime]$Now = [datetime]::UtcNow
+    )
+
+    $arcStatus = [string](Get-AzlSonarMember $Arc 'arcStatus' 'Unknown')
+    $present = $arcStatus -notin 'NotFound', 'Unknown'
+    $arcName = [string](Get-AzlSonarMember $Arc 'arcMachineName' $Node.name)
+    $connected = $arcStatus -eq 'Connected'
+
+    # Azure registration: the Arc machine and its agent status.
+    $connectStatus = if (-not $present) { 'notstarted' } elseif ($connected) { 'Success' } elseif ($arcStatus -eq 'Expired') { 'Error' } else { $arcStatus }
+    $connectErrors = if ($arcStatus -eq 'Expired') { @("Arc agent status Expired on $arcName.") } else { @() }
+    $groupStatus = if ($arcStatus -eq 'Unknown') { 'Unknown' } elseif (-not $present) { 'NotStarted' } elseif ($connected) { 'Succeeded' } elseif ($arcStatus -eq 'Expired') { 'Failed' } else { 'InProgress' }
+    $arcRaw = [pscustomobject]@{
+        name = 'Azure registration'; description = "Microsoft.HybridCompute/machines/$arcName"; fullStepIndex = 'arc'; status = $groupStatus
+        startTimeUtc = $null; endTimeUtc = $(if ($connected) { Get-AzlSonarMember $Arc 'lastStatusChange' } else { $null }); exception = @()
+        steps = @(
+            [pscustomobject]@{
+                name = 'Arc machine registered'; description = "Microsoft.HybridCompute/machines/$arcName in the configured resource group"
+                fullStepIndex = 'arc.machine'; status = $(if ($present) { 'Success' } elseif ($arcStatus -eq 'Unknown') { $null } else { 'NotStarted' })
+                startTimeUtc = $null; endTimeUtc = Get-AzlSonarMember $Arc 'registeredAt'
+            }
+            [pscustomobject]@{
+                name = 'Arc agent Connected'; description = 'Microsoft.HybridCompute/machines properties.status'
+                fullStepIndex = 'arc.connected'; status = $connectStatus
+                startTimeUtc = $null; endTimeUtc = $(if ($connected) { Get-AzlSonarMember $Arc 'lastStatusChange' } else { $null })
+                exception = $connectErrors
+            }
+        )
+    }
+    $arcNode = @(ConvertTo-AzlSonarStepTree -StatusObject @($arcRaw) -Now $Now)[0]
+    $update = New-AzlSonarArcProbeGroup -Kind update -Probe $Probe -Secret $Secret -Now $Now
+    $boot = New-AzlSonarArcProbeGroup -Kind bootstrap -Probe $Probe -Secret $Secret -Now $Now
+    $tree = @($update.Node, $boot.Node, $arcNode)
+
+    $updStatus = [string]$update.Node['status']
+    $bootStatus = [string]$boot.Node['status']
+    $updProgress = Measure-AzlSonarLeafProgress -Node $update.Node
+    $bootProgress = Measure-AzlSonarLeafProgress -Node $boot.Node
+    $probeState = if ($null -ne $Probe -and $Probe['state']) { [string]$Probe['state'] } else { 'pending' }
+    $unreachableSince = if ($probeState -eq 'unreachable' -and $null -ne $Probe) { $Probe['unreachableSince'] } else { $null }
+
+    $errors = [System.Collections.Generic.List[string]]::new()
+    if ($updStatus -eq 'error') { foreach ($e in (Get-AzlSonarFailedStepText -Node $update.Node)) { $errors.Add($e) } }
+    if ($bootStatus -eq 'error') { foreach ($e in (Get-AzlSonarFailedStepText -Node $boot.Node)) { $errors.Add($e) } }
+    foreach ($e in $connectErrors) { $errors.Add($e) }
+
+    $bootUnreadable = $boot.State -ne 'read'
+    $lifecycle = if ($errors.Count -gt 0) { 'Failed' }
+    elseif ($connected -and ($bootStatus -eq 'success' -or $bootUnreadable)) { 'Registered' }
+    elseif ($updStatus -eq 'running') { 'UpdatingOsImage' }
+    elseif ($bootStatus -in 'running', 'success' -or $present -or ($updStatus -eq 'success' -and $bootStatus -eq 'notstarted')) { 'Bootstrapping' }
+    elseif ($arcStatus -eq 'Unknown' -and $update.State -ne 'read' -and $boot.State -ne 'read') { 'Unknown' }
+    else { 'NotStarted' }
+
+    $message = switch ($lifecycle) {
+        'Unknown' { "The Arc machine $arcName could not be read (see the warnings) and nothing was read on the node yet." }
+        'NotStarted' { 'Nothing started yet: run Invoke-AzStackHciArcInitialization on the node.' }
+        'UpdatingOsImage' {
+            $at = if ($updProgress.current) { ": $($updProgress.current)" } else { '' }
+            "Updating the OS image (zero-day solution update)$at. Learn: typically 40-45 minutes, then a reboot; Invoke-AzStackHciArcInitialization is run again after the reboot."
+        }
+        'Bootstrapping' {
+            if ($bootStatus -eq 'running' -and $bootProgress.current) { "Bootstrapping: $($bootProgress.current)." }
+            elseif ($bootStatus -eq 'success') { "Bootstrap Succeeded; Arc machine $arcName is $(if ($present) { $arcStatus } else { 'not in the resource group yet' })." }
+            elseif ($updStatus -eq 'success' -and $bootStatus -eq 'notstarted') { 'OS image updated: run Invoke-AzStackHciArcInitialization again (Learn: after the update reboot).' }
+            elseif ($present -and -not $connected) { "Arc machine $arcName exists; agent status $arcStatus." }
+            else { "Arc machine $arcName Connected; waiting for the bootstrap to finish." }
+        }
+        'Registered' {
+            if ($bootUnreadable) {
+                $why = if ($boot.State -eq 'notAvailable') { 'Get-ArcBootstrapStatus is not on this node' } else { 'the bootstrap status was not read from the node' }
+                "Arc machine $arcName Connected ($why)."
+            }
+            else { "Arc machine $arcName Connected and bootstrap Succeeded." }
+        }
+        'Failed' { "Failed: $($errors[0])" }
+    }
+    if ($probeState -eq 'unreachable') {
+        $message += " Rebooting / unreachable since $(if ($unreachableSince) { $unreachableSince } else { 'the last poll' })."
+    }
+    $status = switch ($lifecycle) { 'Unknown' { 'unknown' } 'NotStarted' { 'notstarted' } 'Registered' { 'success' } 'Failed' { 'error' } default { 'running' } }
+
+    $arcProgress = Measure-AzlSonarLeafProgress -Node $arcNode
+    $done = $bootProgress.done + $arcProgress.done
+    $total = $bootProgress.total + $arcProgress.total
+    if ($updStatus -notin 'notstarted', 'unknown') { $done += $updProgress.done; $total += $updProgress.total }
+    $percent = if ($lifecycle -eq 'Registered') { 100 } else { [int][Math]::Min(99, [Math]::Round(100 * $done / [Math]::Max(1, $total))) }
+
+    $starts = @($tree | ForEach-Object { ConvertTo-AzlSonarUtcDate $_['start'] } | Where-Object { $null -ne $_ })
+    $registeredAt = ConvertTo-AzlSonarUtcDate (Get-AzlSonarMember $Arc 'registeredAt')
+    if ($null -ne $registeredAt) { $starts += $registeredAt }
+    $starts = @($starts | Sort-Object)
+    $ends = @($tree | ForEach-Object { ConvertTo-AzlSonarUtcDate $_['end'] } | Where-Object { $null -ne $_ } | Sort-Object)
+
+    $summary = {
+        param($Group, $Progress)
+        [ordered]@{
+            available = $(if ($Group.State -eq 'notAvailable') { $false } elseif ($Group.State -eq 'notRead') { $null } else { $true })
+            state     = $Group.State
+            status    = [string]$Group.Node['status']
+            rawStatus = $Group.Node['rawStatus']
+            done      = $Progress.done
+            total     = $Progress.total
+            current   = $Progress.current
+            start     = $Group.Node['start']
+            end       = $Group.Node['end']
+        }
+    }
+    $probeOut = [ordered]@{
+        state            = $probeState
+        reason           = $(if ($null -ne $Probe -and $Probe['reason']) { Protect-AzlSonarText -Text ([string]$Probe['reason']) -Secret $Secret } else { $null })
+        transport        = $(if ($null -ne $Probe) { $Probe['transport'] } else { $null })
+        lastProbeUtc     = $(if ($null -ne $Probe) { $Probe['lastProbeUtc'] } else { $null })
+        lastSuccessUtc   = $(if ($null -ne $Probe) { $Probe['lastSuccessUtc'] } else { $null })
+        unreachableSince = $unreachableSince
+    }
+
+    return [ordered]@{
+        name                 = $Node.name
+        route                = 'oem-image'
+        exists               = $present
+        edgeMachineName      = $null
+        lifecycle            = $lifecycle
+        lifecycleMessage     = $message
+        status               = $status
+        percent              = $percent
+        reportedPercent      = $null
+        provisioningState    = $null
+        machineState         = $null
+        connectivityStatus   = $arcStatus
+        arcMachineName       = $arcName
+        arcMachineResourceId = Get-AzlSonarMember $Arc 'arcMachineResourceId'
+        arcSource            = Get-AzlSonarMember $Arc 'arcSource'
+        arcStatus            = $arcStatus
+        job                  = $null
+        extensions           = @()
+        update               = & $summary $update $updProgress
+        bootstrap            = & $summary $boot $bootProgress
+        probe                = $probeOut
+        start                = if ($starts.Count) { Format-AzlSonarDate $starts[0] } else { $null }
+        end                  = if ($status -in 'success', 'error' -and $ends.Count) { Format-AzlSonarDate $ends[-1] } else { $null }
+        errors               = $errors.ToArray()
+        tree                 = $tree
+    }
+}
+
+function ConvertTo-AzlSonarExtensionNode {
+    <#
+    .SYNOPSIS
+        One machine of the 'Extensions (installed during Validate)' group (OEM image route): the four mandatory
+        extensions of its Arc machine as steps. Shown only once a validation or deployment exists.
     #>
     [CmdletBinding()]
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
@@ -642,89 +989,30 @@ function ConvertTo-AzlSonarOemNode {
         [datetime]$Now = [datetime]::UtcNow
     )
 
-    $arcStatus = [string](Get-AzlSonarMember $Arc 'arcStatus' 'Unknown')
-    $present = $arcStatus -notin 'NotFound', 'Unknown'
-    $arcName = [string](Get-AzlSonarMember $Arc 'arcMachineName' $Node.name)
-    $connected = $arcStatus -eq 'Connected'
-
-    $connectStatus = if (-not $present) { 'notstarted' } elseif ($connected) { 'Success' } elseif ($arcStatus -eq 'Expired') { 'Error' } else { $arcStatus }
-    $connectErrors = if ($arcStatus -eq 'Expired') { @("Arc agent status Expired on $arcName.") } else { @() }
-    $raw = [System.Collections.Generic.List[object]]::new()
-    $raw.Add([pscustomobject]@{
-            name = 'Arc machine registered'; description = "Microsoft.HybridCompute/machines/$arcName (Invoke-AzStackHciArcInitialization)"
-            fullStepIndex = 'arc'; status = $(if ($present) { 'Success' } elseif ($arcStatus -eq 'Unknown') { $null } else { 'NotStarted' })
-            startTimeUtc = $null; endTimeUtc = Get-AzlSonarMember $Arc 'registeredAt'
-        })
-    $raw.Add([pscustomobject]@{
-            name = 'Arc agent Connected'; description = 'Microsoft.HybridCompute/machines properties.status'
-            fullStepIndex = 'arc.connected'; status = $connectStatus
-            startTimeUtc = $null; endTimeUtc = $(if ($connected) { Get-AzlSonarMember $Arc 'lastStatusChange' } else { $null })
-            exception = $connectErrors
-        })
-    foreach ($ext in (ConvertTo-AzlSonarArray $Extensions)) {
+    $list = ConvertTo-AzlSonarArray $Extensions
+    $raw = foreach ($ext in $list) {
         $extRawStatus = if ($ext['present']) { if ($ext['rawStatus']) { $ext['rawStatus'] } else { 'InProgress' } } else { 'NotStarted' }
-        $raw.Add([pscustomobject]@{
-                name = $ext['name']; description = 'Mandatory Azure Local extension'
-                fullStepIndex = "ext.$($ext['name'])"; status = $extRawStatus
-                startTimeUtc = $ext['start']; endTimeUtc = $ext['end']
-                exception = @($ext['message'] | Where-Object { $_ -and $ext['status'] -eq 'error' })
-            })
+        [pscustomobject]@{
+            name = $ext['name']; description = 'Mandatory Azure Local extension'
+            fullStepIndex = "ext.$($ext['name'])"; status = $extRawStatus
+            startTimeUtc = $ext['start']; endTimeUtc = $ext['end']
+            exception = @($ext['message'] | Where-Object { $_ -and $ext['status'] -eq 'error' })
+        }
     }
-    $tree = @(ConvertTo-AzlSonarStepTree -StatusObject $raw.ToArray() -Now $Now)
-
-    $extList = ConvertTo-AzlSonarArray $Extensions
-    $failed = @($extList | Where-Object { $_['status'] -eq 'error' })
-    $succeeded = @($extList | Where-Object { $_['status'] -eq 'success' })
-    $started = @($extList | Where-Object { $_['present'] })
-    $lifecycle = if ($arcStatus -eq 'Unknown') { 'Unknown' }
-    elseif (-not $present) { 'NotRegistered' }
-    elseif ($failed.Count -gt 0) { 'Failed' }
-    elseif (-not $connected -and $arcStatus -eq 'Expired') { 'Failed' }
-    elseif (-not $connected) { 'Registered' }
-    elseif ($extList.Count -gt 0 -and $succeeded.Count -eq $extList.Count) { 'Ready' }
-    elseif ($started.Count -gt 0) { 'InstallingExtensions' }
-    else { 'Connected' }
-    $message = switch ($lifecycle) {
-        'Unknown' { "The Arc machine $arcName could not be read (see the warnings)." }
-        'NotRegistered' { "No Arc machine named $arcName yet: run Invoke-AzStackHciArcInitialization on the node." }
-        'Registered' { "Arc machine $arcName exists; agent status $arcStatus." }
-        'Connected' { 'Arc agent Connected; waiting for the mandatory extensions.' }
-        'InstallingExtensions' { "Installing the mandatory extensions ($($succeeded.Count) of $($extList.Count) succeeded)." }
-        'Ready' { 'Arc machine Connected and every mandatory extension Succeeded.' }
-        'Failed' { if ($failed.Count) { "Extension failed: $(@($failed | ForEach-Object { $_['name'] }) -join ', ')." } else { "Arc agent status $arcStatus." } }
-    }
-    $status = switch ($lifecycle) { 'Unknown' { 'unknown' } 'NotRegistered' { 'notstarted' } 'Ready' { 'success' } 'Failed' { 'error' } default { 'running' } }
-    $doneSteps = @($tree | Where-Object { $_['status'] -eq 'success' }).Count
-    $errors = @($failed | ForEach-Object { if ($_['message']) { "$($_['name']): $($_['message'])" } else { "$($_['name']): Failed" } }) + $connectErrors
-
-    $starts = @($tree | ForEach-Object { ConvertTo-AzlSonarUtcDate $_['start'] } | Where-Object { $null -ne $_ } | Sort-Object)
-    $ends = @($tree | ForEach-Object { ConvertTo-AzlSonarUtcDate $_['end'] } | Where-Object { $null -ne $_ } | Sort-Object)
-    $registeredAt = ConvertTo-AzlSonarUtcDate (Get-AzlSonarMember $Arc 'registeredAt')
-    $start = if ($null -ne $registeredAt) { $registeredAt } elseif ($starts.Count) { $starts[0] } else { $null }
-
+    $tree = @(ConvertTo-AzlSonarStepTree -StatusObject @($raw) -Now $Now)
+    $failed = @($list | Where-Object { $_['status'] -eq 'error' })
+    $succeeded = @($list | Where-Object { $_['status'] -eq 'success' })
+    $started = @($list | Where-Object { $_['present'] })
+    $status = if ($failed.Count) { 'error' } elseif ($list.Count -and $succeeded.Count -eq $list.Count) { 'success' } elseif ($started.Count) { 'running' } else { 'notstarted' }
     return [ordered]@{
-        name                 = $Node.name
-        route                = 'oem-image'
-        exists               = $present
-        edgeMachineName      = $null
-        lifecycle            = $lifecycle
-        lifecycleMessage     = $message
-        status               = $status
-        percent              = [int][Math]::Round(100 * $doneSteps / [Math]::Max(1, $tree.Count))
-        reportedPercent      = $null
-        provisioningState    = $null
-        machineState         = $null
-        connectivityStatus   = $arcStatus
-        arcMachineName       = $arcName
-        arcMachineResourceId = Get-AzlSonarMember $Arc 'arcMachineResourceId'
-        arcSource            = Get-AzlSonarMember $Arc 'arcSource'
-        arcStatus            = $arcStatus
-        job                  = $null
-        extensions           = @($extList)
-        start                = Format-AzlSonarDate $start
-        end                  = if ($status -in 'success', 'error' -and $ends.Count) { Format-AzlSonarDate $ends[-1] } else { $null }
-        errors               = @($errors)
-        tree                 = $tree
+        name           = $Node.name
+        arcMachineName = [string](Get-AzlSonarMember $Arc 'arcMachineName' $Node.name)
+        status         = $status
+        ready          = $succeeded.Count
+        total          = $list.Count
+        extensions     = @($list)
+        errors         = @($failed | ForEach-Object { if ($_['message']) { "$($_['name']): $($_['message'])" } else { "$($_['name']): Failed" } })
+        tree           = $tree
     }
 }
 
@@ -768,7 +1056,8 @@ function Get-AzlSonarInitialState {
         provisioningState = $null
         phase             = $phase
         activePhase       = $phase
-        provisioning      = [ordered]@{ route = $route; routeSource = $(if ($route) { 'config' } else { 'auto' }); phase = $phase; status = 'notstarted'; nodes = @() }
+        provisioning      = [ordered]@{ route = $route; routeSource = $(if ($route) { 'config' } else { 'auto' }); phase = $phase; status = 'notstarted'; readyForValidate = $false; nodes = @() }
+        extensions        = [ordered]@{ shown = $false; status = 'notstarted'; nodes = @() }
         validation        = [ordered]@{ status = 'notstarted'; tree = @(); counts = $emptyCounts }
         deployment        = [ordered]@{ status = 'notstarted'; tree = @(); counts = (Measure-AzlSonarStepTree -Tree @()) }
         nodes             = @($nodes)
@@ -787,23 +1076,32 @@ function Get-AzlSonarDeploymentState {
     .DESCRIPTION
         GETs deploymentSettings/default (validation and deployment step trees, mode, provisioning state), the edge
         machines of the resource group with their ProvisionOs job (simplified machine provisioning; skipped when
-        provisioningRoute is oem-image), the Arc machine of every node and, on the OEM image route, each Arc machine's
-        mandatory extensions. Uses Invoke-AzRestMethod with the signed-in Az PowerShell context. Never writes to Azure.
+        provisioningRoute is oem-image) and the Arc machine of every node. On the OEM image route the arc-registration
+        entry of each node also shows what the node itself reports (OS image update and bootstrap, from -NodeProbe,
+        which the node probe fills; see ConvertTo-AzlSonarOemNode); once a validation or deployment exists, each Arc
+        machine's mandatory extensions are read into the separate extensions group (they install during Validate).
+        Uses Invoke-AzRestMethod with the signed-in Az PowerShell context. Never writes to Azure.
         A 404 on deploymentSettings is not an error: the machines are still being prepared.
         The route: provisioningRoute simplified or oem-image as configured; auto picks simplified when edge machines
         for the configured nodes exist, else oem-image. The phase: deployment > validation > provisioning (simplified)
-        or arc-registration (OEM image).
+        or arc-registration (OEM image). On the OEM image route provisioning.readyForValidate is true when every node
+        is Registered and no validation has started yet.
     .PARAMETER Config
         A config object from Read-AzlSonarConfig.
     .PARAMETER ConfigPath
         Path to a config file (read with Read-AzlSonarConfig).
     .PARAMETER Now
         The poll time (UTC); used for polledAt and running-step durations. Defaults to now.
+    .PARAMETER NodeProbe
+        OEM image route: the node probe records by node name (Shared.NodeProbe; Update-AzlSonarNodeProbeEntry shape).
+    .PARAMETER Secret
+        Exact secret values to mask in the text the nodes report.
     .EXAMPLE
         Get-AzlSonarDeploymentState -ConfigPath ./config/clus01.json | ConvertTo-Json -Depth 20
     .OUTPUTS
         Ordered dictionary: cluster, resourceGroup, mode, provisioningState, phase, activePhase,
-        provisioning{route,routeSource,phase,status,nodes[]}, validation{status,tree,counts},
+        provisioning{route,routeSource,phase,status,readyForValidate,nodes[]}, extensions{shown,status,nodes[]},
+        validation{status,tree,counts},
         deployment{status,tree,counts}, nodes[], edgeMachines[], current{phase,stepPath(ids),stepNames,stepName,stepId,status},
         warnings[], pollError, polledAt.
     #>
@@ -816,7 +1114,14 @@ function Get-AzlSonarDeploymentState {
         [Parameter(Mandatory, ParameterSetName = 'Path')]
         [string]$ConfigPath,
 
-        [datetime]$Now = [datetime]::UtcNow
+        [datetime]$Now = [datetime]::UtcNow,
+
+        [AllowNull()]
+        [System.Collections.IDictionary]$NodeProbe,
+
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$Secret = @()
     )
 
     $ErrorActionPreference = 'Stop'
@@ -874,18 +1179,32 @@ function Get-AzlSonarDeploymentState {
             ConvertTo-AzlSonarSimplifiedNode -Node $node -Edge $edge -Arc $arc -Now $Now
         }
         else {
-            $extensions = @()
-            if ($null -ne $arc -and $arc.arcStatus -notin 'NotFound', 'Unknown') {
-                $extensions = @(Get-AzlSonarArcExtension -ArcMachineResourceId $arc.arcMachineResourceId -ArcMachineName $arc.arcMachineName -Warnings $warnings)
-            }
-            else {
-                $extensions = @(foreach ($name in $script:AzlSonarMandatoryExtensions) { [ordered]@{ name = $name; present = $false; rawStatus = $null; status = 'notstarted'; message = $null; start = $null; end = $null } })
-            }
-            ConvertTo-AzlSonarOemNode -Node $node -Arc $arc -Extensions $extensions -Now $Now
+            $probe = if ($null -ne $NodeProbe -and $NodeProbe.Contains($node.name)) { $NodeProbe[$node.name] } else { $null }
+            ConvertTo-AzlSonarOemNode -Node $node -Arc $arc -Probe $probe -Secret $Secret -Now $Now
         }
     }
     $provisioningNodes = @($provisioningNodes)
     $provisioningStatus = Get-AzlSonarProvisioningRollup -Nodes $provisioningNodes
+    $clusterStarted = $validationTree.Count -gt 0 -or $deploymentTree.Count -gt 0
+    $readyForValidate = $route -eq 'oem-image' -and $provisioningStatus -eq 'success' -and -not $clusterStarted
+
+    # OEM image route: the mandatory extensions install during cluster Validate, so they are read only from then on.
+    $extensionsSection = [ordered]@{ shown = $false; status = 'notstarted'; nodes = @() }
+    if ($route -eq 'oem-image' -and $clusterStarted) {
+        $extensionNodes = foreach ($node in $Config.nodes) {
+            $arc = $null
+            foreach ($n in $nodes) { if ($n.name -eq $node.name) { $arc = $n; break } }
+            $extensions = if ($null -ne $arc -and $arc.arcStatus -notin 'NotFound', 'Unknown') {
+                @(Get-AzlSonarArcExtension -ArcMachineResourceId $arc.arcMachineResourceId -ArcMachineName $arc.arcMachineName -Warnings $warnings)
+            }
+            else {
+                @(foreach ($name in $script:AzlSonarMandatoryExtensions) { [ordered]@{ name = $name; present = $false; rawStatus = $null; status = 'notstarted'; message = $null; start = $null; end = $null } })
+            }
+            ConvertTo-AzlSonarExtensionNode -Node $node -Arc $arc -Extensions $extensions -Now $Now
+        }
+        $extensionNodes = @($extensionNodes)
+        $extensionsSection = [ordered]@{ shown = $true; status = (Get-AzlSonarProvisioningRollup -Nodes $extensionNodes); nodes = $extensionNodes }
+    }
 
     # Keep the job's raw status objects out of the state (they are already converted into trees).
     $edgeOut = foreach ($machine in $edgeMachines) {
@@ -921,7 +1240,8 @@ function Get-AzlSonarDeploymentState {
         provisioningState = Get-AzlSonarMember $properties 'provisioningState'
         phase             = $phaseInfo.phase
         activePhase       = $active
-        provisioning      = [ordered]@{ route = $route; routeSource = $routeSource; phase = $provisioningPhase; status = $provisioningStatus; nodes = $provisioningNodes }
+        provisioning      = [ordered]@{ route = $route; routeSource = $routeSource; phase = $provisioningPhase; status = $provisioningStatus; readyForValidate = $readyForValidate; nodes = $provisioningNodes }
+        extensions        = $extensionsSection
         validation        = [ordered]@{ status = $validationStatus; tree = $validationTree; counts = (Measure-AzlSonarStepTree -Tree $validationTree) }
         deployment        = [ordered]@{ status = $deploymentStatus; tree = $deploymentTree; counts = (Measure-AzlSonarStepTree -Tree $deploymentTree) }
         nodes             = $nodes
@@ -977,6 +1297,9 @@ function Invoke-AzlSonarPollerLoop {
     <#
     .SYNOPSIS
         Background loop: polls Azure every pollSeconds and publishes the state until the shared stop flag is set.
+    .DESCRIPTION
+        The node probe records (Shared.NodeProbe, OEM image route) and the secrets to mask (Shared.Redact) are passed
+        to Get-AzlSonarDeploymentState on every poll.
     #>
     [CmdletBinding()]
     param(
@@ -989,7 +1312,9 @@ function Invoke-AzlSonarPollerLoop {
 
     while (-not $Shared.Stop) {
         try {
-            $state = Get-AzlSonarDeploymentState -Config $Config
+            $probe = if ($Shared.Contains('NodeProbe')) { $Shared['NodeProbe'] } else { $null }
+            $secret = if ($Shared.Contains('Redact')) { [string[]]@($Shared['Redact'] | Where-Object { $_ }) } else { [string[]]@() }
+            $state = Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret
             Publish-AzlSonarState -Shared $Shared -State $state
         }
         catch {

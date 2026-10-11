@@ -379,6 +379,14 @@ a { color: var(--accent); }
 .prov-pct[data-status="success"] .p-fill { background: var(--ok); }
 .prov-pct[data-status="error"] .p-fill { background: var(--err); }
 .prov-arc { overflow-wrap: anywhere; }
+.prov-steps { font-variant-numeric: tabular-nums; }
+.prov-steps[data-status="running"] { color: var(--run); }
+.prov-steps[data-status="success"] { color: var(--ok); }
+.prov-steps[data-status="error"] { color: var(--err); }
+.prov-probe {
+  padding: 0 8px; border-radius: 999px; font-weight: 600;
+  background: var(--warn-soft); color: var(--warn);
+}
 .prov-msg { flex-basis: 100%; color: var(--text-2); }
 
 .tree-section + .tree-section { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }

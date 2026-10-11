@@ -517,7 +517,7 @@ Describe 'Start-AzlSonarServer end to end (random port, mocked poller and tailer
         if ($script:E2EClient) { $script:E2EClient.Dispose() }
     }
 
-    It 'serves the API on localhost, starts both workers and stops cleanly' {
+    It 'serves the API on localhost, starts the workers and stops cleanly' {
         Mock -ModuleName AzlSonar -CommandName Assert-AzlSonarAzContext -MockWith { }
         Mock -ModuleName AzlSonar -CommandName Resolve-AzlSonarCredential -MockWith { $null }
         Mock -ModuleName AzlSonar -CommandName Start-AzlSonarWorker -MockWith {
@@ -572,7 +572,9 @@ Describe 'Start-AzlSonarServer end to end (random port, mocked poller and tailer
 
         Should -Invoke -ModuleName AzlSonar -CommandName Start-AzlSonarWorker -Times 1 -Exactly -ParameterFilter { $Command -eq 'Invoke-AzlSonarPollerLoop' }
         Should -Invoke -ModuleName AzlSonar -CommandName Start-AzlSonarWorker -Times 1 -Exactly -ParameterFilter { $Command -eq 'Invoke-AzlSonarTailerLoop' }
-        Should -Invoke -ModuleName AzlSonar -CommandName Stop-AzlSonarWorker -Times 2 -Exactly
+        # provisioningRoute auto may turn out to be the OEM image route: the node probe (Arc registration status) starts too.
+        Should -Invoke -ModuleName AzlSonar -CommandName Start-AzlSonarWorker -Times 1 -Exactly -ParameterFilter { $Command -eq 'Invoke-AzlSonarNodeProbeLoop' }
+        Should -Invoke -ModuleName AzlSonar -CommandName Stop-AzlSonarWorker -Times 3 -Exactly
         Should -Invoke -ModuleName AzlSonar -CommandName Start-Process -Times 0 -Exactly
         Should -Invoke -ModuleName AzlSonar -CommandName Invoke-AzRestMethod -Times 0 -Exactly
 

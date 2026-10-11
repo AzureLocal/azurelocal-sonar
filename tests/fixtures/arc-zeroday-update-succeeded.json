@@ -1,0 +1,40 @@
+{
+  "Version": "V1",
+  "Response": {
+    "Name": "Update",
+    "Status": "Succeeded",
+    "Message": null,
+    "Errors": [],
+    "DetailedResponse": [
+      {
+        "Name": "Scan",
+        "Status": "Succeeded",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T05:10:00Z",
+        "EndTime": "2026-10-11T05:12:30Z"
+      },
+      {
+        "Name": "Download",
+        "Status": "Succeeded",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T05:12:30Z",
+        "EndTime": "2026-10-11T05:31:00Z"
+      },
+      {
+        "Name": "Install",
+        "Status": "Succeeded",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T05:31:00Z",
+        "EndTime": "2026-10-11T05:52:00Z"
+      }
+    ],
+    "StartTime": "2026-10-11T05:10:00Z",
+    "EndTime": "2026-10-11T05:52:00Z"
+  }
+}

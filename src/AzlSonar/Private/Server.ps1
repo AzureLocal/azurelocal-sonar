@@ -51,6 +51,7 @@ function Initialize-AzlSonarSharedState {
             TailerJson    = 'null'
             TailerVersion = [long]0
             Redact        = @()   # exact secret values to mask in node text (never serialized)
+            NodeProbe     = [hashtable]::Synchronized(@{})   # OEM image route: per-node bootstrap/update status (Invoke-AzlSonarNodeProbeLoop)
         })
 }
 
@@ -605,7 +606,8 @@ function Start-AzlSonarServer {
         Starts AzL Sonar: the Azure poller, the log tailer and the local web server, until Ctrl+C.
     .DESCRIPTION
         Reads the config, checks the Az PowerShell sign-in, resolves the log account (prompt, -Credential or Key
-        Vault), binds http://localhost:{Port}/ only, starts the poller and the tailer on background runspaces and
+        Vault), binds http://localhost:{Port}/ only, starts the poller, the tailer and (unless provisioningRoute is
+        simplified) the node probe that reads the Arc registration status on each node, on background runspaces, and
         serves the page, the JSON API and Server-Sent Events. Read-only towards Azure and the nodes. Ctrl+C stops
         the listener, closes the remoting session and disposes the runspaces.
     .PARAMETER ConfigPath
@@ -678,6 +680,10 @@ function Start-AzlSonarServer {
     try {
         $workers.Add((Start-AzlSonarWorker -Name 'Poller' -Command 'Invoke-AzlSonarPollerLoop' -Arguments @{ Shared = $shared; Config = $config }))
         $workers.Add((Start-AzlSonarWorker -Name 'Tailer' -Command 'Invoke-AzlSonarTailerLoop' -Arguments @{ Shared = $shared; Config = $config; Credential = $logCredential }))
+        if ($config.provisioningRoute -ne 'simplified') {
+            # Reads Get-ArcBootstrapStatus / Get-ArcZeroDaySolutionUpdateStatus on each node, only while Arc registration (OEM image route) runs.
+            $workers.Add((Start-AzlSonarWorker -Name 'NodeProbe' -Command 'Invoke-AzlSonarNodeProbeLoop' -Arguments @{ Shared = $shared; Config = $config; Credential = $logCredential }))
+        }
 
         Write-Information -MessageData "AzL Sonar is listening on $url for $($config.clusterName) (read-only). Press Ctrl+C to stop." -InformationAction Continue
         if (-not $NoBrowser) {

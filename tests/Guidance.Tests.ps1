@@ -53,6 +53,16 @@ Describe 'Get-AzlSonarPhaseGuidance for <Model>' -ForEach $script:Models {
         }
     }
 
+    It 'arc-registration lists the node commands to check and says the extensions install during Validate' {
+        $arc = $script:g.phases['arc-registration']
+        @($arc.commands | ForEach-Object { ($_ -split ' ')[0] }) | Should -Be @('Get-ArcBootstrapStatus', 'Get-ArcZeroDaySolutionUpdateStatus', 'Collect-ArcBootstrapSupportLogs')
+        $arc.verified | Should -BeFalse -Because 'only the cmdlet and step names were read live (see observed)'
+        $arc.observed | Should -Match 'Read live 11 Oct 2026'
+        $arc.when | Should -Match 'install during cluster Validate'
+        $script:g.phases['validation'].when | Should -Match 'install during Validate'
+        @($script:g.phases['deployment'].commands).Count | Should -Be 0
+    }
+
     It 'filters to one phase with -Phase' {
         $one = Get-AzlSonarPhaseGuidance -IdentityModel $Model -Phase 'deployment'
         @($one.phases.Keys) | Should -Be @('deployment')

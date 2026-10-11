@@ -1,0 +1,40 @@
+{
+  "Version": "V1",
+  "Response": {
+    "Name": "Update",
+    "Status": "NotStarted",
+    "Message": null,
+    "Errors": [],
+    "DetailedResponse": [
+      {
+        "Name": "Scan",
+        "Status": "NotStarted",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T06:30:00Z",
+        "EndTime": null
+      },
+      {
+        "Name": "Download",
+        "Status": "NotStarted",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T06:30:00Z",
+        "EndTime": null
+      },
+      {
+        "Name": "Install",
+        "Status": "NotStarted",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T06:30:00Z",
+        "EndTime": null
+      }
+    ],
+    "StartTime": "2026-10-11T06:30:00Z",
+    "EndTime": null
+  }
+}

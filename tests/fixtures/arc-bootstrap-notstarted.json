@@ -1,0 +1,104 @@
+{
+  "Version": "V1",
+  "Response": {
+    "Name": "Bootstrap",
+    "Status": "NotStarted",
+    "Message": null,
+    "Errors": [],
+    "DetailedResponse": [
+      {
+        "Name": "NetworkConfig",
+        "Status": "NotStarted",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T06:30:00Z",
+        "EndTime": null
+      },
+      {
+        "Name": "RemoteConfig",
+        "Status": "NotStarted",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T06:30:00Z",
+        "EndTime": null
+      },
+      {
+        "Name": "WebProxy",
+        "Status": "NotStarted",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T06:30:00Z",
+        "EndTime": null
+      },
+      {
+        "Name": "TimeServer",
+        "Status": "NotStarted",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T06:30:00Z",
+        "EndTime": null
+      },
+      {
+        "Name": "HostName",
+        "Status": "NotStarted",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T06:30:00Z",
+        "EndTime": null
+      },
+      {
+        "Name": "ArcConfiguration",
+        "Status": "NotStarted",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [
+          {
+            "Name": "ArtifactsUpload",
+            "Status": "NotStarted",
+            "Message": null,
+            "Errors": [],
+            "DetailedResponse": [],
+            "StartTime": "2026-10-11T06:30:00Z",
+            "EndTime": null
+          },
+          {
+            "Name": "ConnectivityValidation",
+            "Status": "NotStarted",
+            "Message": null,
+            "Errors": [],
+            "DetailedResponse": [],
+            "StartTime": "2026-10-11T06:30:00Z",
+            "EndTime": null
+          },
+          {
+            "Name": "ArcRegistration",
+            "Status": "NotStarted",
+            "Message": null,
+            "Errors": [],
+            "DetailedResponse": [],
+            "StartTime": "2026-10-11T06:30:00Z",
+            "EndTime": null
+          },
+          {
+            "Name": "ArcExtensionInstall",
+            "Status": "NotStarted",
+            "Message": null,
+            "Errors": [],
+            "DetailedResponse": [],
+            "StartTime": "2026-10-11T06:30:00Z",
+            "EndTime": null
+          }
+        ],
+        "StartTime": "2026-10-11T06:30:00Z",
+        "EndTime": null
+      }
+    ],
+    "StartTime": "2026-10-11T06:30:00Z",
+    "EndTime": null
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "Version": "V1",
+  "Response": {
+    "Name": "Update",
+    "Status": "Failed",
+    "Message": "Zero-day update failed.",
+    "Errors": [],
+    "DetailedResponse": [
+      {
+        "Name": "Scan",
+        "Status": "Succeeded",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T05:10:00Z",
+        "EndTime": "2026-10-11T05:12:30Z"
+      },
+      {
+        "Name": "Download",
+        "Status": "Failed",
+        "Message": null,
+        "Errors": [
+          "Download of the solution update failed: the connection was closed. password=hunter2"
+        ],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T05:12:30Z",
+        "EndTime": "2026-10-11T05:20:00Z"
+      },
+      {
+        "Name": "Install",
+        "Status": "NotStarted",
+        "Message": null,
+        "Errors": [],
+        "DetailedResponse": [],
+        "StartTime": "2026-10-11T06:30:00Z",
+        "EndTime": null
+      }
+    ],
+    "StartTime": "2026-10-11T05:10:00Z",
+    "EndTime": "2026-10-11T05:20:00Z"
+  }
+}

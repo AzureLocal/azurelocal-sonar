@@ -9,7 +9,8 @@ function Get-AzlSonarPhaseGuidance {
         { version, phases: [ { phase, identityModel, account, logPaths[], available, access, source, verified } ] },
         keeps the entries for the identity model (an entry with identityModel Any, Both, * or none applies to both;
         an entry for the exact model wins over a generic one for the same phase) and returns them keyed by phase:
-        { identityModel, available, version, phases: { <phase>: { account, logPaths[], when, how, verified, source } } }.
+        { identityModel, available, version, phases: { <phase>: { account, logPaths[], when, how, commands[], verified, source } } }.
+        commands are the node commands to check in that phase (arc-registration: Get-ArcBootstrapStatus and the others).
         A missing file returns available = $false and no phases rather than failing.
     .PARAMETER IdentityModel
         LocalIdentity or ActiveDirectory.
@@ -64,6 +65,7 @@ function Get-AzlSonarPhaseGuidance {
             logPaths = [string[]](ConvertTo-AzlSonarArray (Get-AzlSonarMember $entry 'logPaths'))
             when     = Get-AzlSonarMember $entry 'available'
             how      = Get-AzlSonarMember $entry 'access'
+            commands = [string[]](ConvertTo-AzlSonarArray (Get-AzlSonarMember $entry 'commands'))
             verified = [bool](Get-AzlSonarMember $entry 'verified' $false)
             confirmedOn = Get-AzlSonarMember $entry 'confirmedOn'
             observed = Get-AzlSonarMember $entry 'observed'

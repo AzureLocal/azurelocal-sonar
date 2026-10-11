@@ -39,11 +39,16 @@
         "C:\\Windows\\System32\\Bootstrap\\Logs",
         "C:\\ProgramData\\AzureConnectedMachineAgent\\Log"
       ],
-      "available": "From the moment Invoke-AzStackHciArcInitialization runs on the node: setup.log and arcInstallLog-*.txt (Arc agent install) and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.* (the registration transcript) under Bootstrap\\Logs; himds.log and azcmagent.log under AzureConnectedMachineAgent\\Log once the Connected Machine agent is installed. The mandatory extensions (AzureEdgeDeviceManagement, AzureEdgeLifecycleManager, AzureEdgeRemoteSupport, AzureEdgeTelemetryAndDiagnostics) then install; their logs are under C:\\ProgramData\\GuestConfig\\extension_logs. Learn also offers Get-ArcBootstrapStatus and Collect-ArcBootstrapSupportLogs on the node.",
+      "available": "From the moment Invoke-AzStackHciArcInitialization runs on the node. Arc registration does three things: (1) when the OEM image is not the latest for its release baseline, the OS image update (zero-day solution update: Scan, Download, Install; typically 40-45 minutes, then a reboot, after which Invoke-AzStackHciArcInitialization is run again; meanwhile the registration status shows Update: InProgress); (2) the bootstrap (NetworkConfig, RemoteConfig, WebProxy, TimeServer, HostName, then ArcConfiguration: ArtifactsUpload, ConnectivityValidation, ArcRegistration, ArcExtensionInstall); (3) the Arc machine (named after the host) appears in the resource group and its agent turns Connected. Logs: setup.log, arcInstallLog-*.txt and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.* under Bootstrap\\Logs; himds.log and azcmagent.log under AzureConnectedMachineAgent\\Log once the Connected Machine agent is installed. The mandatory extensions are not part of this phase: they install during cluster Validate.",
+      "commands": [
+        "Get-ArcBootstrapStatus (on the node; $s = Get-ArcBootstrapStatus; $s.Response.Status: Succeeded, or Failed: rerun the registration with a new ARM token or device code)",
+        "Get-ArcZeroDaySolutionUpdateStatus (on the node; the OS image update: Scan, Download, Install)",
+        "Collect-ArcBootstrapSupportLogs (on the node, when a failure persists: collects the logs to share)"
+      ],
       "access": "WinRM to the node IP (NTLM): add the node to the workstation's TrustedHosts or use HTTPS 5986, and always pass -Credential. A non-built-in local admin may also need LocalAccountTokenFilterPolicy=1 on the node. RDP or the console also work at this stage.",
-      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-without-azure-arc-gateway?view=azloc-2609#step-3-run-registration-script",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-without-azure-arc-gateway?view=azloc-2609#handle-preinstalled-or-outdated-os-images-during-azure-arc-registration",
       "verified": false,
-      "observed": "Seen live 10 Oct 2026 on a 2609 Local Identity node (read later, during Deploy, as the deployment local admin): C:\\Windows\\System32\\Bootstrap\\Logs holds setup.log, arcInstallLog-*.txt and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.*. Not yet checked during an Arc registration itself or with the built-in Administrator."
+      "observed": "Seen live 10 Oct 2026 on a 2609 Local Identity node (read later, during Deploy, as the deployment local admin): C:\\Windows\\System32\\Bootstrap\\Logs holds setup.log, arcInstallLog-*.txt and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.*. Not yet checked during an Arc registration itself or with the built-in Administrator. Read live 11 Oct 2026 on an OEM-image node (module AzureEdgeBootstrap 1.0.0): the cmdlet names Get-ArcBootstrapStatus and Get-ArcZeroDaySolutionUpdateStatus, their { Version, Response } shape and the step names (Update: Scan, Download, Install; Bootstrap: NetworkConfig, RemoteConfig, WebProxy, TimeServer, HostName, ArcConfiguration with ArtifactsUpload, ConnectivityValidation, ArcRegistration, ArcExtensionInstall). Status values other than NotStarted, the Errors[] entry shape and Collect-ArcBootstrapSupportLogs are from Learn only."
     },
     {
       "phase": "arc-registration",
@@ -53,11 +58,16 @@
         "C:\\Windows\\System32\\Bootstrap\\Logs",
         "C:\\ProgramData\\AzureConnectedMachineAgent\\Log"
       ],
-      "available": "From the moment Invoke-AzStackHciArcInitialization runs on the node: setup.log and arcInstallLog-*.txt (Arc agent install) and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.* (the registration transcript) under Bootstrap\\Logs; himds.log and azcmagent.log under AzureConnectedMachineAgent\\Log once the Connected Machine agent is installed. The mandatory extensions (AzureEdgeDeviceManagement, AzureEdgeLifecycleManager, AzureEdgeRemoteSupport, AzureEdgeTelemetryAndDiagnostics) then install; their logs are under C:\\ProgramData\\GuestConfig\\extension_logs. Learn also offers Get-ArcBootstrapStatus and Collect-ArcBootstrapSupportLogs on the node.",
+      "available": "From the moment Invoke-AzStackHciArcInitialization runs on the node. Arc registration does three things: (1) when the OEM image is not the latest for its release baseline, the OS image update (zero-day solution update: Scan, Download, Install; typically 40-45 minutes, then a reboot, after which Invoke-AzStackHciArcInitialization is run again; meanwhile the registration status shows Update: InProgress); (2) the bootstrap (NetworkConfig, RemoteConfig, WebProxy, TimeServer, HostName, then ArcConfiguration: ArtifactsUpload, ConnectivityValidation, ArcRegistration, ArcExtensionInstall); (3) the Arc machine (named after the host) appears in the resource group and its agent turns Connected. Logs: setup.log, arcInstallLog-*.txt and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.* under Bootstrap\\Logs; himds.log and azcmagent.log under AzureConnectedMachineAgent\\Log once the Connected Machine agent is installed. The mandatory extensions are not part of this phase: they install during cluster Validate.",
+      "commands": [
+        "Get-ArcBootstrapStatus (on the node; $s = Get-ArcBootstrapStatus; $s.Response.Status: Succeeded, or Failed: rerun the registration with a new ARM token or device code)",
+        "Get-ArcZeroDaySolutionUpdateStatus (on the node; the OS image update: Scan, Download, Install)",
+        "Collect-ArcBootstrapSupportLogs (on the node, when a failure persists: collects the logs to share)"
+      ],
       "access": "The nodes are normally still in a workgroup: WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential. Kerberos by host name only if the nodes were joined to the domain beforehand.",
-      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-without-azure-arc-gateway?view=azloc-2609#step-3-run-registration-script",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-without-azure-arc-gateway?view=azloc-2609#handle-preinstalled-or-outdated-os-images-during-azure-arc-registration",
       "verified": false,
-      "observed": "Seen live 10 Oct 2026 on a 2609 Local Identity node (read later, during Deploy, as the deployment local admin): C:\\Windows\\System32\\Bootstrap\\Logs holds setup.log, arcInstallLog-*.txt and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.*. Not yet checked during an Arc registration itself or with the built-in Administrator."
+      "observed": "Seen live 10 Oct 2026 on a 2609 Local Identity node (read later, during Deploy, as the deployment local admin): C:\\Windows\\System32\\Bootstrap\\Logs holds setup.log, arcInstallLog-*.txt and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.*. Not yet checked during an Arc registration itself or with the built-in Administrator. Read live 11 Oct 2026 on an OEM-image node (module AzureEdgeBootstrap 1.0.0): the cmdlet names Get-ArcBootstrapStatus and Get-ArcZeroDaySolutionUpdateStatus, their { Version, Response } shape and the step names (Update: Scan, Download, Install; Bootstrap: NetworkConfig, RemoteConfig, WebProxy, TimeServer, HostName, ArcConfiguration with ArtifactsUpload, ConnectivityValidation, ArcRegistration, ArcExtensionInstall). Status values other than NotStarted, the Errors[] entry shape and Collect-ArcBootstrapSupportLogs are from Learn only."
     },
     {
       "phase": "validation",
@@ -69,7 +79,7 @@
         "C:\\Observability",
         "C:\\CloudDeployment\\Logs (appears later in the run)"
       ],
-      "available": "Environment Checker output is written to C:\\CloudDeployment\\Logs when validation runs as part of deployment, and each run overwrites the file. Standalone checker runs write to $HOME\\.AzStackHci instead. Learn documents C:\\MASLogs\\LcmEceLiteLogs for upgrade validation only; for deployment it is unverified.",
+      "available": "Environment Checker output is written to C:\\CloudDeployment\\Logs when validation runs as part of deployment, and each run overwrites the file. Standalone checker runs write to $HOME\\.AzStackHci instead. Learn documents C:\\MASLogs\\LcmEceLiteLogs for upgrade validation only; for deployment it is unverified. The mandatory Arc extensions (AzureEdgeDeviceManagement, AzureEdgeLifecycleManager, AzureEdgeRemoteSupport, AzureEdgeTelemetryAndDiagnostics) install during Validate; their logs are under C:\\ProgramData\\GuestConfig\\extension_logs on each node.",
       "access": "WinRM to the seed node by IP: TrustedHosts or HTTPS 5986, -Credential, and an account in local Administrators. CredSSP is not needed.",
       "source": "https://learn.microsoft.com/azure/azure-local/manage/use-environment-checker?view=azloc-2609",
       "verified": false
@@ -84,7 +94,7 @@
         "C:\\Observability",
         "C:\\CloudDeployment\\Logs (appears later in the run)"
       ],
-      "available": "Environment Checker output is written to C:\\CloudDeployment\\Logs when validation runs as part of deployment, and each run overwrites the file. C:\\MASLogs\\LcmEceLiteLogs is documented for upgrade validation only.",
+      "available": "Environment Checker output is written to C:\\CloudDeployment\\Logs when validation runs as part of deployment, and each run overwrites the file. C:\\MASLogs\\LcmEceLiteLogs is documented for upgrade validation only. The mandatory Arc extensions (AzureEdgeDeviceManagement, AzureEdgeLifecycleManager, AzureEdgeRemoteSupport, AzureEdgeTelemetryAndDiagnostics) install during Validate; their logs are under C:\\ProgramData\\GuestConfig\\extension_logs on each node.",
       "access": "Nodes are not yet joined to the domain unless that was done before deployment, so use WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential.",
       "source": "https://learn.microsoft.com/azure/azure-local/manage/use-environment-checker?view=azloc-2609",
       "verified": false

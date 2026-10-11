@@ -94,6 +94,12 @@ function ConvertTo-AzlSonarUtcDate {
     else {
         $text = [string]$Value
         if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+        # Windows PowerShell 5.1 ConvertTo-Json writes dates as /Date(milliseconds)/ (node output can arrive this way).
+        if ($text -match '^\s*\\?/Date\((?<ms>-?\d+)(?:[+-]\d{4})?\)\\?/\s*$') {
+            $result = [System.DateTimeOffset]::FromUnixTimeMilliseconds([long]$Matches['ms']).UtcDateTime
+            if ($result.Year -lt 1900) { return $null }
+            return $result
+        }
         $parsed = [System.DateTimeOffset]::MinValue
         $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AllowWhiteSpaces
         if (-not [System.DateTimeOffset]::TryParse($text, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$parsed)) {

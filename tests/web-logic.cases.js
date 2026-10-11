@@ -301,4 +301,79 @@ test('Arc machine name sources are explained', function () {
   eq(m.arcSourceText('bogus'), '');
 });
 
+// ---------------------------------------------------------------- OEM image route: Arc registration as the node reports it
+
+function oemNode(name, lifecycle, status, extra) {
+  var n = { name: name, route: 'oem-image', lifecycle: lifecycle, status: status, extensions: [],
+    tree: [{ id: 'update', name: 'OS image update', status: 'running', children: [] }, { id: 'bootstrap', name: 'Bootstrap', status: 'notstarted', children: [] },
+      { id: 'arc', name: 'Azure registration', status: 'notstarted', children: [] }] };
+  if (extra) Object.keys(extra).forEach(function (k) { n[k] = extra[k]; });
+  return n;
+}
+
+test('OEM lifecycle keys read as words; other routes keep the reported lifecycle', function () {
+  eq(m.lifecycleLabel('oem-image', 'UpdatingOsImage'), 'Updating OS image');
+  eq(m.lifecycleLabel('oem-image', 'Bootstrapping'), 'Bootstrapping');
+  eq(m.lifecycleLabel('oem-image', 'Registered'), 'Registered (Connected)');
+  eq(m.lifecycleLabel('oem-image', 'NotStarted'), 'Not started');
+  eq(m.lifecycleLabel('oem-image', 'Failed'), 'Failed');
+  eq(m.lifecycleLabel('oem-image', ''), 'Unknown');
+  eq(m.lifecycleLabel('simplified', 'InstallingOs'), 'InstallingOs');
+  eq(m.lifecycleLabel('oem-image', 'SomethingNew'), 'SomethingNew', 'an unknown key is shown as reported');
+});
+
+test('provisioningTreeOf (OEM): three groups per machine, update and bootstrap step counts, no extensions', function () {
+  var tree = m.provisioningTreeOf(provState('arc-registration', 'arc-registration', 'oem-image', [
+    oemNode('node01', 'UpdatingOsImage', 'running', {
+      lifecycleMessage: 'Updating the OS image (zero-day solution update): Download. Learn: typically 40-45 minutes, then a reboot; Invoke-AzStackHciArcInitialization is run again after the reboot.',
+      update: { state: 'read', status: 'running', done: 1, total: 3, current: 'Download' },
+      bootstrap: { state: 'read', status: 'notstarted', done: 0, total: 9, current: null },
+      probe: { state: 'ok', unreachableSince: null } }),
+    oemNode('node02', 'Bootstrapping', 'running', {
+      update: { state: 'notAvailable', status: 'unknown', done: 0, total: 0 },
+      bootstrap: { state: 'read', status: 'InProgress', done: '7', total: 9, current: 'ArcConfiguration > ArcRegistration' } })
+  ]));
+  eq(tree[0].children.map(function (c) { return c.name; }), ['OS image update', 'Bootstrap', 'Azure registration']);
+  eq(tree[0].prov.lifecycleLabel, 'Updating OS image');
+  eq(tree[0].prov.update, { status: 'running', done: 1, total: 3, current: 'Download', state: 'read' });
+  eq(/40-45 minutes/.test(tree[0].description), true, 'the update note is the machine description');
+  eq(tree[0].prov.extensionsTotal, 0, 'no extensions during Arc registration');
+  eq(tree[1].prov.bootstrap.status, 'running', 'raw InProgress is normalised');
+  eq(tree[1].prov.bootstrap.done, 7, 'counts are numbers');
+  eq(tree[1].prov.bootstrap.current, 'ArcConfiguration > ArcRegistration');
+  eq(m.stepGroupOf(null), null, 'simplified nodes have no update/bootstrap groups');
+});
+
+test('probeNote: Rebooting / unreachable since <time> only while the node does not answer', function () {
+  eq(m.probeNote({ state: 'ok' }), '');
+  eq(m.probeNote(null), '');
+  eq(m.probeNote({ state: 'unreachable', unreachableSince: '2026-10-11T06:32:00Z' }), 'Rebooting / unreachable since 2026-10-11T06:32:00Z');
+  eq(m.probeNote({ state: 'unreachable', unreachableSince: '2026-10-11T06:32:00Z' }, function (t) { return 'T' + t; }), 'Rebooting / unreachable since T' + Date.parse('2026-10-11T06:32:00Z'), 'the page formats the time');
+  eq(m.probeNote({ state: 'unreachable' }), 'Rebooting / unreachable since the last poll');
+});
+
+test('Ready for Validate only when the back end says every machine is registered', function () {
+  var s = provState('arc-registration', 'arc-registration', 'oem-image', [oemNode('node01', 'Registered', 'success')]);
+  eq(m.readyForValidate(s), false, 'no flag');
+  s.provisioning.readyForValidate = true;
+  eq(m.readyForValidate(s), true);
+  eq(m.readyForValidate({ phase: 'validation' }), false);
+});
+
+test('extensionsTreeOf: the mandatory extensions appear only once the back end shows them (Validate started)', function () {
+  eq(m.extensionsTreeOf({ extensions: { shown: false, nodes: [{ name: 'node01' }] } }), []);
+  eq(m.extensionsTreeOf({ phase: 'arc-registration' }), [], 'older back ends without the group');
+  var tree = m.extensionsTreeOf({ extensions: { shown: true, status: 'running', nodes: [
+    { name: 'node01', status: 'error', ready: 1, total: 4, errors: ['AzureEdgeTelemetryAndDiagnostics: failed'],
+      tree: [{ id: 'ext.AzureEdgeDeviceManagement', name: 'AzureEdgeDeviceManagement', status: 'success', children: [] }] },
+    null
+  ] } });
+  eq(tree.length, 1);
+  eq(tree[0].id, 'ext:node01', 'ids differ from the machine items of the Arc registration panel');
+  eq(tree[0].status, 'error');
+  eq(tree[0].description, 'Extensions 1 of 4 succeeded');
+  eq(tree[0].errors, ['AzureEdgeTelemetryAndDiagnostics: failed']);
+  eq(tree[0].children[0].name, 'AzureEdgeDeviceManagement');
+});
+
 process.stdout.write(JSON.stringify(cases));
