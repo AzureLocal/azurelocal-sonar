@@ -15,6 +15,9 @@ $script:AzlSonarContentTypes = @{
 }
 $script:AzlSonarSsePingSeconds = 15
 $script:AzlSonarSseMaxLinesPerEvent = 1000
+$script:AzlSonarSseMaxClients = 10              # live streams served at once; more get 503
+$script:AzlSonarSseMaxQueuedBytes = 4194304     # bytes queued for one client before it counts as fallen behind
+$script:AzlSonarSseWriteTimeoutSeconds = 15     # one write still in flight after this long drops the client
 
 function Initialize-AzlSonarSharedState {
     <#
@@ -38,6 +41,8 @@ function Initialize-AzlSonarSharedState {
             LastStateKey  = ''
             Timeline      = [System.Collections.Generic.List[string]]::new()
             TimelineMax   = $TimelineMax
+            TimelineDropped = [long]0
+            ServerId      = [guid]::NewGuid().ToString('N')   # changes on every start: the page detects a restart by it
             Lines         = [System.Collections.Generic.Queue[object]]::new()
             LogSeq        = [long]0
             RingSize      = $RingSize
@@ -201,7 +206,11 @@ function Resolve-AzlSonarStaticPath {
 function Get-AzlSonarLogsJson {
     <#
     .SYNOPSIS
-        The /api/logs body: { tailer, files[], lines[] } with lines after -Since.
+        The /api/logs body: { server, lastSeq, tailer, files[], lines[] } with lines after -Since.
+    .DESCRIPTION
+        server is this back end's instance id (new on every start). lastSeq is the last sequence number given out when
+        the lines were read: the page has every line up to lastSeq (or it fell out of the ring buffer) and uses it as
+        its catch-up cursor.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -212,15 +221,21 @@ function Get-AzlSonarLogsJson {
         [long]$Since = 0
     )
 
-    $lines = Get-AzlSonarLogLine -Shared $Shared -Since $Since
+    $window = Get-AzlSonarLogWindow -Shared $Shared -Since $Since
     $files = ConvertTo-AzlSonarJson @($Shared.Files)
-    return '{"tailer":' + $Shared.TailerJson + ',"files":' + $files + ',"lines":' + (ConvertTo-AzlSonarJson $lines) + '}'
+    return '{"server":' + (ConvertTo-AzlSonarJson ([string]$Shared.ServerId)) + ',"lastSeq":' + [long]$window.LastSeq +
+        ',"tailer":' + $Shared.TailerJson + ',"files":' + $files + ',"lines":' + (ConvertTo-AzlSonarJson $window.Lines) + '}'
 }
 
 function Get-AzlSonarExportJson {
     <#
     .SYNOPSIS
         The /api/export bundle: config (no secrets), the state timeline, the latest state and the log ring buffer.
+    .DESCRIPTION
+        The timeline is change-only and capped: a snapshot is kept only when the state changed (polledAt and running
+        durations ignored), at most TimelineMax (5000); older snapshots are dropped first. The latest state is always
+        in 'state'. The export metadata describes both caps: timelineMode, timelineMax, timelineDropped,
+        latestStateIncluded, logRingSize, logLinesKept, logFirstSeq, logLastSeq and logLinesDropped.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -234,15 +249,29 @@ function Get-AzlSonarExportJson {
     try {
         $timeline = $shared.Timeline.ToArray()
         $stateJson = $shared.StateJson
+        $timelineDropped = [long]$shared.TimelineDropped
     }
     finally {
         [System.Threading.Monitor]::Exit($shared.Lock)
     }
+    $window = Get-AzlSonarLogWindow -Shared $shared -Since 0
+    $kept = @($window.Lines).Count
+    $firstSeq = if ($kept -gt 0) { [long]$window.Lines[0]['seq'] } else { $null }
     $meta = ConvertTo-AzlSonarJson ([ordered]@{
-            tool       = 'AzL Sonar'
-            version    = $Server.Version
-            exportedAt = Format-AzlSonarDate ([datetime]::UtcNow)
-            snapshots  = $timeline.Count
+            tool                = 'AzL Sonar'
+            version             = $Server.Version
+            server              = [string]$shared.ServerId
+            exportedAt          = Format-AzlSonarDate ([datetime]::UtcNow)
+            snapshots           = $timeline.Count
+            timelineMode        = 'change-only'
+            timelineMax         = [int]$shared.TimelineMax
+            timelineDropped     = $timelineDropped
+            latestStateIncluded = $true
+            logRingSize         = [int]$shared.RingSize
+            logLinesKept        = $kept
+            logFirstSeq         = $firstSeq
+            logLastSeq          = [long]$window.LastSeq
+            logLinesDropped     = [long]([Math]::Max([long]0, [long]$window.LastSeq - $kept))
         })
     return '{"export":' + $meta +
         ',"config":' + $Server.ConfigJson +
@@ -256,6 +285,11 @@ function Open-AzlSonarSseClient {
     <#
     .SYNOPSIS
         Turns a request into a Server-Sent Events stream and registers it; the main loop pushes the events.
+    .DESCRIPTION
+        At most AzlSonarSseMaxClients (10) streams are served at once; one more gets 503 with Retry-After (the page
+        falls back to polling /api/state and /api/logs). The stream starts with 'retry: 5000' and an 'event: hello'
+        whose data is { server, since }: the back end's instance id and the log sequence the stream continues from.
+        Nothing is written synchronously: the text is queued and written with WriteAsync by Invoke-AzlSonarSseWrite.
     #>
     [CmdletBinding()]
     param(
@@ -267,22 +301,23 @@ function Open-AzlSonarSseClient {
     )
 
     $response = $Context.Response
+    if ($Server.Clients.Count -ge $script:AzlSonarSseMaxClients) {
+        Send-AzlSonarHttpResponse -Response $response -StatusCode 503 -ContentType 'text/plain; charset=utf-8' -NoCache -Header @{ 'Retry-After' = '30' } `
+            -Body "AzL Sonar serves at most $($script:AzlSonarSseMaxClients) live streams at once. Close another Sonar tab; this page polls meanwhile."
+        return
+    }
     $response.StatusCode = 200
     $response.ContentType = 'text/event-stream; charset=utf-8'
     $response.Headers['Cache-Control'] = 'no-store'
     $response.Headers['X-Content-Type-Options'] = 'nosniff'
     $response.SendChunked = $true
     $response.KeepAlive = $true
-    $client = @{
-        Response      = $response
-        Stream        = $response.OutputStream
-        StateVersion  = [long]-1
-        TailerVersion = [long]-1
-        LogSeq        = [long]$Server.Shared.LogSeq
-        LastPing      = [datetime]::UtcNow
-    }
+    $client = New-AzlSonarSseClient -Response $response -Stream $response.OutputStream -LogSeq ([long]$Server.Shared.LogSeq)
     try {
-        Write-AzlSonarSseText -Client $client -Text "retry: 5000`n`n"
+        Add-AzlSonarSseText -Client $client -Text "retry: 5000`n`n"
+        $hello = ConvertTo-AzlSonarJson ([ordered]@{ server = [string]$Server.Shared.ServerId; since = [long]$client.LogSeq })
+        Add-AzlSonarSseText -Client $client -Text ("event: hello`ndata: " + $hello + "`n`n")
+        $null = Invoke-AzlSonarSseWrite -Client $client -Now ([datetime]::UtcNow)
         $Server.Clients.Add($client)
     }
     catch {
@@ -290,7 +325,43 @@ function Open-AzlSonarSseClient {
     }
 }
 
-function Write-AzlSonarSseText {
+function New-AzlSonarSseClient {
+    <#
+    .SYNOPSIS
+        The per-client record of an SSE stream: its response, stream, cursors and bounded write queue.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Creates an in-memory record only.')]
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Response,
+
+        [Parameter(Mandatory)]
+        [object]$Stream,
+
+        [long]$LogSeq = 0
+    )
+
+    return @{
+        Response      = $Response
+        Stream        = $Stream
+        StateVersion  = [long]-1
+        TailerVersion = [long]-1
+        LogSeq        = $LogSeq
+        LastPing      = [datetime]::UtcNow
+        Queue         = [System.Collections.Generic.Queue[byte[]]]::new()
+        QueuedBytes   = [long]0
+        Pending       = $null
+        PendingSince  = [datetime]::UtcNow
+    }
+}
+
+function Add-AzlSonarSseText {
+    <#
+    .SYNOPSIS
+        Queues text for one SSE client. Throws when the client's queue would pass AzlSonarSseMaxQueuedBytes (it fell behind).
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -301,14 +372,99 @@ function Write-AzlSonarSseText {
     )
 
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-    $Client.Stream.Write($bytes, 0, $bytes.Length)
-    $Client.Stream.Flush()
+    if ([long]$Client.QueuedBytes + $bytes.Length -gt $script:AzlSonarSseMaxQueuedBytes) {
+        throw "The client fell behind: more than $($script:AzlSonarSseMaxQueuedBytes) bytes queued."
+    }
+    $Client.Queue.Enqueue($bytes)
+    $Client.QueuedBytes = [long]$Client.QueuedBytes + $bytes.Length
+}
+
+function Invoke-AzlSonarSseWrite {
+    <#
+    .SYNOPSIS
+        Moves one SSE client's queue to the network without waiting. Returns $true when no write is in flight afterwards.
+    .DESCRIPTION
+        At most one WriteAsync is in flight per client. When the previous write is still running the call returns at
+        once ($false); when it has run longer than AzlSonarSseWriteTimeoutSeconds, or it failed, the call throws so the
+        caller drops the client. Otherwise everything queued is written as one buffer with WriteAsync. The dispatch
+        loop never blocks on a client.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Client,
+
+        [datetime]$Now = [datetime]::UtcNow
+    )
+
+    if ($null -ne $Client.Pending) {
+        $task = $Client.Pending
+        if (-not $task.IsCompleted) {
+            if (($Now - $Client.PendingSince).TotalSeconds -ge $script:AzlSonarSseWriteTimeoutSeconds) {
+                throw "A write to the client has not finished in $($script:AzlSonarSseWriteTimeoutSeconds) s."
+            }
+            return $false
+        }
+        $Client.Pending = $null
+        if ($task.IsFaulted -or $task.IsCanceled) { throw 'A write to the client failed.' }
+    }
+    if ($Client.Queue.Count -eq 0) { return $true }
+    $buffer = [System.IO.MemoryStream]::new()
+    try {
+        while ($Client.Queue.Count -gt 0) {
+            $chunk = $Client.Queue.Dequeue()
+            $buffer.Write($chunk, 0, $chunk.Length)
+        }
+        $bytes = $buffer.ToArray()
+    }
+    finally {
+        $buffer.Dispose()
+    }
+    $Client.QueuedBytes = [long]0
+    $Client.PendingSince = $Now
+    $Client.Pending = $Client.Stream.WriteAsync($bytes, 0, $bytes.Length)
+    if ($Client.Pending.IsCompleted) {
+        $task = $Client.Pending
+        $Client.Pending = $null
+        if ($task.IsFaulted -or $task.IsCanceled) { throw 'A write to the client failed.' }
+        return $true
+    }
+    return $false
+}
+
+function Remove-AzlSonarSseClient {
+    <#
+    .SYNOPSIS
+        Drops one SSE client: removes it from the list and aborts its connection (the page reconnects and catches up).
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Closes a local HTTP connection only.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Server,
+
+        [Parameter(Mandatory)]
+        [hashtable]$Client,
+
+        [string]$Reason
+    )
+
+    $null = $Server.Clients.Remove($Client)
+    Write-Verbose "SSE client dropped: $Reason"
+    try { $Client.Response.Abort() } catch { Write-Verbose 'SSE client already gone.' }
 }
 
 function Send-AzlSonarSseUpdate {
     <#
     .SYNOPSIS
         Pushes what changed to every SSE client: state, tailer, new log lines, and a ping every 15 seconds.
+    .DESCRIPTION
+        Never blocks on a client. A client whose previous write is still in flight gets nothing new this turn (state
+        and tailer events coalesce to the latest; log lines wait at its cursor). A client is dropped when a write
+        fails or stays in flight longer than AzlSonarSseWriteTimeoutSeconds, when its queue passes
+        AzlSonarSseMaxQueuedBytes, or when the lines it still needs have left the ring buffer (it fell behind). Log
+        events carry { server, lines[] }.
     #>
     [CmdletBinding()]
     param(
@@ -318,36 +474,44 @@ function Send-AzlSonarSseUpdate {
 
     $shared = $Server.Shared
     $now = [datetime]::UtcNow
-    foreach ($client in @($Server.Clients.ToArray())) {
+    $clients = @($Server.Clients.ToArray())
+    if ($clients.Count -eq 0) { return }
+    $serverJson = ConvertTo-AzlSonarJson ([string]$shared.ServerId)
+    foreach ($client in $clients) {
         try {
+            if (-not (Invoke-AzlSonarSseWrite -Client $client -Now $now)) { continue }
             $stateVersion = [long]$shared.StateVersion
             if ($stateVersion -ne $client.StateVersion) {
-                Write-AzlSonarSseText -Client $client -Text ("event: state`ndata: " + $shared.StateJson + "`n`n")
+                Add-AzlSonarSseText -Client $client -Text ("event: state`ndata: " + $shared.StateJson + "`n`n")
                 $client.StateVersion = $stateVersion
             }
             $tailerVersion = [long]$shared.TailerVersion
             if ($tailerVersion -ne $client.TailerVersion -and $tailerVersion -gt 0) {
-                Write-AzlSonarSseText -Client $client -Text ("event: tailer`ndata: " + $shared.TailerJson + "`n`n")
+                Add-AzlSonarSseText -Client $client -Text ("event: tailer`ndata: " + $shared.TailerJson + "`n`n")
                 $client.TailerVersion = $tailerVersion
             }
             if ([long]$shared.LogSeq -gt $client.LogSeq) {
-                $lines = Get-AzlSonarLogLine -Shared $shared -Since $client.LogSeq -Max $script:AzlSonarSseMaxLinesPerEvent
+                $window = Get-AzlSonarLogWindow -Shared $shared -Since $client.LogSeq -Max $script:AzlSonarSseMaxLinesPerEvent
+                if ($window.OldestSeq -gt ($client.LogSeq + 1)) {
+                    throw "The client fell behind the log ring buffer (needs seq $($client.LogSeq + 1), oldest kept $($window.OldestSeq))."
+                }
+                $lines = $window.Lines
                 if ($lines.Count -gt 0) {
-                    Write-AzlSonarSseText -Client $client -Text ("event: log`ndata: " + (ConvertTo-AzlSonarJson $lines) + "`n`n")
+                    Add-AzlSonarSseText -Client $client -Text ("event: log`ndata: {""server"":" + $serverJson + ',"lines":' + (ConvertTo-AzlSonarJson $lines) + "}`n`n")
                     $client.LogSeq = [long]$lines[-1]['seq']
                 }
                 else {
-                    $client.LogSeq = [long]$shared.LogSeq
+                    $client.LogSeq = [long]$window.LastSeq
                 }
             }
             if (($now - $client.LastPing).TotalSeconds -ge $script:AzlSonarSsePingSeconds) {
-                Write-AzlSonarSseText -Client $client -Text ": ping`n`n"
+                Add-AzlSonarSseText -Client $client -Text ": ping`n`n"
                 $client.LastPing = $now
             }
+            $null = Invoke-AzlSonarSseWrite -Client $client -Now $now
         }
         catch {
-            $null = $Server.Clients.Remove($client)
-            try { $client.Response.Abort() } catch { Write-Verbose 'SSE client already gone.' }
+            Remove-AzlSonarSseClient -Server $Server -Client $client -Reason $_.Exception.Message
         }
     }
 }
@@ -489,7 +653,7 @@ function Start-AzlSonarServer {
     $server = @{
         Shared       = $shared
         WebRoot      = Join-Path -Path $script:AzlSonarModuleRoot -ChildPath 'web'
-        ConfigJson   = ConvertTo-AzlSonarJson (ConvertTo-AzlSonarPublicConfig -Config $config -StartedAt ([datetime]::UtcNow))
+        ConfigJson   = ConvertTo-AzlSonarJson (ConvertTo-AzlSonarPublicConfig -Config $config -StartedAt ([datetime]::UtcNow) -ServerId $shared.ServerId)
         GuidanceJson = ConvertTo-AzlSonarJson $guidance
         ClusterName  = $config.clusterName
         Version      = $moduleVersion

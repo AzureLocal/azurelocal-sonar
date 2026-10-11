@@ -206,7 +206,7 @@ Describe 'Measure-AzlSonarStepTree' {
 
 Describe 'Get-AzlSonarRollupStatus' {
     BeforeAll {
-        function New-Leaf([string]$Status) { [ordered]@{ id = '0'; name = 'n'; status = $Status; children = @() } }
+        function Get-Leaf([string]$Status) { [ordered]@{ id = '0'; name = 'n'; status = $Status; children = @() } }
     }
 
     It 'uses the reported status when present' {
@@ -224,7 +224,7 @@ Describe 'Get-AzlSonarRollupStatus' {
         @{ Statuses = @('notstarted', 'notstarted'); Expected = 'notstarted' }
     ) {
         param($Statuses, $Expected)
-        $tree = @(foreach ($s in $Statuses) { New-Leaf $s })
+        $tree = @(foreach ($s in $Statuses) { Get-Leaf $s })
         InModuleScope AzlSonar -Parameters @{ Tree = $tree } { param($Tree) Get-AzlSonarRollupStatus -RawStatus $null -Tree $Tree } | Should -Be $Expected
     }
 }

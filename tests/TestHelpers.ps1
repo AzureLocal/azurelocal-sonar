@@ -1,3 +1,6 @@
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test helpers build in-memory fixtures only.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'The Invoke-AzRestMethod stub only mirrors the real parameters.')]
+param()
 Set-StrictMode -Version Latest
 
 # Shared helpers for the AzL Sonar Pester 5 suite. Dot-source in BeforeAll.

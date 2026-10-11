@@ -12,12 +12,12 @@ BeforeAll {
     # The first matching route answers; anything unrouted fails the test loudly (no live call can slip through).
     $script:ArmRoutes = [System.Collections.Generic.List[hashtable]]::new()
     $script:ArmCalls = [System.Collections.Generic.List[string]]::new()
-    function Set-ArmRoute {
+    function Add-ArmRoute {
         param([string]$Match, [object]$Response)
         $script:ArmRoutes.Add(@{ Match = $Match; Response = $Response })
     }
 
-    function New-SettingsBody {
+    function Get-SettingsBody {
         param([object]$Validation, [object]$Deployment, [string]$Mode = 'Validate', [string]$State = 'Succeeded')
         return [pscustomobject]@{
             id         = '/subscriptions/x/resourceGroups/rg/providers/Microsoft.AzureStackHCI/clusters/clus01/deploymentSettings/default'
@@ -29,7 +29,7 @@ BeforeAll {
         }
     }
 
-    function New-ArcBody {
+    function Get-ArcBody {
         param([string]$Status = 'Connected')
         return [pscustomobject]@{ properties = [pscustomobject]@{ status = $Status; lastStatusChange = '2026-10-10T17:00:00Z'; agentVersion = '1.50' } }
     }
@@ -49,9 +49,9 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
     }
 
     It 'validation succeeded and deployment {}: phase validation, validation done' {
-        Set-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (New-SettingsBody -Validation (Get-SonarValidationSuccessFixture) -Deployment ([pscustomobject]@{})))
-        Set-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (New-ArcBody))
-        Set-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 400 @{ error = @{ code = 'InvalidApiVersion'; message = 'no such api' } })
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation (Get-SonarValidationSuccessFixture) -Deployment ([pscustomobject]@{})))
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 400 @{ error = @{ code = 'InvalidApiVersion'; message = 'no such api' } })
 
         $state = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
         $state.phase | Should -Be 'validation'
@@ -71,9 +71,9 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
     }
 
     It 'uses the configured api-version and escapes nothing unexpected in the path' {
-        Set-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (New-SettingsBody -Validation ([pscustomobject]@{}) -Deployment ([pscustomobject]@{})))
-        Set-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (New-ArcBody))
-        Set-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 404 $null)
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation ([pscustomobject]@{}) -Deployment ([pscustomobject]@{})))
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 404 $null)
         $null = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
         $script:ArmCalls[0] | Should -Be '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.AzureStackHCI/clusters/clus01/deploymentSettings/default?api-version=2025-09-15-preview'
         $script:ArmCalls | Should -Contain '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.HybridCompute/machines/node02?api-version=2024-07-10'
@@ -82,9 +82,9 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
     }
 
     It 'deployment running: phase deployment, current is the deepest running step' {
-        Set-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (New-SettingsBody -Validation (Get-SonarValidationSuccessFixture) -Deployment (Get-SonarDeploymentFixture) -Mode 'Deploy' -State 'Provisioning'))
-        Set-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (New-ArcBody))
-        Set-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 400 $null)
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation (Get-SonarValidationSuccessFixture) -Deployment (Get-SonarDeploymentFixture) -Mode 'Deploy' -State 'Provisioning'))
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 400 $null)
         $deployNow = [datetime]::SpecifyKind([datetime]'2026-10-10T20:00:00', [System.DateTimeKind]::Utc)
 
         $state = Get-AzlSonarDeploymentState -Config $script:Config -Now $deployNow
@@ -100,27 +100,27 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
 
     It 'deployment succeeded: phase done' {
         $deployment = [pscustomobject]@{ status = 'Success'; steps = @([pscustomobject]@{ name = 'All'; fullStepIndex = '0'; status = 'Success'; startTimeUtc = '2026-10-10T19:00:00Z'; endTimeUtc = '2026-10-10T21:00:00Z' }) }
-        Set-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (New-SettingsBody -Validation (Get-SonarValidationSuccessFixture) -Deployment $deployment -Mode 'Deploy'))
-        Set-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (New-ArcBody))
-        Set-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 400 $null)
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation (Get-SonarValidationSuccessFixture) -Deployment $deployment -Mode 'Deploy'))
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 400 $null)
         (Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now).phase | Should -Be 'done'
     }
 
     It 'deployment step failed: phase failed' {
         $deployment = [pscustomobject]@{ status = 'Error'; steps = @([pscustomobject]@{ name = 'All'; fullStepIndex = '0'; status = 'Error'; exception = @('boom') }) }
-        Set-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (New-SettingsBody -Validation (Get-SonarValidationSuccessFixture) -Deployment $deployment -Mode 'Deploy'))
-        Set-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (New-ArcBody))
-        Set-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 400 $null)
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation (Get-SonarValidationSuccessFixture) -Deployment $deployment -Mode 'Deploy'))
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 400 $null)
         $state = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
         $state.phase | Should -Be 'failed'
         $state.deployment.tree[0].errors | Should -Be @('boom')
     }
 
     It 'Arc machine 404 is NotFound, not a warning' {
-        Set-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (New-SettingsBody -Validation (Get-SonarValidationFixture) -Deployment ([pscustomobject]@{})))
-        Set-ArmRoute 'machines/node01\?' (New-SonarArmResponse 200 (New-ArcBody -Status 'Connected'))
-        Set-ArmRoute 'machines/node02\?' (New-SonarArmResponse 404 @{ error = @{ code = 'ResourceNotFound'; message = 'not found' } })
-        Set-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 400 $null)
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation (Get-SonarValidationFixture) -Deployment ([pscustomobject]@{})))
+        Add-ArmRoute 'machines/node01\?' (New-SonarArmResponse 200 (Get-ArcBody -Status 'Connected'))
+        Add-ArmRoute 'machines/node02\?' (New-SonarArmResponse 404 @{ error = @{ code = 'ResourceNotFound'; message = 'not found' } })
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 400 $null)
 
         $state = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
         @($state.nodes).Count | Should -Be 2
@@ -135,10 +135,10 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
     }
 
     It 'Arc machine 403 becomes a warning and the node stays Unknown' {
-        Set-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (New-SettingsBody -Validation ([pscustomobject]@{}) -Deployment ([pscustomobject]@{})))
-        Set-ArmRoute 'machines/node01\?' (New-SonarArmResponse 403 @{ error = @{ code = 'AuthorizationFailed'; message = 'no read access' } })
-        Set-ArmRoute 'machines/node02\?' (New-SonarArmResponse 200 (New-ArcBody))
-        Set-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 404 $null)
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation ([pscustomobject]@{}) -Deployment ([pscustomobject]@{})))
+        Add-ArmRoute 'machines/node01\?' (New-SonarArmResponse 403 @{ error = @{ code = 'AuthorizationFailed'; message = 'no read access' } })
+        Add-ArmRoute 'machines/node02\?' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 404 $null)
         $state = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
         $state.nodes[0].arcStatus | Should -Be 'Unknown'
         $state.warnings | Should -Contain 'Arc machine node01: no read access'
@@ -146,9 +146,9 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
 
     It 'edgeMachines 400 and 404 are ignored silently' -TestCases @(@{ Code = 400 }, @{ Code = 404 }) {
         param($Code)
-        Set-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (New-SettingsBody -Validation ([pscustomobject]@{}) -Deployment ([pscustomobject]@{})))
-        Set-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (New-ArcBody))
-        Set-ArmRoute 'edgeMachines\?' (New-SonarArmResponse $Code @{ error = @{ code = 'NoRegisteredProviderFound'; message = 'api version not supported' } })
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation ([pscustomobject]@{}) -Deployment ([pscustomobject]@{})))
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse $Code @{ error = @{ code = 'NoRegisteredProviderFound'; message = 'api version not supported' } })
         $state = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
         @($state.edgeMachines).Count | Should -Be 0
         @($state.warnings).Count | Should -Be 0
@@ -157,9 +157,9 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
     }
 
     It 'edgeMachines 500 becomes a warning' {
-        Set-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (New-SettingsBody -Validation ([pscustomobject]@{}) -Deployment ([pscustomobject]@{})))
-        Set-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (New-ArcBody))
-        Set-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 500 @{ error = @{ message = 'internal' } })
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation ([pscustomobject]@{}) -Deployment ([pscustomobject]@{})))
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 500 @{ error = @{ message = 'internal' } })
         $state = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
         $state.warnings | Should -Contain 'edgeMachines: internal'
     }
@@ -177,10 +177,10 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
                             @{ name = 'InstallingOs'; fullStepIndex = '1'; status = 'InProgress'; startTimeUtc = '2026-10-10T17:10:00Z' }
                         ) }
                 } } }
-        Set-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 404 @{ error = @{ code = 'ResourceNotFound'; message = 'nope' } })
-        Set-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (New-ArcBody))
-        Set-ArmRoute 'jobs/ProvisionOs\?' (New-SonarArmResponse 200 $job)
-        Set-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 200 $edgeList)
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 404 @{ error = @{ code = 'ResourceNotFound'; message = 'nope' } })
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'jobs/ProvisionOs\?' (New-SonarArmResponse 200 $job)
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 200 $edgeList)
 
         $state = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
         $state.phase | Should -Be 'provisioning'
@@ -196,12 +196,12 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
     }
 
     It 'throws on an ARM error from deploymentSettings' {
-        Set-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 403 @{ error = @{ code = 'AuthorizationFailed'; message = 'The client does not have authorization.' } })
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 403 @{ error = @{ code = 'AuthorizationFailed'; message = 'The client does not have authorization.' } })
         { Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now } | Should -Throw '*GET deploymentSettings for clus01 failed: The client does not have authorization.*'
     }
 
     It 'reports HTTP 502 when the error body is not JSON' {
-        Set-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 502 '<html>bad gateway</html>')
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 502 '<html>bad gateway</html>')
         { Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now } | Should -Throw '*failed: HTTP 502*'
     }
 }
@@ -285,10 +285,12 @@ Describe 'Publish-AzlSonarState timeline' {
                 Publish-AzlSonarState -Shared $shared -State $c
             }
             $counts += $shared.Timeline.Count
-            [pscustomobject]@{ Counts = $counts; Version = $shared.StateVersion; Last = $shared.Timeline[-1] }
+            [pscustomobject]@{ Counts = $counts; Version = $shared.StateVersion; Last = $shared.Timeline[-1]; Dropped = $shared.TimelineDropped; StateJson = $shared.StateJson }
         }
         $result.Counts[0] | Should -Be 1
         $result.Counts[1] | Should -Be 2 -Because 'TimelineMax caps the snapshots'
+        $result.Dropped | Should -Be 2 -Because 'four distinct snapshots were taken and two fit'
+        ($result.StateJson | ConvertFrom-Json).phase | Should -Be 'done' -Because 'the latest state is kept apart from the capped timeline'
         $result.Version | Should -Be 5
         ($result.Last | ConvertFrom-Json).phase | Should -Be 'done'
     }

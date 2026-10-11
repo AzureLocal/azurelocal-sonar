@@ -315,7 +315,9 @@ function Publish-AzlSonarState {
         Stores a state in the shared table (as JSON), bumps the version and adds it to the timeline when it changed.
     .DESCRIPTION
         The timeline keeps a snapshot only when something other than polledAt and running-step durations changed,
-        so a long deployment does not fill memory with identical snapshots. At most TimelineMax snapshots are kept.
+        so a long deployment does not fill memory with identical snapshots. At most TimelineMax (5000) snapshots are
+        kept; older ones are dropped and counted in TimelineDropped (reported in the export metadata). The latest
+        state is always kept separately (StateJson), so it is never lost to the cap.
     #>
     [CmdletBinding()]
     param(
@@ -332,7 +334,10 @@ function Publish-AzlSonarState {
     try {
         if ($key -ne $Shared.LastStateKey) {
             $Shared.Timeline.Add($json)
-            while ($Shared.Timeline.Count -gt $Shared.TimelineMax) { $Shared.Timeline.RemoveAt(0) }
+            while ($Shared.Timeline.Count -gt $Shared.TimelineMax) {
+                $Shared.Timeline.RemoveAt(0)
+                if ($Shared.Contains('TimelineDropped')) { $Shared.TimelineDropped = [long]$Shared.TimelineDropped + 1 }
+            }
             $Shared.LastStateKey = $key
         }
         $Shared.State = $State

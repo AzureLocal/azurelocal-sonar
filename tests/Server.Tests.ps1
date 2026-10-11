@@ -186,6 +186,11 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
         $l.files[0].offset | Should -Be 30
         @($l.lines).ForEach({ $_.seq }) | Should -Be @(1, 2, 3)
         @($l.lines).ForEach({ $_.level }) | Should -Be @('info', 'error', 'warning')
+        $l.server | Should -Be $script:Server.Shared.ServerId
+        $l.server | Should -Match '^[0-9a-f]{32}$'
+        $l.lastSeq | Should -Be 3
+        @($l.lines)[0].timeSource | Should -Be 'received'
+        $r.Body | Should -Match '"received":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"'
     }
 
     It 'GET /api/logs?since=2 returns only newer lines' {
@@ -193,9 +198,10 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
         @($l.lines).ForEach({ $_.seq }) | Should -Be @(3)
     }
 
-    It 'GET /api/logs?since=3 returns an empty lines array (not null)' {
+    It 'GET /api/logs?since=3 returns an empty lines array (not null) and the cursor' {
         $r = Invoke-SonarRequest '/api/logs?since=3'
         $r.Body | Should -BeLike '*"lines":`[`]*'
+        ($r.Body | ConvertFrom-Json).lastSeq | Should -Be 3
     }
 
     It 'GET /api/logs?since=abc is a 400 with a JSON error' {
@@ -212,6 +218,16 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
         $e = $r.Body | ConvertFrom-Json -Depth 64
         $e.export.tool | Should -Be 'AzL Sonar'
         $e.export.snapshots | Should -Be 1
+        $e.export.timelineMode | Should -Be 'change-only'
+        $e.export.timelineMax | Should -Be 5000
+        $e.export.timelineDropped | Should -Be 0
+        $e.export.latestStateIncluded | Should -BeTrue
+        $e.export.logRingSize | Should -Be 5000
+        $e.export.logLinesKept | Should -Be 3
+        $e.export.logFirstSeq | Should -Be 1
+        $e.export.logLastSeq | Should -Be 3
+        $e.export.logLinesDropped | Should -Be 0
+        $e.export.server | Should -Be $script:Server.Shared.ServerId
         $e.config.cluster | Should -Be 'clus01'
         $e.state.phase | Should -Be 'validation'
         @($e.timeline).Count | Should -Be 1
@@ -280,7 +296,14 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
             Invoke-AzlSonarHttpRequest -Context $Context -Server $Server
             # The client starts at the current log sequence; add one line so a log event is due.
             Add-AzlSonarLogLine -Shared $Server.Shared -Line @([pscustomobject]@{ file = 'f'; text = 'fourth' })
-            Send-AzlSonarSseUpdate -Server $Server
+            # Writes are asynchronous: drive the dispatch a few turns, as the main loop does every 250 ms.
+            $deadline = [datetime]::UtcNow.AddSeconds(5)
+            do {
+                Send-AzlSonarSseUpdate -Server $Server
+                $c = $Server.Clients[0]
+                $done = $c.LogSeq -ge $Server.Shared.LogSeq -and $null -eq $c.Pending -and $c.Queue.Count -eq 0
+                if (-not $done) { Start-Sleep -Milliseconds 50 }
+            } until ($done -or [datetime]::UtcNow -gt $deadline)
         }
         try {
             $response = $send.GetAwaiter().GetResult()
@@ -300,6 +323,8 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
             if ($read.Wait(5000)) { $null = $text.AppendLine($read.Result) }
             $all = $text.ToString()
             $all | Should -BeLike 'retry: 5000*'
+            $all | Should -BeLike ('*event: hello*data: {"server":"' + $script:Server.Shared.ServerId + '","since":3}*')
+            $all | Should -BeLike ('*event: log*data: {"server":"' + $script:Server.Shared.ServerId + '","lines":`[*')
             $all | Should -BeLike '*event: state*data: {"cluster":"clus01"*'
             $all | Should -BeLike '*event: tailer*"state":"connected"*'
             $all | Should -BeLike '*event: log*"text":"fourth"*'
@@ -312,6 +337,168 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
                 $Server.Clients.Clear()
             }
         }
+    }
+}
+
+Describe 'SSE live streams: client cap (real HttpListener on localhost)' {
+    BeforeAll {
+        $script:CapPort = Get-SonarFreeTcpPort
+        $script:CapListener = [System.Net.HttpListener]::new()
+        $script:CapListener.Prefixes.Add("http://localhost:$($script:CapPort)/")
+        $script:CapListener.Start()
+        $handler = [System.Net.Http.HttpClientHandler]::new()
+        $handler.UseProxy = $false
+        $script:CapClient = [System.Net.Http.HttpClient]::new($handler)
+        $script:CapClient.Timeout = [TimeSpan]::FromSeconds(20)
+    }
+
+    AfterAll {
+        if ($script:CapClient) { $script:CapClient.Dispose() }
+        if ($script:CapListener) { $script:CapListener.Stop(); $script:CapListener.Close() }
+    }
+
+    It 'answers 503 with Retry-After when 10 streams are already open' {
+        $server = InModuleScope AzlSonar {
+            $clients = [System.Collections.Generic.List[hashtable]]::new()
+            foreach ($i in 1..10) { $clients.Add(@{ Dummy = $i }) }
+            @{ Shared = Initialize-AzlSonarSharedState; Clients = $clients }
+        }
+        $send = $script:CapClient.GetAsync("http://localhost:$($script:CapPort)/api/events")
+        $pending = $script:CapListener.GetContextAsync()
+        $null = $pending.Wait(10000)
+        InModuleScope AzlSonar -Parameters @{ Context = $pending.Result; Server = $server } { param($Context, $Server) Invoke-AzlSonarHttpRequest -Context $Context -Server $Server }
+        $response = $send.GetAwaiter().GetResult()
+        [int]$response.StatusCode | Should -Be 503
+        @($response.Headers.GetValues('Retry-After')) | Should -Be @('30')
+        $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | Should -BeLike '*at most 10 live streams*'
+        $server.Clients.Count | Should -Be 10
+    }
+}
+
+Describe 'SSE flow control (fake clients, no network)' {
+    BeforeAll {
+        function Get-FakeSseClient {
+            # ok: WriteAsync completes at once into a MemoryStream; stall: never completes; fail: completes faulted.
+            param([string]$Mode = 'ok', [long]$LogSeq = 0)
+            $stream = [pscustomobject]@{ Sink = [System.IO.MemoryStream]::new(); Mode = $Mode; Tcs = [System.Threading.Tasks.TaskCompletionSource[bool]]::new(); Writes = 0 }
+            $stream | Add-Member -MemberType ScriptMethod -Name WriteAsync -Value {
+                param([byte[]]$Buffer, [int]$Offset, [int]$Count)
+                $this.Writes++
+                if ($this.Mode -eq 'stall') { return $this.Tcs.Task }
+                if ($this.Mode -eq 'fail') { return [System.Threading.Tasks.Task]::FromException([System.IO.IOException]::new('connection reset')) }
+                $this.Sink.Write($Buffer, $Offset, $Count)
+                return [System.Threading.Tasks.Task]::CompletedTask
+            }
+            $response = [pscustomobject]@{ Aborted = $false }
+            $response | Add-Member -MemberType ScriptMethod -Name Abort -Value { $this.Aborted = $true }
+            InModuleScope AzlSonar -Parameters @{ R = $response; S = $stream; L = $LogSeq } { param($R, $S, $L) New-AzlSonarSseClient -Response $R -Stream $S -LogSeq $L }
+        }
+        function Get-FakeServer {
+            param([int]$RingSize = 5000)
+            InModuleScope AzlSonar -Parameters @{ RingSize = $RingSize } {
+                param($RingSize)
+                @{ Shared = Initialize-AzlSonarSharedState -RingSize $RingSize; Clients = [System.Collections.Generic.List[hashtable]]::new() }
+            }
+        }
+        function Add-FakeLine([hashtable]$Server, [int]$Count = 1) {
+            InModuleScope AzlSonar -Parameters @{ Server = $Server; Count = $Count } {
+                param($Server, $Count)
+                Add-AzlSonarLogLine -Shared $Server.Shared -Line @(foreach ($i in 1..$Count) { [pscustomobject]@{ file = 'f.log'; text = "line $i" } })
+            }
+        }
+        function Send-Update([hashtable]$Server) {
+            InModuleScope AzlSonar -Parameters @{ Server = $Server } { param($Server) Send-AzlSonarSseUpdate -Server $Server }
+        }
+        function Get-SinkText([hashtable]$Client) { [System.Text.Encoding]::UTF8.GetString($Client.Stream.Sink.ToArray()) }
+    }
+
+    It 'never waits for a stalled client, and the other clients still get their events' {
+        $server = Get-FakeServer
+        $slow = Get-FakeSseClient -Mode stall
+        $fast = Get-FakeSseClient -Mode ok
+        $server.Clients.Add($slow); $server.Clients.Add($fast)
+        Add-FakeLine $server 2
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        Send-Update $server
+        Add-FakeLine $server 3
+        Send-Update $server
+        $watch.Stop()
+        $watch.ElapsedMilliseconds | Should -BeLessThan 3000
+        Get-SinkText $fast | Should -BeLike '*event: log*"text":"line 2"*event: log*"text":"line 3"*'
+        $fast.LogSeq | Should -Be 5
+        $slow.Stream.Writes | Should -Be 1 -Because 'nothing more is written while its first write is in flight'
+        $slow.LogSeq | Should -Be 2 -Because 'its cursor waits until the write completes'
+        $server.Clients.Count | Should -Be 2
+    }
+
+    It 'continues a stalled client once its write completes' {
+        $server = Get-FakeServer
+        $slow = Get-FakeSseClient -Mode stall
+        $server.Clients.Add($slow)
+        Add-FakeLine $server 1
+        Send-Update $server
+        Add-FakeLine $server 1
+        Send-Update $server
+        $slow.Stream.Writes | Should -Be 1
+        $slow.Stream.Mode = 'ok'
+        $null = $slow.Stream.Tcs.TrySetResult($true)
+        Send-Update $server
+        $slow.Stream.Writes | Should -Be 2
+        $slow.LogSeq | Should -Be 2
+        $server.Clients.Count | Should -Be 1
+    }
+
+    It 'drops a client whose write has been in flight longer than the write timeout' {
+        $server = Get-FakeServer
+        $slow = Get-FakeSseClient -Mode stall
+        $server.Clients.Add($slow)
+        Add-FakeLine $server 1
+        Send-Update $server
+        $slow.PendingSince = [datetime]::UtcNow.AddSeconds(-60)
+        Send-Update $server
+        $server.Clients.Count | Should -Be 0
+        $slow.Response.Aborted | Should -BeTrue
+    }
+
+    It 'drops a client whose write failed' {
+        $server = Get-FakeServer
+        $broken = Get-FakeSseClient -Mode fail
+        $server.Clients.Add($broken)
+        Add-FakeLine $server 1
+        Send-Update $server
+        $server.Clients.Count | Should -Be 0
+        $broken.Response.Aborted | Should -BeTrue
+    }
+
+    It 'drops a client that fell behind the log ring buffer' {
+        $server = Get-FakeServer -RingSize 5
+        $behind = Get-FakeSseClient -Mode ok -LogSeq 0
+        $server.Clients.Add($behind)
+        Add-FakeLine $server 10
+        Send-Update $server
+        $server.Clients.Count | Should -Be 0
+        $behind.Response.Aborted | Should -BeTrue
+    }
+
+    It 'bounds the per-client queue (a client past the byte limit counts as fallen behind)' {
+        $client = Get-FakeSseClient -Mode ok
+        {
+            InModuleScope AzlSonar -Parameters @{ Client = $client } {
+                param($Client)
+                Add-AzlSonarSseText -Client $Client -Text ('x' * ($script:AzlSonarSseMaxQueuedBytes + 1))
+            }
+        } | Should -Throw '*fell behind*'
+        $client.Queue.Count | Should -Be 0
+    }
+
+    It 'writes everything queued as one buffer and sends a ping every 15 s' {
+        $server = Get-FakeServer
+        $client = Get-FakeSseClient -Mode ok
+        $server.Clients.Add($client)
+        $client.LastPing = [datetime]::UtcNow.AddSeconds(-20)
+        Send-Update $server
+        $client.Stream.Writes | Should -Be 1
+        Get-SinkText $client | Should -BeLike '*: ping*'
     }
 }
 
@@ -377,7 +564,8 @@ Describe 'Start-AzlSonarServer end to end (random port, mocked poller and tailer
         $results['/api/guidance'].Status | Should -Be 200
         @(($results['/api/guidance'].Body | ConvertFrom-Json).phases.PSObject.Properties.Name).Count | Should -Be 4
         $results['/api/logs'].Status | Should -Be 200
-        ($results['/api/logs'].Body | ConvertFrom-Json).PSObject.Properties.Name | Should -Be @('tailer', 'files', 'lines')
+        ($results['/api/logs'].Body | ConvertFrom-Json).PSObject.Properties.Name | Should -Be @('server', 'lastSeq', 'tailer', 'files', 'lines')
+        ($results['/api/logs'].Body | ConvertFrom-Json).server | Should -Be ($results['/api/config'].Body | ConvertFrom-Json).serverId
         $results['/api/nope'].Status | Should -Be 404
         $results['/'].Status | Should -Be 200
         $results['POST /api/config'].Status | Should -Be 405

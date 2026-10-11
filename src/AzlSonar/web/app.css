@@ -552,6 +552,7 @@ a { color: var(--accent); }
 }
 .ll:hover { background: var(--log-hover); }
 .ll .ts { color: var(--muted); white-space: nowrap; }
+.ll .ts.approx { font-style: italic; }
 .ll .lv { font-weight: 700; font-size: 11px; padding-top: 1px; }
 .ll .fn { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ll .tx { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }

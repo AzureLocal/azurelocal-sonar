@@ -103,6 +103,21 @@ Describe 'Test-AzlSonarConfig' {
         $problems | Should -Contain 'logs.include must be a list of file name patterns such as *.log.'
     }
 
+    It 'rejects an unknown logs.transport' {
+        $config = New-SonarConfigObject
+        $config.logs | Add-Member -NotePropertyName transport -NotePropertyValue 'rdp'
+        $problems = InModuleScope AzlSonar -Parameters @{ Config = $config } { param($Config) Test-AzlSonarConfig -Config $Config }
+        $problems | Should -Contain 'logs.transport must be auto, winrm or ssh.'
+    }
+
+    It 'accepts logs.transport <Transport>' -TestCases @(@{ Transport = 'auto' }, @{ Transport = 'winrm' }, @{ Transport = 'ssh' }) {
+        param($Transport)
+        $config = New-SonarConfigObject
+        $config.logs | Add-Member -NotePropertyName transport -NotePropertyValue $Transport
+        $problems = InModuleScope AzlSonar -Parameters @{ Config = $config } { param($Config) Test-AzlSonarConfig -Config $Config }
+        @($problems).Count | Should -Be 0
+    }
+
     It 'allows an empty exclude list' {
         $config = New-SonarConfigObject
         $config.logs.exclude = @()
@@ -222,6 +237,7 @@ Describe 'Read-AzlSonarConfig' {
             $script:minimalConfig.logs.maxLinesPerPoll | Should -Be 500
             $script:minimalConfig.logs.recurseDepth | Should -Be 3
             $script:minimalConfig.logs.pollSeconds | Should -Be 20
+            $script:minimalConfig.logs.transport | Should -Be 'auto'
         }
 
         It 'defaults arcMachineName to the node name and credential source to prompt' {
@@ -229,6 +245,12 @@ Describe 'Read-AzlSonarConfig' {
             $script:minimalConfig.credential.source | Should -Be 'prompt'
             $script:minimalConfig.identityModel | Should -Be 'ActiveDirectory'
         }
+    }
+
+    It 'keeps logs.transport (the tailer reads it; it was dropped before)' {
+        $config = New-SonarConfigObject
+        $config.logs | Add-Member -NotePropertyName transport -NotePropertyValue 'SSH'
+        (Read-AzlSonarConfig -Json (ConvertTo-SonarConfigJson $config)).logs.transport | Should -Be 'ssh'
     }
 
     It 'keeps Key Vault secret names as names only' {
@@ -255,5 +277,15 @@ Describe 'ConvertTo-AzlSonarPublicConfig' {
         $public.cluster | Should -Be 'clus01'
         @($public.nodes).Count | Should -Be 2
         $public.nodes[0].PSObject.Properties.Name | Should -Be @('name', 'seed')
+    }
+
+    It 'carries the start time and the back-end instance id (the page detects a restart by them)' {
+        $read = Read-AzlSonarConfig -Path $script:SonarExampleConfig
+        $public = InModuleScope AzlSonar -Parameters @{ Config = $read } {
+            param($Config)
+            ConvertTo-AzlSonarPublicConfig -Config $Config -StartedAt ([datetime]'2026-10-10T18:00:00Z') -ServerId 'abc123'
+        }
+        $public.startedAt | Should -Be '2026-10-10T18:00:00Z'
+        $public.serverId | Should -Be 'abc123'
     }
 }

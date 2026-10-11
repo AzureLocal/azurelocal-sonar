@@ -15,7 +15,7 @@
     notstarted: 'Not started', running: 'In progress', success: 'Succeeded',
     error: 'Failed', skipped: 'Skipped', unknown: 'Unknown'
   };
-  var DEMO = /(?:^|[?&])demo=(?:1|true|yes)(?:&|$)/i.test(location.search);
+  var DEMO = typeof location !== 'undefined' && /(?:^|[?&])demo=(?:1|true|yes)(?:&|$)/i.test(location.search);
 
   // ------------------------------------------------------------------ state
 
@@ -25,9 +25,10 @@
     guidance: null,
     guidancePhase: null,        // phase picked by the user in the guidance card (null = follow current)
     tailer: null,
-    files: [],
-    lines: [],
-    lastSeq: 0,
+    reportedFiles: [],          // files the tailer reports now (/api/logs files, tailer activeFiles)
+    fileSig: null,              // signature of the file filter options last rendered
+    store: null,                // log store (createLogStore), set below
+    logGen: 0,                  // bumped on a back-end restart so late /api/logs answers are ignored
     counts: { all: 0, warning: 0, error: 0 },
     filter: { level: 'all', q: '', file: '', stepKey: null },
     follow: true,
@@ -161,6 +162,177 @@
   };
   function icon(status) { return ICON[status] || ICON.unknown; }
 
+  // ------------------------------------------------------------------ log store (pure; also run by tests/WebLogic.Tests.ps1 under Node)
+  //
+  // Lines are kept in seq order and deduplicated by seq for one back-end instance (server id). The catch-up cursor
+  // (catchupSeq: every line up to it has been fetched through /api/logs, or fell out of the ring buffer) is kept apart
+  // from the highest seq seen (liveSeq), so a live line that arrives before a catch-up answer never makes the page
+  // skip the lines in between. A live stream announces where it starts (SSE 'hello' { server, since }); once the
+  // catch-up cursor reaches that point the stream continues it without gaps and moves the cursor too.
+
+  function createLogStore(max) {
+    var s = { max: max || MAX_STORED_LINES };
+    logStoreReset(s, null);
+    return s;
+  }
+
+  function logStoreReset(store, serverId) {
+    store.serverId = serverId || null;
+    store.lines = [];
+    store.seqs = new Set();
+    store.floor = 0;            // lines below this seq were trimmed; never take them again
+    store.catchupSeq = 0;
+    store.liveSeq = 0;
+    store.streamBase = null;    // seq the current live stream continues from (null: unknown)
+    store.streamMax = 0;
+    store.fileCounts = new Map();
+  }
+
+  function advanceCatchup(store) {
+    if (store.streamBase !== null && store.streamBase <= store.catchupSeq && store.streamMax > store.catchupSeq) {
+      store.catchupSeq = store.streamMax;
+    }
+  }
+
+  function logStoreStreamOpened(store, since, serverId) {
+    if (serverId && store.serverId && serverId !== store.serverId) return { restart: true };
+    if (serverId && !store.serverId) store.serverId = serverId;
+    var n = Number(since);
+    store.streamBase = since === null || since === undefined || isNaN(n) ? null : n;
+    store.streamMax = store.streamBase === null ? 0 : n;
+    advanceCatchup(store);
+    return { restart: false };
+  }
+
+  function logStoreStreamClosed(store) {
+    store.streamBase = null;
+    store.streamMax = 0;
+  }
+
+  function seqKey(l) { return isNaN(l.seq) ? Infinity : l.seq; }
+  function bySeq(a, b) { return seqKey(a) - seqKey(b); }
+
+  function normLine(l) {
+    var text = str(l.text !== undefined ? l.text : l.message);
+    var seq = typeof l.seq === 'number' ? l.seq : (l.seq === undefined || l.seq === null || l.seq === '' ? NaN : Number(l.seq));
+    var src = str(l.timeSource).toLowerCase();
+    if (src !== 'line' && src !== 'file') src = 'received';
+    // Back ends before event-time parsing sent only 'time', which was the receive time.
+    var received = l.received !== undefined && l.received !== null && l.received !== '' ? str(l.received) : str(l.time);
+    return { seq: seq, time: str(l.time), t: parseTime(l.time), received: received, r: parseTime(received), timeSource: src,
+      file: str(l.file), level: normLevel(l.level, text), text: text, lc: null };
+  }
+
+  // meta: { server: id or undefined, source: 'catchup' | 'live', lastSeq: /api/logs lastSeq }
+  // Returns { restart, fresh[], outOfOrder, trimmed, newFile }. restart: the batch is from another back-end instance;
+  // the caller resets the store and fetches /api/logs?since=0.
+  function logStoreIngest(store, raw, meta) {
+    meta = meta || {};
+    var out = { restart: false, fresh: [], outOfOrder: false, trimmed: false, newFile: false };
+    if (meta.server && store.serverId && meta.server !== store.serverId) { out.restart = true; return out; }
+    if (meta.server && !store.serverId) store.serverId = meta.server;
+    var batchMax = 0;
+    arr(raw).forEach(function (l) {
+      if (!isObj(l)) return;
+      var line = normLine(l);
+      if (!isNaN(line.seq)) {
+        if (line.seq > batchMax) batchMax = line.seq;
+        if (line.seq < store.floor || store.seqs.has(line.seq)) return;
+        store.seqs.add(line.seq);
+        if (line.seq < store.liveSeq) out.outOfOrder = true;
+        else store.liveSeq = line.seq;
+      }
+      if (line.file) {
+        var c = store.fileCounts.get(line.file) || 0;
+        if (!c) out.newFile = true;
+        store.fileCounts.set(line.file, c + 1);
+      }
+      store.lines.push(line);
+      out.fresh.push(line);
+    });
+    if (meta.source === 'catchup') {
+      var last = meta.lastSeq === null || meta.lastSeq === undefined || meta.lastSeq === '' ? NaN : Number(meta.lastSeq);
+      var cover = isNaN(last) ? batchMax : Math.max(last, batchMax);
+      if (cover > store.catchupSeq) store.catchupSeq = cover;
+    } else if (meta.source === 'live' && store.streamBase !== null && batchMax > store.streamMax) {
+      store.streamMax = batchMax;
+    }
+    advanceCatchup(store);
+    if (out.outOfOrder) {
+      store.lines.sort(bySeq);
+      out.fresh.sort(bySeq);
+    }
+    if (store.lines.length > store.max) {
+      var removed = store.lines.splice(0, store.lines.length - store.max + Math.min(1000, Math.floor(store.max / 10)));
+      removed.forEach(function (l) {
+        if (!isNaN(l.seq)) store.seqs.delete(l.seq);
+        if (l.file) {
+          var n = (store.fileCounts.get(l.file) || 0) - 1;
+          if (n > 0) store.fileCounts.set(l.file, n); else store.fileCounts.delete(l.file);
+        }
+      });
+      var first = store.lines[0];
+      if (first && !isNaN(first.seq)) store.floor = first.seq;
+      out.trimmed = true;
+    }
+    return out;
+  }
+
+  // The time window of a step for the log filter (+/-1 s); running or unfinished steps are open-ended.
+  function stepWindowOf(node) {
+    if (!isObj(node)) return null;
+    var a = parseTime(node.start), b = parseTime(node.end);
+    if (isNaN(a)) return null;
+    var running = normStatus(node.status) === 'running';
+    return { start: a - 1000, end: running || isNaN(b) ? Infinity : b + 1000, name: str(node.name), rawStart: a, rawEnd: running ? NaN : b };
+  }
+
+  function windowSignature(w) { return w ? w.start + '|' + w.end : ''; }
+
+  // Step filter. A line with its own timestamp (timeSource 'line') matches by event time. A line timed by its file
+  // name ('file') matches by that time or by when it was received. A line with no timestamp ('received') is
+  // approximate: it matches only when Sonar received it inside the step window.
+  function lineInWindow(l, win) {
+    if (!win) return true;
+    function inside(t) { return !isNaN(t) && t >= win.start && t <= win.end; }
+    if (l.timeSource === 'line') return inside(l.t);
+    if (l.timeSource === 'file') return inside(l.t) || inside(l.r);
+    return inside(isNaN(l.r) ? l.t : l.r);
+  }
+
+  // What a new state means for an active step filter: 'none' (no filter), 'clear' (the step is gone),
+  // 'rerender' (its window changed, for example running -> finished) or 'keep'.
+  function stepFilterChange(filterKey, stillIndexed, windowBefore, windowAfter) {
+    if (!filterKey) return 'none';
+    if (!stillIndexed) return 'clear';
+    return windowBefore !== windowAfter ? 'rerender' : 'keep';
+  }
+
+  // File filter options: the files the tailer reports now plus the files of the lines still held, sorted by name.
+  function fileOptionList(reported, fileCounts) {
+    var set = new Set();
+    arr(reported).forEach(function (p) { if (p) set.add(String(p)); });
+    if (fileCounts) fileCounts.forEach(function (n, p) { if (n > 0 && p) set.add(p); });
+    return Array.from(set).sort(function (a, b) { return basename(a).localeCompare(basename(b)) || a.localeCompare(b); });
+  }
+
+  // The file selection survives only while the file is still offered.
+  function keptFileSelection(list, selected) {
+    return selected && arr(list).indexOf(selected) >= 0 ? selected : '';
+  }
+
+  app.store = createLogStore(MAX_STORED_LINES);
+
+  if (typeof module === 'object' && module && module.exports && typeof document === 'undefined') {
+    module.exports = {
+      createLogStore: createLogStore, logStoreReset: logStoreReset, logStoreIngest: logStoreIngest,
+      logStoreStreamOpened: logStoreStreamOpened, logStoreStreamClosed: logStoreStreamClosed,
+      stepWindowOf: stepWindowOf, windowSignature: windowSignature, lineInWindow: lineInWindow, stepFilterChange: stepFilterChange,
+      fileOptionList: fileOptionList, keptFileSelection: keptFileSelection, normLevel: normLevel, parseTime: parseTime
+    };
+    return;
+  }
+
   // ------------------------------------------------------------------ theme
 
   var mql = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
@@ -245,13 +417,41 @@
       function (e) { setError('state', 'Could not read the deployment state: ' + e.message); throw e; });
   }
   function loadLogs() {
-    return getJSON('/api/logs?since=' + encodeURIComponent(app.lastSeq)).then(function (r) {
+    var gen = app.logGen;
+    return getJSON('/api/logs?since=' + encodeURIComponent(app.store.catchupSeq)).then(function (r) {
       setError('logs', null);
-      if (!isObj(r)) return;
+      if (gen !== app.logGen || !isObj(r)) return;   // answer to a request sent before a back-end restart
+      if (r.server && app.store.serverId && r.server !== app.store.serverId) return handleRestart(r.server);
       if (r.tailer) applyTailer(r.tailer);
       if (Array.isArray(r.files)) applyFiles(r.files);
-      ingestLines(r.lines);
+      applyLogBatch(r.lines, { server: r.server, source: 'catchup', lastSeq: r.lastSeq });
     }, function (e) { setError('logs', 'Could not read the logs: ' + e.message); throw e; });
+  }
+
+  // The back end restarted (new server id or startedAt): its seq numbers start again, so start over from since=0.
+  function handleRestart(serverId) {
+    app.logGen++;
+    logStoreReset(app.store, serverId || null);
+    app.reportedFiles = [];
+    recount();
+    renderCounts();
+    renderFileOptions();
+    rerenderLogs();
+    announce('The Sonar back end restarted; reloading the logs.');
+    return loadLogs();
+  }
+
+  function applyLogBatch(raw, meta) {
+    var res = logStoreIngest(app.store, raw, meta);
+    if (res.restart) { handleRestart(meta && meta.server).catch(function () {}); return; }
+    if (!res.fresh.length && !res.trimmed) return;
+    if (res.trimmed) recount();
+    else {
+      res.fresh.forEach(function (l) { app.counts.all++; if (l.level !== 'info') app.counts[l.level]++; });
+    }
+    if (res.newFile || res.trimmed) renderFileOptions();
+    renderCounts();
+    if (res.outOfOrder) rerenderLogs(); else appendLogs(res.fresh);
   }
 
   // ------------------------------------------------------------------ live updates (SSE + polling fallback)
@@ -281,9 +481,18 @@
       setError('sse', null);
       stopPolling();
       setConn('live');
-      // close any gap left while disconnected
-      loadLogs().catch(function () {});
+      logStoreStreamClosed(app.store);   // the 'hello' event of this stream says where it continues from
+      // a restart shows in /api/config (startedAt, serverId); then close any gap left while disconnected
+      loadConfig().then(function () { return loadLogs(); }).catch(function () {});
       loadState().catch(function () {});
+    });
+    es.addEventListener('hello', function (e) {
+      var d = safeParse(e.data);
+      if (!isObj(d)) return;
+      if (logStoreStreamOpened(app.store, d.since, d.server).restart) {
+        handleRestart(d.server).catch(function () {});
+        logStoreStreamOpened(app.store, d.since, d.server);
+      }
     });
     es.addEventListener('state', function (e) {
       var s = safeParse(e.data);
@@ -291,8 +500,8 @@
     });
     es.addEventListener('log', function (e) {
       var d = safeParse(e.data);
-      if (Array.isArray(d)) ingestLines(d);
-      else if (isObj(d) && Array.isArray(d.lines)) ingestLines(d.lines);
+      if (Array.isArray(d)) applyLogBatch(d, { source: 'live' });
+      else if (isObj(d) && Array.isArray(d.lines)) applyLogBatch(d.lines, { server: d.server, source: 'live' });
     });
     es.addEventListener('tailer', function (e) {
       var t = safeParse(e.data);
@@ -302,6 +511,7 @@
       if (!es) return;
       es.close();
       es = null;
+      logStoreStreamClosed(app.store);
       onSSEFailure();
     };
   }
@@ -327,7 +537,7 @@
   }
   function pollOnce() {
     if (!polling) return;
-    Promise.allSettled([loadState(), loadLogs()]).then(function (res) {
+    Promise.allSettled([loadState(), loadConfig().then(function () { return loadLogs(); })]).then(function (res) {
       if (!polling) return;
       var ok = res.some(function (r) { return r.status === 'fulfilled'; });
       setConn(ok ? 'polling' : 'offline');
@@ -341,8 +551,19 @@
 
   function applyConfig(c) {
     if (!isObj(c)) return;
+    var prev = app.config;
     app.config = c;
     renderHeader();
+    if (!prev || DEMO) return;
+    // A new serverId (or, from older back ends, a new startedAt) means the back end restarted.
+    var restarted;
+    if (c.serverId) {
+      // already switched over by a log batch or a 'hello' from the new instance: nothing to do
+      restarted = app.store.serverId !== c.serverId && (!!app.store.serverId || (!!prev.serverId && prev.serverId !== c.serverId));
+    } else {
+      restarted = !!c.startedAt && !!prev.startedAt && c.startedAt !== prev.startedAt;
+    }
+    if (restarted) handleRestart(c.serverId || null).catch(function () {});
   }
 
   function renderHeader() {
@@ -489,10 +710,26 @@
 
   function applyState(s) {
     if (!isObj(s)) return;
+    var filterKey = app.filter.stepKey;
+    var windowBefore = filterKey ? windowSignature(stepWindow()) : null;
     app.state = s;
     app.stepIndex = new Map();
     indexSection('validation');
     indexSection('deployment');
+    var stillIndexed = !!filterKey && app.stepIndex.has(filterKey);
+    var change = stepFilterChange(filterKey, stillIndexed, windowBefore, stillIndexed ? windowSignature(stepWindow()) : null);
+    if (change === 'clear') {
+      // the filtered step is no longer reported: drop the filter and show every line again
+      app.filter.stepKey = null;
+      if (app.selectedKey === filterKey) app.selectedKey = null;
+      renderChips();
+      rerenderLogs();
+      announce('The selected step is no longer reported; the step filter was removed.');
+    } else if (change === 'rerender') {
+      // the step's window changed (for example running -> finished): filter again with the new window
+      renderChips();
+      rerenderLogs();
+    }
     app.currentKey = findCurrentKey();
     // auto-expand to the current step when it changes
     var autoScroll = false;
@@ -933,10 +1170,7 @@
     if (!k) return null;
     var info = app.stepIndex.get(k);
     if (!info) return null;
-    var a = parseTime(info.node.start), b = parseTime(info.node.end);
-    if (isNaN(a)) return null;
-    var running = normStatus(info.node.status) === 'running';
-    return { start: a - 1000, end: running || isNaN(b) ? Infinity : b + 1000, name: str(info.node.name), rawStart: a, rawEnd: running ? NaN : b };
+    return stepWindowOf(info.node);
   }
 
   function tickTimers() {
@@ -1107,83 +1341,57 @@
       announce(bad ? 'Live logs unavailable: ' + str(t.reason) : 'Log tailer ' + state + '.');
     }
     app.lastAnnounced.tailer = state;
+    if (Array.isArray(t.activeFiles)) applyFiles(t.activeFiles);
   }
 
+  // The tailer's current file list replaces the previous one (files that left it stay only while lines from them are held).
   function applyFiles(files) {
-    var changed = false;
-    files.forEach(function (f) {
-      var p = isObj(f) ? f.path : f;
-      if (p && app.files.indexOf(String(p)) < 0) { app.files.push(String(p)); changed = true; }
-    });
-    if (changed) renderFileOptions();
+    app.reportedFiles = arr(files).map(function (f) { return str(isObj(f) ? f.path : f); }).filter(Boolean);
+    renderFileOptions();
   }
 
   function renderFileOptions() {
-    var sel = $('file-filter'), cur = sel.value;
-    var list = app.files.slice().sort(function (a, b) { return basename(a).localeCompare(basename(b)); });
-    sel.textContent = '';
-    sel.appendChild(el('option', { value: '', text: 'All files (' + list.length + ')' }));
-    list.forEach(function (p) { sel.appendChild(el('option', { value: p, title: p, text: basename(p) || p })); });
-    sel.value = list.indexOf(cur) >= 0 ? cur : '';
-    if (sel.value !== cur) { app.filter.file = ''; renderChips(); rerenderLogs(); }
+    var sel = $('file-filter');
+    var list = fileOptionList(app.reportedFiles, app.store.fileCounts);
+    var sig = list.join('\n');
+    if (sig !== app.fileSig) {
+      app.fileSig = sig;
+      sel.textContent = '';
+      sel.appendChild(el('option', { value: '', text: 'All files (' + list.length + ')' }));
+      list.forEach(function (p) { sel.appendChild(el('option', { value: p, title: p, text: basename(p) || p })); });
+    }
+    var cur = app.filter.file;
+    if (cur && keptFileSelection(list, cur) !== cur) {
+      // the selected file is neither reported nor in the held lines any more
+      app.filter.file = '';
+      sel.value = '';
+      renderChips();
+      rerenderLogs();
+    } else {
+      sel.value = cur;
+    }
   }
 
   // ------------------------------------------------------------------ logs
 
+  // Same rule as the back end (Get-AzlSonarLineLevel); used only for lines that arrive without a level. Zero-count
+  // summaries ('error=0', 'Failed: 0', '0 failed', 'warning count=0', 'errors: 0') are not problems.
   function normLevel(l, text) {
     var k = str(l).toLowerCase();
     if (k === 'error' || k === 'err' || k === 'fatal' || k === 'critical') return 'error';
     if (k === 'warning' || k === 'warn') return 'warning';
     if (k) return 'info';
-    if (/\b(error|exception|failed|fatal)\b/i.test(text)) return 'error';
-    if (/\bwarn(ing)?\b/i.test(text)) return 'warning';
+    var rest = str(text)
+      .replace(/\b(?:errors?|exceptions?|failed|failures?|fatal|warnings?|warn)(?:\s+count)?\s*[:=]\s*0+(?![\w]|[.,]\d)/gi, ' ')
+      .replace(/(^|[^\w.,])0+\s+(?:errors?|exceptions?|failed|failures?|fatal|warnings?)\b/gi, '$1 ');
+    if (/\b(error|exception|failed|fatal)\b/i.test(rest)) return 'error';
+    if (/\bwarn(ing)?\b/i.test(rest)) return 'warning';
     return 'info';
-  }
-
-  function ingestLines(raw) {
-    raw = arr(raw);
-    if (!raw.length) return;
-    // a back-end restart resets seq numbers; detect and start over
-    var minSeq = Infinity;
-    raw.forEach(function (l) { if (isObj(l) && typeof l.seq === 'number' && l.seq < minSeq) minSeq = l.seq; });
-    if (minSeq !== Infinity && minSeq < app.lastSeq && (minSeq <= 1 || app.lastSeq - minSeq > 5000)) resetLogs();
-    var fresh = [];
-    var newFile = false;
-    raw.forEach(function (l) {
-      if (!isObj(l)) return;
-      var seq = typeof l.seq === 'number' ? l.seq : Number(l.seq);
-      if (!isNaN(seq)) {
-        if (seq <= app.lastSeq) return;
-        app.lastSeq = seq;
-      }
-      var text = str(l.text !== undefined ? l.text : l.message);
-      var line = { seq: seq, time: str(l.time), t: parseTime(l.time), file: str(l.file), level: normLevel(l.level, text), text: text, lc: null };
-      if (line.file && app.files.indexOf(line.file) < 0) { app.files.push(line.file); newFile = true; }
-      app.lines.push(line);
-      app.counts.all++;
-      if (line.level !== 'info') app.counts[line.level]++;
-      fresh.push(line);
-    });
-    if (!fresh.length) return;
-    if (app.lines.length > MAX_STORED_LINES) {
-      app.lines.splice(0, app.lines.length - MAX_STORED_LINES + 1000);
-      recount();
-    }
-    if (newFile) renderFileOptions();
-    renderCounts();
-    appendLogs(fresh);
-  }
-
-  function resetLogs() {
-    app.lines = [];
-    app.lastSeq = 0;
-    recount();
-    rerenderLogs();
   }
 
   function recount() {
     var c = { all: 0, warning: 0, error: 0 };
-    app.lines.forEach(function (l) { c.all++; if (l.level !== 'info') c[l.level]++; });
+    app.store.lines.forEach(function (l) { c.all++; if (l.level !== 'info') c[l.level]++; });
     app.counts = c;
   }
 
@@ -1208,9 +1416,7 @@
     if (f.level === 'error' && l.level !== 'error') return false;
     if (f.level === 'warning' && l.level === 'info') return false;
     if (f.file && l.file !== f.file) return false;
-    if (win) {
-      if (isNaN(l.t) || l.t < win.start || l.t > win.end) return false;
-    }
+    if (win && !lineInWindow(l, win)) return false;
     if (f.q) {
       if (l.lc === null) l.lc = l.text.toLowerCase();
       if (l.lc.indexOf(f.q) < 0 && l.file.toLowerCase().indexOf(f.q) < 0) return false;
@@ -1222,9 +1428,14 @@
     var row = document.createElement('div');
     row.className = 'll l-' + l.level;
     var ts = document.createElement('span');
-    ts.className = 'ts';
-    ts.textContent = isNaN(l.t) ? l.time.slice(0, 12) : fmtClock(l.t);
-    if (l.time) ts.title = l.time;
+    var approx = l.timeSource === 'received';
+    ts.className = approx ? 'ts approx' : 'ts';
+    ts.textContent = (approx ? '~' : '') + (isNaN(l.t) ? l.time.slice(0, 12) : fmtClock(l.t));
+    if (l.time) {
+      ts.title = l.timeSource === 'line' ? 'Logged ' + fmtDateTime(l.t) + ' (' + l.time + ', from the line); received ' + fmtDateTime(l.r) :
+        l.timeSource === 'file' ? 'File name time ' + fmtDateTime(l.t) + ' (the line has no timestamp); received ' + fmtDateTime(l.r) :
+        'Received ' + fmtDateTime(l.r) + ' (approximate: the line has no timestamp of its own)';
+    }
     var lv = document.createElement('span');
     lv.className = 'lv';
     lv.textContent = l.level === 'error' ? 'ERR' : l.level === 'warning' ? 'WRN' : '';
@@ -1257,8 +1468,8 @@
     var view = $('log-view');
     var win = stepWindow();
     var matched = [];
-    for (var i = app.lines.length - 1; i >= 0 && matched.length < MAX_RENDERED_LINES; i--) {
-      if (lineMatches(app.lines[i], win)) matched.push(app.lines[i]);
+    for (var i = app.store.lines.length - 1; i >= 0 && matched.length < MAX_RENDERED_LINES; i--) {
+      if (lineMatches(app.store.lines[i], win)) matched.push(app.store.lines[i]);
     }
     matched.reverse();
     var frag = document.createDocumentFragment();
@@ -1300,7 +1511,7 @@
     var view = $('log-view');
     if (app.rendered) return;
     var msg;
-    if (!app.lines.length) {
+    if (!app.store.lines.length) {
       var t = app.tailer && str(app.tailer.state).toLowerCase();
       msg = t === 'unavailable' ? 'No log lines: the log tailer cannot reach the seed node (see above).' : 'Waiting for log lines\u2026';
     } else {
@@ -1312,7 +1523,7 @@
   function updateLogStatus() {
     var parts = [];
     var filtered = app.filter.level !== 'all' || app.filter.q || app.filter.file || app.filter.stepKey;
-    parts.push('Showing ' + app.rendered.toLocaleString() + (filtered ? ' matching' : '') + ' of ' + app.lines.length.toLocaleString() + ' lines');
+    parts.push('Showing ' + app.rendered.toLocaleString() + (filtered ? ' matching' : '') + ' of ' + app.store.lines.length.toLocaleString() + ' lines');
     if (app.rendered >= MAX_RENDERED_LINES) parts.push('newest ' + MAX_RENDERED_LINES.toLocaleString() + ' rendered; export for the full log');
     $('log-status').textContent = parts.join(' \u00b7 ');
   }
@@ -1351,7 +1562,7 @@
     var win = stepWindow();
     if (win) {
       var range = fmtClock(win.rawStart) + ' \u2013 ' + (isNaN(win.rawEnd) ? 'now' : fmtClock(win.rawEnd));
-      chip('Step: ' + win.name + ' (' + range + ')', 'Lines logged while this step ran (\u00b11 s). Log times are read as written on the node.', function () {
+      chip('Step: ' + win.name + ' (' + range + ')', 'Lines logged while this step ran (\u00b11 s). Lines with their own timestamp match by that time (UTC); lines without one (marked ~) match by the time Sonar received them, which is approximate.', function () {
         clearStepFilter();
         var lv = $('log-view'); lv.focus();
       });
@@ -1551,8 +1762,8 @@
     var f1 = 'C:\\CloudDeployment\\Logs\\CloudDeployment.2026-10-10.1.log', f2 = 'C:\\MASLogs\\Lcm.log';
     applyFiles([{ path: f1, size: 0, offset: 0 }, { path: f2, size: 0, offset: 0 }]);
     var seq = 0;
-    function line(msAgo, file, level, text) { return { seq: ++seq, time: iso(msAgo), file: file, level: level, text: text }; }
-    ingestLines([
+    function line(msAgo, file, level, text) { return { seq: ++seq, time: iso(msAgo), received: iso(msAgo), timeSource: 'line', file: file, level: level, text: text }; }
+    applyLogBatch([
       line(46 * M, f2, 'info', 'Validate Azure Arc registration: node01 Connected, node02 Connected.'),
       line(41 * M, f2, 'info', 'Validation completed: 6 of 6 steps succeeded.'),
       line(36 * M, f1, 'info', 'Action plan "Deploy" started on node01.'),
@@ -1567,7 +1778,7 @@
       line(11 * M + 30000, f1, 'info', 'Attempt 2: physical disk inventory complete, 8 eligible disks.'),
       line(6 * M, f1, 'warning', 'Warning: cache device count differs between nodes; using capacity-only tier.'),
       line(2 * M, f1, 'info', 'Creating storage pool "SU1_Pool".')
-    ]);
+    ], { source: 'live' });
     var msgs = [
       ['info', 'Storage pool health: Healthy.'],
       ['info', 'Waiting for virtual disk "Infrastructure_1" to come online.'],
@@ -1580,13 +1791,14 @@
     var mi = 0;
     setInterval(function () {
       var m = msgs[mi++ % msgs.length];
-      ingestLines([{ seq: ++seq, time: new Date().toISOString(), file: f1, level: m[0], text: m[1] }]);
+      var nowIso = new Date().toISOString();
+      applyLogBatch([{ seq: ++seq, time: nowIso, received: nowIso, timeSource: 'line', file: f1, level: m[0], text: m[1] }], { source: 'live' });
     }, 2500);
     setInterval(function () {
       state.polledAt = new Date().toISOString();
       applyState(state);
     }, 20000);
-    app.demoExport = function () { return { config: app.config, timeline: [state], logs: app.lines.map(function (l) { return { seq: l.seq, time: l.time, file: l.file, level: l.level, text: l.text }; }) }; };
+    app.demoExport = function () { return { config: app.config, timeline: [state], logs: app.store.lines.map(function (l) { return { seq: l.seq, time: l.time, received: l.received, timeSource: l.timeSource, file: l.file, level: l.level, text: l.text }; }) }; };
   }
 
   function demoExport() { return app.demoExport ? app.demoExport() : {}; }

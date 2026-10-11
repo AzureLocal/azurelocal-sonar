@@ -1,4 +1,9 @@
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0.0' }
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingConvertToSecureStringWithPlainText', '', Justification = 'A dummy test credential; no real secret.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '', Justification = 'Passes a PSCredential into InModuleScope; no plain text.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUsePSCredentialType', '', Justification = 'Passes a PSCredential into InModuleScope.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Local test helper names.')]
+param()
 Set-StrictMode -Version Latest
 
 BeforeAll {
@@ -13,10 +18,10 @@ BeforeAll {
 }
 
 Describe 'Get-AzlSonarLineLevel' {
-    # Behaviour as implemented: error = \b(error|exception|failed|fatal)\b, warning = \bwarn(ing)?\b, case-insensitive,
-    # error wins over warning. Plural and compound words do not match (no word boundary), so 'errors=0' is info.
-    # Known false positives (documented, not fixed): 'error=0', 'Failed: 0', '0 failed' and 'warning count=0' are
-    # classified error/warning although they report zero problems.
+    # error = \b(error|exception|failed|fatal)\b, warning = \bwarn(ing)?\b, case-insensitive, error wins over warning.
+    # Plural and compound words do not match (no word boundary), so 'errors=0' is info. Zero-count summaries
+    # ('error=0', 'Failed: 0', '0 failed', 'warning count=0', 'errors: 0') are removed before matching, so they are info;
+    # a real problem word elsewhere in the same line still counts.
     It '<Text> -> <Expected>' -TestCases @(
         @{ Text = 'ERROR: cannot reach node02'; Expected = 'error' }
         @{ Text = 'error: lower case'; Expected = 'error' }
@@ -38,10 +43,21 @@ Describe 'Get-AzlSonarLineLevel' {
         @{ Text = 'No exceptions thrown'; Expected = 'info' }
         @{ Text = 'Fatality'; Expected = 'info' }
         @{ Text = 'Warnings: 0'; Expected = 'info' }
-        @{ Text = 'error=0'; Expected = 'error' }          # false positive as implemented
-        @{ Text = 'Failed: 0'; Expected = 'error' }        # false positive as implemented
-        @{ Text = 'Tests: 12 passed, 0 failed'; Expected = 'error' } # false positive as implemented
-        @{ Text = 'warning count=0'; Expected = 'warning' } # false positive as implemented
+        @{ Text = 'error=0'; Expected = 'info' }
+        @{ Text = 'Failed: 0'; Expected = 'info' }
+        @{ Text = 'Tests: 12 passed, 0 failed'; Expected = 'info' }
+        @{ Text = '0 failed'; Expected = 'info' }
+        @{ Text = 'warning count=0'; Expected = 'info' }
+        @{ Text = 'errors: 0'; Expected = 'info' }
+        @{ Text = 'Error count: 0, Warnings = 0'; Expected = 'info' }
+        @{ Text = 'Summary: 0 errors, 0 warnings, 0 exceptions'; Expected = 'info' }
+        @{ Text = 'FAILED : 00'; Expected = 'info' }
+        @{ Text = 'error=0x80070005'; Expected = 'error' }
+        @{ Text = 'Failed: 3'; Expected = 'error' }
+        @{ Text = 'Tests: 2 passed, 10 failed'; Expected = 'error' }
+        @{ Text = 'error=0 but step Deploy FAILED'; Expected = 'error' }
+        @{ Text = '0 errors, 1 warning'; Expected = 'warning' }
+        @{ Text = 'Failed: 0.5 GB free'; Expected = 'error' }
         @{ Text = ''; Expected = 'info' }
     ) {
         param($Text, $Expected)
@@ -244,11 +260,13 @@ Describe 'Remote tail script (run locally against a temp folder)' {
                 [int]$MaxLines = 500,
                 [int]$ActiveWindowMinutes = 30,
                 [long]$InitialTailBytes = 16384,
-                [int]$MaxBytesPerFile = 1048576
+                [int]$MaxBytesPerFile = 1048576,
+                [bool]$Discover = $true,
+                [int]$MaxStateEntries = 2000
             )
             & $script:TailScript -Paths $Paths -Include @('*.log', '*.txt', '*.xml') -Exclude @('*.etl') -RecurseDepth 3 `
                 -ActiveWindowMinutes $ActiveWindowMinutes -FileState $FileState -MaxLines $MaxLines -FirstRun $FirstRun -MaxFiles 300 `
-                -MaxBytesPerFile $MaxBytesPerFile -InitialTailBytes $InitialTailBytes
+                -MaxBytesPerFile $MaxBytesPerFile -InitialTailBytes $InitialTailBytes -Discover $Discover -MaxStateEntries $MaxStateEntries
         }
         function Get-Texts([object]$Result) { @($Result.lines | ForEach-Object { $_.text }) }
     }
@@ -319,19 +337,77 @@ Describe 'Remote tail script (run locally against a temp folder)' {
         Get-Texts $second | Should -Be @('recreated 1', 'recreated 2', 'recreated 3')
     }
 
-    It 're-reads a rotated (renamed) file from the start: duplicate lines, documented behaviour' {
+    It 'carries the offset over to a renamed (rotated) file: its lines are not sent again' {
         Write-LogText $script:LogFile "before rotation`n"
         $first = Invoke-Tail -Paths @($script:LogDir)
+        Add-LogText $script:LogFile "written just before the rename`n"
+        $rotated = Join-Path $script:LogDir 'Deploy.1.log'
         Rename-Item -LiteralPath $script:LogFile -NewName 'Deploy.1.log'
         Write-LogText $script:LogFile "after rotation`n"
         [System.IO.File]::SetCreationTimeUtc($script:LogFile, [datetime]::UtcNow.AddMinutes(1))
         $second = Invoke-Tail -Paths @($script:LogDir) -FileState $first.state
         $texts = Get-Texts $second
         $texts | Should -Contain 'after rotation'
-        # The renamed file is a new path with no stored offset, so it is read from 0 and its lines come again.
-        $texts | Should -Contain 'before rotation'
+        $texts | Should -Contain 'written just before the rename' -Because 'the renamed file continues from the carried offset'
+        $texts | Should -Not -Contain 'before rotation' -Because 'lines already sent under the old name are not sent again'
+        @($second.renamed).Count | Should -Be 1
+        $second.renamed[0].from | Should -Be $script:LogFile
+        $second.renamed[0].to | Should -Be $rotated
+        $second.state[$rotated].offset | Should -Be (Get-Item -LiteralPath $rotated).Length
         $second.state.ContainsKey($script:LogFile) | Should -BeTrue
-        $second.state.ContainsKey((Join-Path $script:LogDir 'Deploy.1.log')) | Should -BeTrue
+    }
+
+    It 'handles rename rotation when the new file keeps the old creation time (NTFS tunnelling)' {
+        Write-LogText $script:LogFile "before rotation`n"
+        $created = (Get-Item -LiteralPath $script:LogFile).CreationTimeUtc
+        $first = Invoke-Tail -Paths @($script:LogDir)
+        Rename-Item -LiteralPath $script:LogFile -NewName 'Deploy.1.log'
+        Write-LogText $script:LogFile "after rotation, a first line longer than the old offset`n"
+        [System.IO.File]::SetCreationTimeUtc($script:LogFile, $created)
+        $second = Invoke-Tail -Paths @($script:LogDir) -FileState $first.state
+        Get-Texts $second | Should -Be @('after rotation, a first line longer than the old offset') -Because 'the new file is read from 0 and the renamed one continues'
+        @($second.renamed).Count | Should -Be 1
+        $second.renamed[0].to | Should -Be (Join-Path $script:LogDir 'Deploy.1.log')
+    }
+
+    It 're-reads a file re-created under the same name with the same creation time but other content' {
+        Write-LogText $script:LogFile "old`n"
+        $created = (Get-Item -LiteralPath $script:LogFile).CreationTimeUtc
+        $first = Invoke-Tail -Paths @($script:LogDir)
+        Remove-Item -LiteralPath $script:LogFile
+        Write-LogText $script:LogFile "new 1`nnew 2`n"
+        [System.IO.File]::SetCreationTimeUtc($script:LogFile, $created)
+        $second = Invoke-Tail -Paths @($script:LogDir) -FileState $first.state
+        Get-Texts $second | Should -Be @('new 1', 'new 2')
+    }
+
+    It 'does not carry an offset to a new file whose first bytes differ (not a rename)' {
+        Write-LogText $script:LogFile "first file`n"
+        $first = Invoke-Tail -Paths @($script:LogDir)
+        $created = (Get-Item -LiteralPath $script:LogFile).CreationTimeUtc
+        Remove-Item -LiteralPath $script:LogFile
+        $other = Join-Path $script:LogDir 'Other.log'
+        Write-LogText $other "a different file`n"
+        [System.IO.File]::SetCreationTimeUtc($other, $created)
+        $second = Invoke-Tail -Paths @($script:LogDir) -FileState $first.state
+        Get-Texts $second | Should -Be @('a different file')
+        @($second.renamed).Count | Should -Be 0
+    }
+
+    It 'keeps a file that vanished between listings until the next listing can match its new name' {
+        Write-LogText $script:LogFile "line one`n"
+        $first = Invoke-Tail -Paths @($script:LogDir)
+        $rotated = Join-Path $script:LogDir 'Deploy.1.log'
+        Rename-Item -LiteralPath $script:LogFile -NewName 'Deploy.1.log'
+        $quiet = Invoke-Tail -Paths @($script:LogDir) -FileState $first.state -Discover $false
+        $quiet.vanished | Should -Be 1
+        $quiet.state[$script:LogFile].gone | Should -BeTrue
+        $quiet.state[$script:LogFile].active | Should -BeFalse
+        Add-LogText $rotated "line two`n"
+        $listed = Invoke-Tail -Paths @($script:LogDir) -FileState $quiet.state -Discover $true
+        Get-Texts $listed | Should -Be @('line two')
+        $listed.renamed[0].from | Should -Be $script:LogFile
+        $listed.state.ContainsKey($script:LogFile) | Should -BeFalse
     }
 
     It 'excludes *.etl and files that match no include pattern' {
@@ -399,6 +475,88 @@ Describe 'Remote tail script (run locally against a temp folder)' {
         Get-Texts $second | Should -Be @('unicode three')
     }
 
+    It 'reports the node UTC offset and whether it listed the folders' {
+        Write-LogText $script:LogFile "x`n"
+        $result = Invoke-Tail -Paths @($script:LogDir)
+        $expected = [int][Math]::Round([TimeZoneInfo]::Local.GetUtcOffset([datetime]::Now).TotalMinutes)
+        $result.utcOffsetMinutes | Should -Be $expected
+        $result.utcOffsetMinutes | Should -BeOfType [int]
+        $result.discovered | Should -BeTrue
+        $result.state[$script:LogFile].active | Should -BeTrue
+        $result.state[$script:LogFile].head | Should -Be ([Convert]::ToBase64String($script:Utf8.GetBytes("x`n")))
+    }
+
+    It 'between listings tails the known active files without Get-ChildItem and finds new files at the next listing' {
+        Write-LogText $script:LogFile "a`n"
+        $first = Invoke-Tail -Paths @($script:LogDir)
+        Add-LogText $script:LogFile "b`n"
+        $newFile = Join-Path $script:LogDir 'New.log'
+        Write-LogText $newFile "new file line`n"
+        $quiet = Invoke-Tail -Paths @($script:LogDir, (Join-Path $script:LogDir 'missing')) -FileState $first.state -Discover $false
+        Get-Texts $quiet | Should -Be @('b')
+        $quiet.discovered | Should -BeFalse
+        @($quiet.missingPaths).Count | Should -Be 0 -Because 'paths are only checked when the folders are listed'
+        @($quiet.files.path) | Should -Be @($script:LogFile) -Because 'the new file is not seen until the next listing'
+        $listed = Invoke-Tail -Paths @($script:LogDir) -FileState $quiet.state -Discover $true
+        Get-Texts $listed | Should -Be @('new file line')
+    }
+
+    It 'does not call Get-ChildItem between listings' {
+        Write-LogText $script:LogFile "a`n"
+        $first = Invoke-Tail -Paths @($script:LogDir)
+        Add-LogText $script:LogFile "b`n"
+        Mock Get-ChildItem { throw 'Get-ChildItem must not run between listings.' }
+        $quiet = Invoke-Tail -Paths @($script:LogDir) -FileState $first.state -Discover $false
+        Get-Texts $quiet | Should -Be @('b')
+        Should -Invoke Get-ChildItem -Times 0 -Exactly
+    }
+
+    It 'between listings ignores tracked files that were not active at the last listing' {
+        Write-LogText $script:LogFile "fresh`n"
+        $old = Join-Path $script:LogDir 'Old.log'
+        Write-LogText $old "stale`n"
+        $first = Invoke-Tail -Paths @($script:LogDir)
+        [System.IO.File]::SetLastWriteTimeUtc($old, [datetime]::UtcNow.AddHours(-2))
+        $second = Invoke-Tail -Paths @($script:LogDir) -FileState $first.state -ActiveWindowMinutes 30
+        $second.state[$old].active | Should -BeFalse -Because 'outside the active window, still tracked'
+        $second.state[$old].offset | Should -Be (Get-Item -LiteralPath $old).Length
+        Add-LogText $old "written again`n"
+        [System.IO.File]::SetLastWriteTimeUtc($old, [datetime]::UtcNow.AddHours(-2))
+        $quiet = Invoke-Tail -Paths @($script:LogDir) -FileState $second.state -Discover $false
+        @($quiet.files.path) | Should -Be @($script:LogFile)
+        $quiet.state[$old].offset | Should -Be $second.state[$old].offset -Because 'inactive entries are carried unchanged'
+    }
+
+    It 'caps the tracked state at MaxStateEntries, evicting the least recently written first' {
+        $paths = foreach ($i in 1..5) {
+            $p = Join-Path $script:LogDir ("f$i.log")
+            Write-LogText $p "line $i`n"
+            [System.IO.File]::SetLastWriteTimeUtc($p, [datetime]::UtcNow.AddMinutes(-10 + $i))
+            $p
+        }
+        $result = Invoke-Tail -Paths @($script:LogDir) -MaxStateEntries 3
+        $result.stateEvicted | Should -Be 2
+        @($result.state.Keys | Sort-Object) | Should -Be @($paths[2..4] | Sort-Object)
+    }
+
+    It 'keeps active files over inactive ones when it evicts' {
+        $paths = foreach ($i in 1..4) {
+            $p = Join-Path $script:LogDir ("g$i.log")
+            Write-LogText $p "line $i`n"
+            $p
+        }
+        $first = Invoke-Tail -Paths @($script:LogDir)
+        # g3 and g4 leave the active window (older than 30 min); g1 and g2 stay active.
+        [System.IO.File]::SetLastWriteTimeUtc($paths[2], [datetime]::UtcNow.AddHours(-2))
+        [System.IO.File]::SetLastWriteTimeUtc($paths[3], [datetime]::UtcNow.AddHours(-3))
+        $second = Invoke-Tail -Paths @($script:LogDir) -FileState $first.state -MaxStateEntries 3
+        $second.stateEvicted | Should -Be 1
+        $second.state.ContainsKey($paths[0]) | Should -BeTrue
+        $second.state.ContainsKey($paths[1]) | Should -BeTrue
+        $second.state.ContainsKey($paths[2]) | Should -BeTrue -Because 'the newer of the inactive files stays'
+        $second.state.ContainsKey($paths[3]) | Should -BeFalse
+    }
+
     It 'reads a file another process holds open for writing' {
         $stream = [System.IO.File]::Open($script:LogFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
         try {
@@ -440,8 +598,32 @@ Describe 'Log ring buffer (Add-AzlSonarLogLine / Get-AzlSonarLogLine)' {
         $result.All[-1].level | Should -Be 'error'
         $result.All[0].level | Should -Be 'info'
         $result.All[0].time | Should -Be '2026-10-10T18:00:00.123Z'
+        $result.All[0].received | Should -Be '2026-10-10T18:00:00.123Z'
+        $result.All[0].timeSource | Should -Be 'received'
         $result.All[0].file | Should -Be 'C:\MASLogs\a.log'
-        @($result.All[0].Keys) | Should -Be @('seq', 'time', 'file', 'level', 'text')
+        @($result.All[0].Keys) | Should -Be @('seq', 'time', 'received', 'timeSource', 'file', 'level', 'text')
+    }
+
+    It 'sets time to the event time from the line or the file name, and keeps the receive time' {
+        $lines = InModuleScope AzlSonar {
+            $shared = Initialize-AzlSonarSharedState
+            Add-AzlSonarLogLine -Shared $shared -UtcOffsetMinutes 120 -Time ([datetime]::SpecifyKind([datetime]'2026-10-10T18:00:00', 'Utc')) -Line @(
+                [pscustomobject]@{ file = 'C:\MASLogs\Deploy.log'; text = '2026-10-10 17:58:01.250 starting step' }
+                [pscustomobject]@{ file = 'C:\MASLogs\Deploy.log'; text = '2026-10-10T15:58:02Z utc line' }
+                [pscustomobject]@{ file = 'C:\CloudContent\MASLogs\BareMetal_Step_20261010-174500.log'; text = 'no timestamp here' }
+                [pscustomobject]@{ file = 'C:\MASLogs\Deploy.log'; text = 'continuation line' }
+            )
+            Get-AzlSonarLogLine -Shared $shared
+        }
+        $lines[0].time | Should -Be '2026-10-10T15:58:01.250Z' -Because 'node-local +02:00 converted to UTC'
+        $lines[0].timeSource | Should -Be 'line'
+        $lines[0].received | Should -Be '2026-10-10T18:00:00.000Z'
+        $lines[1].time | Should -Be '2026-10-10T15:58:02.000Z'
+        $lines[1].timeSource | Should -Be 'line'
+        $lines[2].time | Should -Be '2026-10-10T15:45:00.000Z'
+        $lines[2].timeSource | Should -Be 'file'
+        $lines[3].time | Should -Be '2026-10-10T18:00:00.000Z'
+        $lines[3].timeSource | Should -Be 'received'
     }
 
     It 'ignores an empty batch' {
@@ -463,6 +645,88 @@ Describe 'Log ring buffer (Add-AzlSonarLogLine / Get-AzlSonarLogLine)' {
         }
         $text | Should -Not -BeLike '*Sup3r-Secret!*'
         $text | Should -BeLike 'connecting with * now'
+    }
+}
+
+Describe 'Get-AzlSonarLogEventTime' {
+    # Received 2026-10-10 18:00:00Z; the node runs at UTC+02:00 unless a case says otherwise.
+    It '<Name>' -TestCases @(
+        @{ Name = 'ISO 8601 with Z'; Text = '2026-10-10T16:16:42Z Starting'; File = ''; Offset = 120; Expected = '2026-10-10T16:16:42.0000000Z'; Source = 'line' }
+        @{ Name = 'ISO 8601 with 7-digit fraction and Z'; Text = '2026-10-10T16:16:42.1234567Z x'; File = ''; Offset = 120; Expected = '2026-10-10T16:16:42.1234567Z'; Source = 'line' }
+        @{ Name = 'ISO 8601 with offset'; Text = '2026-10-10T16:16:42.500+02:00 x'; File = ''; Offset = 0; Expected = '2026-10-10T14:16:42.5000000Z'; Source = 'line' }
+        @{ Name = 'ISO 8601 with negative offset, no colon'; Text = '2026-10-10T06:16:42-0700 x'; File = ''; Offset = 0; Expected = '2026-10-10T13:16:42.0000000Z'; Source = 'line' }
+        @{ Name = 'ISO 8601 without offset is node-local'; Text = '2026-10-10T16:16:42 x'; File = ''; Offset = 120; Expected = '2026-10-10T14:16:42.0000000Z'; Source = 'line' }
+        @{ Name = 'yyyy-MM-dd HH:mm:ss'; Text = '2026-10-10 16:16:42 Info: x'; File = ''; Offset = 120; Expected = '2026-10-10T14:16:42.0000000Z'; Source = 'line' }
+        @{ Name = 'yyyy-MM-dd HH:mm:ss.fff'; Text = '2026-10-10 16:16:42.123 x'; File = ''; Offset = -300; Expected = '2026-10-10T21:16:42.1230000Z'; Source = 'line' }
+        @{ Name = 'yyyy-MM-dd HH:mm:ss,fff (comma)'; Text = '2026-10-10 16:16:42,250 x'; File = ''; Offset = 0; Expected = '2026-10-10T16:16:42.2500000Z'; Source = 'line' }
+        @{ Name = '[yyyy-MM-dd HH:mm:ss]'; Text = '[2026-10-10 16:16:42] [Info] x'; File = ''; Offset = 120; Expected = '2026-10-10T14:16:42.0000000Z'; Source = 'line' }
+        @{ Name = 'MM/dd/yyyy HH:mm:ss'; Text = '10/09/2026 23:59:59 x'; File = ''; Offset = 60; Expected = '2026-10-09T22:59:59.0000000Z'; Source = 'line' }
+        @{ Name = '[MM/dd/yyyy h:mm:ss PM]'; Text = '[10/10/2026 4:16:42 PM] x'; File = ''; Offset = 0; Expected = '2026-10-10T16:16:42.0000000Z'; Source = 'line' }
+        @{ Name = 'MM/dd/yyyy 12:05:00 AM'; Text = '10/10/2026 12:05:00 AM x'; File = ''; Offset = 0; Expected = '2026-10-10T00:05:00.0000000Z'; Source = 'line' }
+        @{ Name = 'transcript Start time'; Text = 'Start time: 20261010161642'; File = 'C:\x\PowerShell_transcript.N1.ab.txt'; Offset = 120; Expected = '2026-10-10T14:16:42.0000000Z'; Source = 'line' }
+        @{ Name = 'leading byte order mark and spaces'; Text = ([string][char]0xFEFF + '  2026-10-10T16:16:42Z x'); File = ''; Offset = 0; Expected = '2026-10-10T16:16:42.0000000Z'; Source = 'line' }
+        @{ Name = 'file name yyyyMMdd-HHmmss (node-local)'; Text = 'no time'; File = 'C:\CloudContent\MASLogs\BareMetal_Deploy_20261010-161642.log'; Offset = 120; Expected = '2026-10-10T14:16:42.0000000Z'; Source = 'file' }
+        @{ Name = 'file name yyyyMMdd-HHmmssZ (UTC)'; Text = 'no time'; File = 'C:\MASLogs\Install-LCMController_20261010-174335Z.log'; Offset = 120; Expected = '2026-10-10T17:43:35.0000000Z'; Source = 'file' }
+        @{ Name = 'transcript file name yyyyMMddHHmmss'; Text = 'PS> Get-Thing'; File = 'C:\Logs\PowerShell_transcript.NODE01.Ab1cD2eF.20261010161642.txt'; Offset = 0; Expected = '2026-10-10T16:16:42.0000000Z'; Source = 'file' }
+        @{ Name = 'line time wins over the file name'; Text = '2026-10-10T17:00:00Z x'; File = 'C:\x\Step_20261010-161642.log'; Offset = 0; Expected = '2026-10-10T17:00:00.0000000Z'; Source = 'line' }
+        @{ Name = 'no timestamp anywhere'; Text = 'Running step 3'; File = 'C:\MASLogs\Deploy.log'; Offset = 0; Expected = '2026-10-10T18:00:00.0000000Z'; Source = 'received' }
+        @{ Name = 'timestamp not at the start is not used'; Text = 'Step started at 2026-10-10 16:16:42'; File = ''; Offset = 0; Expected = '2026-10-10T18:00:00.0000000Z'; Source = 'received' }
+        @{ Name = 'invalid date'; Text = '2026-13-45 16:16:42 x'; File = ''; Offset = 0; Expected = '2026-10-10T18:00:00.0000000Z'; Source = 'received' }
+        @{ Name = 'a number that only looks like a date'; Text = '2026-10-10 16:16:425 x'; File = ''; Offset = 0; Expected = '2026-10-10T18:00:00.0000000Z'; Source = 'received' }
+        @{ Name = 'more than a day in the future'; Text = '2026-10-20T00:00:00Z x'; File = ''; Offset = 0; Expected = '2026-10-10T18:00:00.0000000Z'; Source = 'received' }
+    ) {
+        param($Text, $File, $Offset, $Expected, $Source)
+        $r = InModuleScope AzlSonar -Parameters @{ Text = $Text; File = $File; Offset = $Offset } {
+            param($Text, $File, $Offset)
+            Get-AzlSonarLogEventTime -Text $Text -File $File -UtcOffsetMinutes $Offset -Received ([datetime]::SpecifyKind([datetime]'2026-10-10T18:00:00', 'Utc'))
+        }
+        $r.Source | Should -Be $Source
+        $r.Time.Kind | Should -Be ([System.DateTimeKind]::Utc)
+        $r.Time.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture) | Should -Be $Expected
+    }
+
+    It 'does not place a node-local time when the node offset is unknown' {
+        $r = InModuleScope AzlSonar {
+            Get-AzlSonarLogEventTime -Text '2026-10-10 16:16:42 x' -File 'C:\x\Step_20261010-161642.log' -UtcOffsetMinutes $null -Received ([datetime]::SpecifyKind([datetime]'2026-10-10T18:00:00', 'Utc'))
+        }
+        $r.Source | Should -Be 'received'
+        $r.Time | Should -Be ([datetime]::SpecifyKind([datetime]'2026-10-10T18:00:00', 'Utc'))
+    }
+
+    It 'still uses explicit Z and offsets when the node offset is unknown' {
+        $r = InModuleScope AzlSonar {
+            Get-AzlSonarLogEventTime -Text '2026-10-10T16:16:42Z x' -UtcOffsetMinutes $null -Received ([datetime]::SpecifyKind([datetime]'2026-10-10T18:00:00', 'Utc'))
+        }
+        $r.Source | Should -Be 'line'
+    }
+}
+
+Describe 'Test-AzlSonarDiscoveryDue' {
+    It 'lists on the first poll, then on every 3rd poll' {
+        $due = InModuleScope AzlSonar {
+            $now = [datetime]::SpecifyKind([datetime]'2026-10-10T18:00:00', 'Utc')
+            @(
+                Test-AzlSonarDiscoveryDue -PollsSinceDiscovery 0 -LastDiscoveryUtc $null -Now $now
+                Test-AzlSonarDiscoveryDue -PollsSinceDiscovery 0 -LastDiscoveryUtc $now -Now $now.AddSeconds(20)
+                Test-AzlSonarDiscoveryDue -PollsSinceDiscovery 1 -LastDiscoveryUtc $now -Now $now.AddSeconds(40)
+                Test-AzlSonarDiscoveryDue -PollsSinceDiscovery 2 -LastDiscoveryUtc $now -Now $now.AddSeconds(50)
+            )
+        }
+        $due | Should -Be @($true, $false, $false, $true)
+    }
+
+    It 'lists when 60 s passed since the last listing, even on a fast poll' {
+        InModuleScope AzlSonar {
+            $now = [datetime]::SpecifyKind([datetime]'2026-10-10T18:00:00', 'Utc')
+            Test-AzlSonarDiscoveryDue -PollsSinceDiscovery 0 -LastDiscoveryUtc $now -Now $now.AddSeconds(61)
+        } | Should -BeTrue
+    }
+
+    It 'lists when forced (a file vanished or the session was re-opened)' {
+        InModuleScope AzlSonar {
+            $now = [datetime]::UtcNow
+            Test-AzlSonarDiscoveryDue -PollsSinceDiscovery 0 -LastDiscoveryUtc $now -Now $now -Force
+        } | Should -BeTrue
     }
 }
 
@@ -574,6 +838,59 @@ Describe 'Invoke-AzlSonarTailerLoop (mocked New-PSSession / Invoke-Command)' {
         $shared.TailerJson | Should -Not -BeLike '*not-a-real-password*'
         Should -Invoke -ModuleName AzlSonar -CommandName New-PSSession -Times 1 -Exactly -ParameterFilter { $null -ne $Credential -and $Credential.UserName -eq 'lab\reader' }
         Should -Invoke -ModuleName AzlSonar -CommandName Remove-PSSession -Times 1 -Exactly
+    }
+
+    It 'lists the folders on every 3rd poll only and converts node-local times with the reported offset' {
+        $script:PollCalls = [System.Collections.Generic.List[object]]::new()
+        $script:WaitCalls = 0
+        Mock -ModuleName AzlSonar -CommandName Wait-AzlSonarInterval -MockWith { $script:WaitCalls++; if ($script:WaitCalls -ge 4) { $Shared.Stop = $true } }
+        Mock -ModuleName AzlSonar -CommandName New-PSSession -MockWith { [pscustomobject]@{ State = 'Opened'; Name = 'AzlSonar' } }
+        Mock -ModuleName AzlSonar -CommandName Invoke-Command -RemoveParameterType Session -MockWith {
+            $script:PollCalls.Add([bool]$ArgumentList[11])
+            [pscustomobject]@{
+                utcOffsetMinutes = 120
+                discovered       = [bool]$ArgumentList[11]
+                files            = @()
+                lines            = @([pscustomobject]@{ file = 'C:\MASLogs\Deploy.log'; text = '2026-10-10 17:00:00 local line' })
+                state            = @{}
+                missingPaths     = @()
+                errors           = @()
+                renamed          = @()
+                vanished         = 0
+            }
+        }
+        $shared = InModuleScope AzlSonar -Parameters @{ Config = $script:TailerConfig } {
+            param($Config)
+            $shared = Initialize-AzlSonarSharedState
+            Invoke-AzlSonarTailerLoop -Shared $shared -Config $Config -Credential $null
+            $shared
+        }
+        @($script:PollCalls) | Should -Be @($true, $false, $false, $true)
+        $first = @($shared.Lines.ToArray())[0]
+        $first.time | Should -Be '2026-10-10T15:00:00.000Z'
+        $first.timeSource | Should -Be 'line'
+        $shared.Tailer.nodeUtcOffsetMinutes | Should -Be 120
+        $shared.Tailer.lastDiscoveryUtc | Should -Match 'Z$'
+    }
+
+    It 'lists the folders again on the next poll after a tracked file vanished' {
+        $script:PollCalls = [System.Collections.Generic.List[object]]::new()
+        $script:WaitCalls = 0
+        Mock -ModuleName AzlSonar -CommandName Wait-AzlSonarInterval -MockWith { $script:WaitCalls++; if ($script:WaitCalls -ge 3) { $Shared.Stop = $true } }
+        Mock -ModuleName AzlSonar -CommandName New-PSSession -MockWith { [pscustomobject]@{ State = 'Opened'; Name = 'AzlSonar' } }
+        Mock -ModuleName AzlSonar -CommandName Invoke-Command -RemoveParameterType Session -MockWith {
+            $script:PollCalls.Add([bool]$ArgumentList[11])
+            [pscustomobject]@{
+                utcOffsetMinutes = 0; discovered = [bool]$ArgumentList[11]; files = @(); lines = @(); state = @{}
+                missingPaths = @(); errors = @(); renamed = @(); vanished = $(if ($script:PollCalls.Count -eq 2) { 1 } else { 0 })
+            }
+        }
+        $null = InModuleScope AzlSonar -Parameters @{ Config = $script:TailerConfig } {
+            param($Config)
+            $shared = Initialize-AzlSonarSharedState
+            Invoke-AzlSonarTailerLoop -Shared $shared -Config $Config -Credential $null
+        }
+        @($script:PollCalls) | Should -Be @($true, $false, $true)
     }
 
     It 'reports unavailable and drops the session when a poll fails' {

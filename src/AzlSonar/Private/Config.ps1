@@ -136,6 +136,10 @@ function Test-AzlSonarConfig {
                 }
             }
         }
+        $transport = Get-AzlSonarMember $logs 'transport'
+        if ($null -ne $transport -and [string]$transport -notin @('auto', 'winrm', 'ssh')) {
+            $problems.Add('logs.transport must be auto, winrm or ssh.')
+        }
     }
 
     $credential = Get-AzlSonarMember $Config 'credential'
@@ -167,7 +171,7 @@ function Read-AzlSonarConfig {
         Reads, validates and normalises a Sonar config file (sonar.config.json).
     .DESCRIPTION
         Applies the documented defaults (apiVersion, edgeApiVersion, pollSeconds, log paths, include and exclude
-        patterns, recurseDepth, activeWindowMinutes, maxLinesPerPoll, credential source) and marks the seed node. Throws one error listing every problem
+        patterns, recurseDepth, activeWindowMinutes, maxLinesPerPoll, logs.pollSeconds, logs.transport, credential source) and marks the seed node. Throws one error listing every problem
         when the config is not valid. Never reads secrets: Key Vault secret names are kept as names only.
     .PARAMETER Path
         Path to the JSON config file.
@@ -244,6 +248,7 @@ function Read-AzlSonarConfig {
         recurseDepth        = [int](Get-AzlSonarMember $logs 'recurseDepth' 3)
         activeWindowMinutes = [int](Get-AzlSonarMember $logs 'activeWindowMinutes' 30)
         pollSeconds         = [int](Get-AzlSonarMember $logs 'pollSeconds' $pollSeconds)
+        transport           = ([string](Get-AzlSonarMember $logs 'transport' 'auto')).ToLowerInvariant()
     }
 
     $credential = Get-AzlSonarMember $raw 'credential'
@@ -278,7 +283,7 @@ function ConvertTo-AzlSonarPublicConfig {
     <#
     .SYNOPSIS
         The config as served by /api/config and the export bundle: no secrets, no secret names, no addresses.
-        { clusterName, cluster, resourceGroup, identityModel, nodes[{name, seed}], logs{paths[]}, pollSeconds, startedAt }
+        { clusterName, cluster, resourceGroup, identityModel, nodes[{name, seed}], logs{paths[]}, pollSeconds, startedAt, serverId }
     #>
     [CmdletBinding()]
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
@@ -287,7 +292,10 @@ function ConvertTo-AzlSonarPublicConfig {
         [object]$Config,
 
         [AllowNull()]
-        [object]$StartedAt
+        [object]$StartedAt,
+
+        [AllowNull()]
+        [string]$ServerId
     )
 
     $nodes = foreach ($node in $Config.nodes) {
@@ -302,5 +310,6 @@ function ConvertTo-AzlSonarPublicConfig {
         logs          = [ordered]@{ paths = [string[]]@($Config.logs.paths) }
         pollSeconds   = $Config.pollSeconds
         startedAt     = Format-AzlSonarDate $StartedAt
+        serverId      = if ($ServerId) { $ServerId } else { $null }
     }
 }
