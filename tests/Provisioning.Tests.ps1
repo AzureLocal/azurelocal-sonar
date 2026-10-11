@@ -1,4 +1,6 @@
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0.0' }
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test helpers build in-memory fixtures only.')]
+param()
 Set-StrictMode -Version Latest
 
 # The two ways Azure Local machines get ready before the cluster deployment (plan task S-8):
