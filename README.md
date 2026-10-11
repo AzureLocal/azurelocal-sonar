@@ -33,6 +33,18 @@ On the workstation or jump server that runs Sonar:
 
 Without log access Sonar still runs: the step tree, phases and node status come from Azure; the log pane shows why the logs are unavailable and which account and location to use.
 
+## Get Sonar
+
+Clone the repository (or download the ZIP from GitHub and extract it):
+
+```powershell
+git clone https://github.com/AzureLocal/azurelocal-sonar.git
+cd azurelocal-sonar
+```
+
+If you downloaded the ZIP, unblock the files once so PowerShell runs them: `Get-ChildItem -Recurse | Unblock-File`.
+There is nothing to install: no service, no database, no build step.
+
 ## Quick start
 
 1. Sign in to Azure with an account that can read the resource group:
@@ -45,6 +57,7 @@ Without log access Sonar still runs: the step tree, phases and node status come 
 2. Copy the example config and fill in your values (one file per cluster, kept outside the repo):
 
    ```powershell
+   New-Item -ItemType Directory -Force ./config | Out-Null   # git-ignored
    Copy-Item ./examples/sonar.config.example.json ./config/clus01.json
    ```
 
@@ -60,6 +73,12 @@ Without log access Sonar still runs: the step tree, phases and node status come 
      ],
      "credential": { "source": "prompt" }
    }
+   ```
+
+   Find each node's Arc resource name (simplified machine provisioning names it `<device-id>-1`):
+
+   ```powershell
+   Get-AzConnectedMachine -ResourceGroupName '<resource group>' | Select-Object Name, MachineFqdn, Status
    ```
 
 3. For a workgroup node or an IP address, make sure the seed node is in `TrustedHosts` (elevated, appends to the list; Sonar never changes it):

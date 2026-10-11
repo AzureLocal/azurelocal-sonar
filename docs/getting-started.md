@@ -1,7 +1,7 @@
 # Getting started
 
-::: warning New
-AzL Sonar is new and is being tested live on a lab deployment; see the [plan](./plan.md) for status.
+::: tip v0.1
+AzL Sonar v0.1 was used live on a two-node Local Identity deployment (Azure Local 2609) on 10 and 11 Oct 2026. Report problems as GitHub issues; see the [plan](./plan.md) for what comes next.
 :::
 
 ## Requirements
@@ -15,10 +15,23 @@ AzL Sonar is new and is being tested live on a lab deployment; see the [plan](./
 
 Without log access Sonar still shows the step tree, the phase and the node status from Azure, and tells you why the logs are unavailable.
 
+## Get Sonar
+
+Clone the repository (or download the ZIP from GitHub and extract it):
+
+```powershell
+git clone https://github.com/AzureLocal/azurelocal-sonar.git
+cd azurelocal-sonar
+```
+
+If you downloaded the ZIP, unblock the files once so PowerShell runs them: `Get-ChildItem -Recurse | Unblock-File`.
+There is nothing to install: no service, no database, no build step.
+
 ## Run
 
 ```powershell
 Connect-AzAccount
+New-Item -ItemType Directory -Force ./config | Out-Null   # config/ is git-ignored
 Copy-Item ./examples/sonar.config.example.json ./config/my-cluster.json   # then edit it
 ./Start-AzlSonar.ps1 -ConfigPath ./config/my-cluster.json
 ```

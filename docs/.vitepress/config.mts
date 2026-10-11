@@ -16,6 +16,8 @@ export default defineConfig({
       { text: 'Home', link: '/' },
       { text: 'Getting started', link: '/getting-started' },
       { text: 'How it works', link: '/how-it-works' },
+      { text: 'Design', link: '/design' },
+      { text: 'Research and live findings', link: '/research' },
       { text: 'Plan', link: '/plan' }
     ],
     socialLinks: [
