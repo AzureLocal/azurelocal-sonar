@@ -74,6 +74,11 @@ function Test-AzlSonarConfig {
         }
     }
 
+    $recordPath = Get-AzlSonarMember $Config 'recordPath'
+    if ($null -ne $recordPath -and ($recordPath -isnot [string] -or [string]::IsNullOrWhiteSpace($recordPath))) {
+        $problems.Add('recordPath must be a file path (a recording, for example ./recordings/clus01.jsonl) when given.')
+    }
+
     $nodes = ConvertTo-AzlSonarArray (Get-AzlSonarMember $Config 'nodes')
     if ($nodes.Count -eq 0) {
         $problems.Add('nodes must list at least one node.')
@@ -189,7 +194,7 @@ function Read-AzlSonarConfig {
         $config = Read-AzlSonarConfig -Path ./config/clus01.json
     .OUTPUTS
         PSCustomObject with subscriptionId, resourceGroup, clusterName, apiVersion, edgeApiVersion, provisioningRoute,
-        identityModel, pollSeconds, nodes[] (name, address, arcMachineName, arcMachineNameSet, seed), seedNode, logs,
+        identityModel, pollSeconds, nodes[] (name, address, arcMachineName, arcMachineNameSet, seed), seedNode, logs, recordPath,
         credential.
     #>
     [CmdletBinding(DefaultParameterSetName = 'Path')]
@@ -274,6 +279,12 @@ function Read-AzlSonarConfig {
     $identityModel = if ([string]$raw.identityModel -eq 'ActiveDirectory') { 'ActiveDirectory' } else { 'LocalIdentity' }
     $nodeArray = $nodes.ToArray()
 
+    # recordPath: relative to the config file's folder (to the current folder for a JSON string).
+    $recordPath = [string](Get-AzlSonarMember $raw 'recordPath' '')
+    if ($recordPath -and -not [System.IO.Path]::IsPathRooted($recordPath) -and $PSCmdlet.ParameterSetName -eq 'Path') {
+        $recordPath = [System.IO.Path]::GetFullPath((Join-Path -Path ([System.IO.Path]::GetDirectoryName($source)) -ChildPath $recordPath))
+    }
+
     return [pscustomobject]@{
         subscriptionId = ([string]$raw.subscriptionId).ToLowerInvariant()
         resourceGroup  = [string]$raw.resourceGroup
@@ -287,6 +298,7 @@ function Read-AzlSonarConfig {
         seedNode       = @($nodeArray | Where-Object { $_.seed })[0]
         logs           = $logsNormalised
         credential     = $credentialNormalised
+        recordPath     = $recordPath
         sourcePath     = $source
     }
 }

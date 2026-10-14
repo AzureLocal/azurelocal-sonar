@@ -616,3 +616,83 @@ a { color: var(--accent); }
 
 /* Confidence note under the log-access badge */
 .guide-note { margin: 6px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--muted, inherit); }
+
+/* ---------- Record and replay ---------- */
+
+.rec-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 700;
+  background: var(--err-soft); color: var(--err);
+}
+.rec-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; animation: rec-blink 1.6s ease-in-out infinite; }
+@keyframes rec-blink { 50% { opacity: .35; } }
+
+.replay-badge {
+  font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em;
+  padding: 2px 9px; border-radius: 999px; background: var(--warn); color: var(--surface);
+}
+.conn[data-conn="replay"] .conn-dot { background: var(--warn); }
+.conn[data-conn="replay"] { color: var(--warn); }
+
+.replay-bar {
+  position: relative; z-index: 15; flex: none;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 20px 10px;
+  background: var(--warn-soft);
+  border-bottom: 2px solid var(--warn);
+  /* diagonal stripes on the left edge: a replay never looks like the live view */
+  background-image: repeating-linear-gradient(135deg, transparent 0 8px, color-mix(in srgb, var(--warn) 14%, transparent) 8px 16px);
+  background-size: 22px 100%; background-repeat: no-repeat;
+}
+.rp-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; min-width: 0; }
+.rp-flag {
+  font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; color: var(--warn);
+}
+.rp-title { font-size: 14.5px; overflow-wrap: anywhere; }
+.rp-pos { font-size: 15px; font-weight: 700; color: var(--text); }
+.rp-clock { font-size: 12px; color: var(--text-2); }
+
+.rp-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.rp-play { min-width: 92px; justify-content: center; }
+.rp-play .i-pause { display: none; }
+.rp-play[data-playing="true"] .i-pause { display: block; }
+.rp-play[data-playing="true"] .i-play { display: none; }
+
+.rp-track { position: relative; flex: 1 1 320px; min-width: 200px; padding-top: 20px; }
+.rp-markers { position: absolute; left: 8px; right: 8px; top: 0; height: 30px; pointer-events: none; }
+.rp-mark {
+  position: absolute; top: 0; transform: translateX(-50%);
+  width: 14px; height: 30px; padding: 0; border: 0; background: transparent; cursor: pointer;
+  pointer-events: auto;
+}
+.rp-mark::after {
+  content: ""; position: absolute; left: 6px; top: 12px; width: 2px; height: 16px; border-radius: 1px;
+  background: var(--accent);
+}
+.rp-mark[data-kind="step"]::after { top: 16px; height: 12px; background: var(--text-2); opacity: .7; }
+.rp-mark[data-kind="error"]::after { background: var(--err); width: 3px; }
+.rp-mark[data-kind="end"]::after { background: var(--ok); width: 3px; }
+.rp-mark[data-kind="session"]::after { background: var(--muted); top: 18px; height: 10px; }
+.rp-mark:hover::after, .rp-mark:focus-visible::after { width: 4px; left: 5px; }
+.rp-mark-label {
+  position: absolute; left: 50%; top: -2px; transform: translateX(-50%);
+  font-size: 11px; font-weight: 700; white-space: nowrap; color: var(--text-2); pointer-events: none;
+}
+.rp-scrub { width: 100%; margin: 0; accent-color: var(--warn); cursor: pointer; }
+.rp-jump-wrap select {
+  max-width: 220px; min-height: 28px; padding: 2px 6px; font-size: 13px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface);
+}
+
+@media (max-width: 640px) {
+  .replay-bar { padding: 8px 16px 10px; }
+  .rp-mark-label { display: none; }
+  .rp-track { flex-basis: 100%; }
+  .rp-jump-wrap select { max-width: 100%; }
+}
+
+@media (forced-colors: active) {
+  .rp-mark::after, .rec-dot { forced-color-adjust: none; background: CanvasText; }
+}
+.rp-mark[data-edge="start"] .rp-mark-label { left: 0; transform: none; }
+.rp-mark[data-edge="end"] .rp-mark-label { left: auto; right: 0; transform: none; }

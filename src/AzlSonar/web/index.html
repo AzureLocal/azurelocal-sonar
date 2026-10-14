@@ -23,6 +23,7 @@
       </svg>
       <span class="brand-name">AzL Sonar</span>
       <span id="demo-badge" class="demo-badge" hidden>Demo data</span>
+      <span id="replay-badge" class="replay-badge" hidden>Replay</span>
     </div>
 
     <div class="cluster">
@@ -53,6 +54,7 @@
     <ul id="node-chips" class="node-chips" aria-label="Nodes and Azure Arc status"></ul>
 
     <div class="actions">
+      <span id="rec-pill" class="rec-pill" hidden><span class="rec-dot" aria-hidden="true"></span>Recording</span>
       <span id="conn" class="conn" data-conn="connecting" title="Connection to the Sonar back end">
         <span class="conn-dot" aria-hidden="true"></span><span id="conn-label">Connecting</span>
       </span>
@@ -66,6 +68,31 @@
       </button>
     </div>
   </header>
+
+  <section id="replay-bar" class="replay-bar" aria-label="Replay controls" hidden>
+    <div class="rp-head">
+      <span class="rp-flag">Replay &middot; not live</span>
+      <strong id="replay-title" class="rp-title">Replay</strong>
+      <span id="rp-pos" class="rp-pos mono">&mdash;</span>
+      <span id="rp-clock" class="rp-clock mono"></span>
+    </div>
+    <div class="rp-controls">
+      <button id="rp-play" type="button" class="btn btn-sm btn-accent rp-play" aria-label="Play" data-playing="false">
+        <svg class="i-play" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4.5 2.8v10.4L13 8 4.5 2.8Z" fill="currentColor"/></svg>
+        <svg class="i-pause" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4.5 3h2.4v10H4.5zM9.1 3h2.4v10H9.1z" fill="currentColor"/></svg>
+        <span id="rp-play-label">Play</span>
+      </button>
+      <div id="rp-speed" class="seg seg-sm" role="group" aria-label="Playback speed"></div>
+      <div class="rp-track">
+        <div id="rp-markers" class="rp-markers"></div>
+        <input id="rp-scrub" class="rp-scrub" type="range" min="0" max="1" step="1" value="0" aria-label="Playback position">
+      </div>
+      <label class="rp-jump-wrap">
+        <span class="sr-only">Jump to a phase or step</span>
+        <select id="rp-jump"></select>
+      </label>
+    </div>
+  </section>
 
   <div id="banner" class="banner" role="status" hidden>
     <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 1.8 15 14H1L8 1.8Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6.2v3.6M8 11.6v.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>

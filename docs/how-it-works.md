@@ -1,6 +1,6 @@
 # How it works
 
-Sonar has three parts, all started by one script (`Start-AzlSonar.ps1`) in one PowerShell 7 process. The full contract is in [design.md](./design.md).
+Sonar has three parts (four while it records a run, see [Record and replay](#record-and-replay)), all started by one script (`Start-AzlSonar.ps1`) in one PowerShell 7 process. The full contract is in [design.md](./design.md).
 
 | Part | What it does | Source |
 | --- | --- | --- |
@@ -31,6 +31,26 @@ Sonar has three parts, all started by one script (`Start-AzlSonar.ps1`) in one P
 
 **Export** downloads one JSON bundle: the config (no secrets), the guidance, the latest state, the change-only state timeline (a snapshot only when something changed, at most 5000; the latest state is always included) and the log lines, with metadata that says how many snapshots and lines the caps dropped.
 
+## Record and replay
+
+**Recording** (`-Record <file>` or `recordPath`) adds a fourth part to a live run: a recorder on its own runspace that, every half second, writes what changed since its last look to an append-only JSON Lines file, one event per line with its UTC time:
+
+| Event | Written when | Holds |
+| --- | --- | --- |
+| `session` | Sonar starts (a restart appends a new one) | format, Sonar version, instance id, the public config, the phase guidance |
+| `state` | the published state changed | the first state of a session in full (a keyframe), then only the changes (`ops`: set, delete, truncate by path); a new keyframe once the changes since the last one add up to its size, or after 200 changes |
+| `tailer` | the log tailer status changed | the status (connected, unavailable with the reason, active files) |
+| `log` | new log lines | the lines exactly as the page got them (seq, times, file, level, text) |
+| `end` | Sonar stopped cleanly | nothing |
+
+The recorder reads the same shared state the page is served from, so it records only what the page was sent, and masks every string again before writing (secret formats, the log account's password and the Key Vault names). An unchanged state is not written; a poll that changed only the time and the running timers is a few hundred bytes.
+
+**Replaying** (`-Replay <file>`) starts the same web server with no poller, tailer, node probe or Azure sign-in. It checks the file (a session header first, a known format, at least one state; a cut-off line is skipped and counted) and serves it whole at `/api/replay`; `/api/config` carries the recorded config plus a `replay` object (cluster, file, recorded from/to, speed, start, autoplay). The page then plays it locally: a clock moves the position at the chosen speed; at each step the page takes the last keyframe before the position, applies the changes after it, and renders the result, the log lines up to the position and the tailer status through the same code as a live run. Moving forward appends the new log lines as they would have arrived; jumping back or far ahead rebuilds the log pane at the new position. Timers and *Last poll* use the replay clock.
+
+The scrubber's markers come from the states themselves: each change of phase (Arc registration or Provisioning, Validate, Deploy; a second Deploy after a failure is *Deploy (2)*), each main Deploy step when it starts (the top-level steps, or the children of a single top-level step), the first failed step of a run, a Sonar restart and the end. The position reads as the time since the current phase began (**Deploy +1:42:10**), counted from the phase's first step, which can be before the recording started.
+
+`?demo=1&replay=1` plays the demo deployment as a built-in recording (64 minutes: Arc registration, Validate, Deploy), made with the same keyframe and change format.
+
 ## Read-only
 
-Sonar only reads. It never starts, retries or cancels a deployment, never writes to Azure (no Arc run command, no Arc SSH), never writes to a node, and never changes the workstation's `TrustedHosts`. The page is served to this machine only, and secrets are masked in everything it shows or exports.
+Sonar only reads Azure and the nodes. It never starts, retries or cancels a deployment, never writes to Azure (no Arc run command, no Arc SSH), never writes to a node, and never changes the workstation's `TrustedHosts`. The only file it writes is the recording you ask for, and a replay never contacts Azure or a node. The page is served to this machine only, and secrets are masked in everything it shows, exports or records.

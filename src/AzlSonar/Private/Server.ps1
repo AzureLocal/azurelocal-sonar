@@ -546,7 +546,20 @@ function Invoke-AzlSonarHttpRequest {
         }
         $path = [uri]::UnescapeDataString($request.Url.AbsolutePath)
         $shared = $Server.Shared
+        $replaying = $Server['Mode'] -eq 'replay'
+        if ($replaying -and $path -in '/api/events', '/api/export') {
+            Send-AzlSonarJsonError -Response $response -StatusCode 404 -Message "Replay mode: $path is not available; the page plays /api/replay."
+            return
+        }
         switch ($path) {
+            '/api/replay' {
+                if (-not $replaying) {
+                    Send-AzlSonarJsonError -Response $response -StatusCode 404 -Message 'Not replaying. Start Sonar with -Replay <recording> to play a recording.'
+                    return
+                }
+                Send-AzlSonarHttpResponse -Response $response -Body $Server.ReplayJson -NoCache
+                return
+            }
             '/api/config' {
                 Send-AzlSonarHttpResponse -Response $response -Body $Server.ConfigJson -NoCache
                 return
@@ -600,67 +613,210 @@ function Invoke-AzlSonarHttpRequest {
     }
 }
 
+function New-AzlSonarReplayServer {
+    <#
+    .SYNOPSIS
+        The server table for a replay: the recording, the state at the start position, the recorded config (with the
+        replay details) and guidance. No Azure, no node, no worker.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Builds an in-memory table only.')]
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [double]$Speed = 60,
+
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$StartAt,
+
+        [switch]$Autoplay,
+
+        [string]$Version = ''
+    )
+
+    $recording = Read-AzlSonarRecording -Path $Path
+    $start = ConvertTo-AzlSonarReplayStart -Value $StartAt -Start $recording.Start -End $recording.End
+    $shared = Initialize-AzlSonarSharedState
+    $at = if ($null -ne $start.Time) { $start.Time } else { $recording.Start }
+    $stateJson = Get-AzlSonarRecordingStateAt -Recording $recording -Time $at
+    if (-not $stateJson) {
+        $first = @($recording.Events | Where-Object { $_.Kind -eq 'state' })[0]
+        $stateJson = ConvertTo-AzlSonarNodeJson $first.Node['full']
+    }
+    $shared.StateJson = $stateJson
+    $shared.StateVersion = [long]1
+
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    $format = "yyyy-MM-dd'T'HH:mm:ss.fff'Z'"
+    $meta = [ordered]@{
+        cluster      = $recording.Cluster
+        file         = $recording.Name
+        recordedFrom = $recording.Start.ToString($format, $culture)
+        recordedTo   = $recording.End.ToString($format, $culture)
+        sessions     = @($recording.Sessions).Count
+        invalid      = [int]$recording.Invalid
+        speed        = $Speed
+        startAt      = $(if ($null -ne $start.Time) { $start.Time.ToString($format, $culture) } else { $null })
+        startAtPhase = $start.Phase
+        autoplay     = [bool]$Autoplay
+    }
+
+    $config = $null
+    if ($recording.ConfigJson -ne 'null') { $config = [System.Text.Json.Nodes.JsonNode]::Parse($recording.ConfigJson) }
+    if ($config -isnot [System.Text.Json.Nodes.JsonObject]) {
+        $config = [System.Text.Json.Nodes.JsonNode]::Parse((ConvertTo-AzlSonarJson ([ordered]@{ clusterName = $recording.Cluster; cluster = $recording.Cluster })))
+    }
+    $config['serverId'] = [System.Text.Json.Nodes.JsonValue]::Create([string]$shared.ServerId)
+    $config['replay'] = [System.Text.Json.Nodes.JsonNode]::Parse((ConvertTo-AzlSonarJson $meta))
+    $null = $config.Remove('recording')
+    $identityModel = 'LocalIdentity'
+    if ($config.ContainsKey('identityModel') -and $null -ne $config['identityModel']) { $identityModel = [string]$config['identityModel'] }
+    $guidanceJson = $recording.GuidanceJson
+    if ($guidanceJson -eq 'null') { $guidanceJson = ConvertTo-AzlSonarJson (Get-AzlSonarPhaseGuidance -IdentityModel $identityModel) }
+
+    return @{
+        Mode         = 'replay'
+        Shared       = $shared
+        WebRoot      = Join-Path -Path $script:AzlSonarModuleRoot -ChildPath 'web'
+        ConfigJson   = ConvertTo-AzlSonarNodeJson $config
+        GuidanceJson = $guidanceJson
+        ReplayJson   = Get-AzlSonarReplayJson -Recording $recording -Meta $meta
+        ClusterName  = $recording.Cluster
+        Version      = $Version
+        Clients      = [System.Collections.Generic.List[hashtable]]::new()
+        Recording    = $recording
+    }
+}
+
 function Start-AzlSonarServer {
     <#
     .SYNOPSIS
-        Starts AzL Sonar: the Azure poller, the log tailer and the local web server, until Ctrl+C.
+        Starts AzL Sonar: the Azure poller, the log tailer and the local web server, until Ctrl+C. Or replays a
+        recording through the same page (-Replay).
     .DESCRIPTION
-        Reads the config, checks the Az PowerShell sign-in, resolves the log account (prompt, -Credential or Key
+        Live: reads the config, checks the Az PowerShell sign-in, resolves the log account (prompt, -Credential or Key
         Vault), binds http://localhost:{Port}/ only, starts the poller, the tailer and (unless provisioningRoute is
         simplified) the node probe that reads the Arc registration status on each node, on background runspaces, and
-        serves the page, the JSON API and Server-Sent Events. Read-only towards Azure and the nodes. Ctrl+C stops
-        the listener, closes the remoting session and disposes the runspaces.
+        serves the page, the JSON API and Server-Sent Events. With -Record (or recordPath in the config) a recorder
+        appends every published state, tailer status and log line (masked) to a JSON Lines recording. Read-only towards
+        Azure and the nodes. Ctrl+C stops the listener, closes the remoting session and disposes the runspaces.
+        Replay: reads the recording and serves it through the same page with a transport bar (play, pause, speed,
+        scrubber, phase markers). No Azure sign-in, no node access, no worker.
     .PARAMETER ConfigPath
         Path to the Sonar config file (JSON).
+    .PARAMETER Replay
+        Path to a recording (.jsonl, or .jsonl.gz) to play instead of watching a live deployment.
     .PARAMETER Port
         Local port. Default 8642.
     .PARAMETER Credential
         Account that reads the logs on the seed node. Overrides credential.source.
+    .PARAMETER Record
+        Append everything the page is sent to this recording file (JSON Lines). Overrides recordPath in the config.
+    .PARAMETER Speed
+        Replay: starting speed (recorded seconds per real second). Default 60.
+    .PARAMETER StartAt
+        Replay: where to start; an offset (1:42:10, 90m, 1h30m), a UTC time inside the recording, or a phase
+        (arc-registration, validation, deployment).
+    .PARAMETER Autoplay
+        Replay: start playing at once instead of paused.
     .PARAMETER NoBrowser
         Do not open the browser.
     .EXAMPLE
-        Start-AzlSonarServer -ConfigPath ./config/clus01.json
+        Start-AzlSonarServer -ConfigPath ./config/clus01.json -Record ./recordings/clus01.jsonl
+    .EXAMPLE
+        Start-AzlSonarServer -Replay ./recordings/clus01.jsonl -Speed 240 -StartAt deployment
     #>
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Starts a local, read-only monitor; changes nothing outside the process.')]
-    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Starts a local, read-only monitor; changes nothing outside the process (a recording is a local file the user asked for).')]
+    [CmdletBinding(DefaultParameterSetName = 'Live')]
     param(
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory, ParameterSetName = 'Live')]
         [string]$ConfigPath,
+
+        [Parameter(Mandatory, ParameterSetName = 'Replay')]
+        [string]$Replay,
 
         [ValidateRange(1, 65535)]
         [int]$Port = 8642,
 
+        [Parameter(ParameterSetName = 'Live')]
         [AllowNull()]
         [pscredential]$Credential,
+
+        [Parameter(ParameterSetName = 'Live')]
+        [string]$Record,
+
+        [Parameter(ParameterSetName = 'Replay')]
+        [ValidateRange(0.1, 3600)]
+        [double]$Speed = 60,
+
+        [Parameter(ParameterSetName = 'Replay')]
+        [string]$StartAt,
+
+        [Parameter(ParameterSetName = 'Replay')]
+        [switch]$Autoplay,
 
         [switch]$NoBrowser
     )
 
     $ErrorActionPreference = 'Stop'
-    $config = Read-AzlSonarConfig -Path $ConfigPath
-    Assert-AzlSonarAzContext
-    $logCredential = Resolve-AzlSonarCredential -Config $config -Credential $Credential
-
-    $shared = Initialize-AzlSonarSharedState
-    if ($logCredential) { $shared.Redact = @($logCredential.GetNetworkCredential().Password) | Where-Object { $_ } }
-    $initial = Get-AzlSonarInitialState -Config $config
-    $shared.State = $initial
-    $shared.StateJson = ConvertTo-AzlSonarJson $initial
-    $guidance = Get-AzlSonarPhaseGuidance -IdentityModel $config.identityModel
-    if (-not $guidance.available) {
-        Write-Warning 'data/phase-guidance.json not found: /api/guidance returns no entries.'
-    }
-
     $moduleVersion = [string]$MyInvocation.MyCommand.Module.Version
-    $server = @{
-        Shared       = $shared
-        WebRoot      = Join-Path -Path $script:AzlSonarModuleRoot -ChildPath 'web'
-        ConfigJson   = ConvertTo-AzlSonarJson (ConvertTo-AzlSonarPublicConfig -Config $config -StartedAt ([datetime]::UtcNow) -ServerId $shared.ServerId)
-        GuidanceJson = ConvertTo-AzlSonarJson $guidance
-        ClusterName  = $config.clusterName
-        Version      = $moduleVersion
-        Clients      = [System.Collections.Generic.List[hashtable]]::new()
+    $workerSpecs = [System.Collections.Generic.List[hashtable]]::new()
+
+    if ($PSCmdlet.ParameterSetName -eq 'Replay') {
+        $server = New-AzlSonarReplayServer -Path $Replay -Speed $Speed -StartAt $StartAt -Autoplay:$Autoplay -Version $moduleVersion
+        $recording = $server.Recording
+        $from = $recording.Start.ToLocalTime().ToString('yyyy-MM-dd HH:mm')
+        $length = $recording.End - $recording.Start
+        $startMessage = "AzL Sonar is replaying $($recording.Name) ($($recording.Cluster), recorded $from, $([int][Math]::Floor($length.TotalHours)):$($length.ToString('mm\:ss')) long) on {0}. No Azure or node access. Press Ctrl+C to stop."
+        if ($recording.Invalid -gt 0) { Write-Warning "$($recording.Invalid) line(s) of the recording are not valid events and were skipped (for example a line cut off when Sonar stopped)." }
     }
+    else {
+        $config = Read-AzlSonarConfig -Path $ConfigPath
+        Assert-AzlSonarAzContext
+        $recordPath = if ($PSBoundParameters.ContainsKey('Record') -and $Record) { $Record } else { [string](Get-AzlSonarMember $config 'recordPath' '') }
+        if ($recordPath) { $recordPath = Resolve-AzlSonarRecordPath -Path $recordPath }
+        $logCredential = Resolve-AzlSonarCredential -Config $config -Credential $Credential
+
+        $shared = Initialize-AzlSonarSharedState
+        if ($logCredential) { $shared.Redact = @($logCredential.GetNetworkCredential().Password) | Where-Object { $_ } }
+        $initial = Get-AzlSonarInitialState -Config $config
+        $shared.State = $initial
+        $shared.StateJson = ConvertTo-AzlSonarJson $initial
+        $guidance = Get-AzlSonarPhaseGuidance -IdentityModel $config.identityModel
+        if (-not $guidance.available) {
+            Write-Warning 'data/phase-guidance.json not found: /api/guidance returns no entries.'
+        }
+
+        $publicConfig = ConvertTo-AzlSonarPublicConfig -Config $config -StartedAt ([datetime]::UtcNow) -ServerId $shared.ServerId
+        if ($recordPath) { $publicConfig.recording = [ordered]@{ file = [System.IO.Path]::GetFileName($recordPath) } }
+        $server = @{
+            Mode         = 'live'
+            Shared       = $shared
+            WebRoot      = Join-Path -Path $script:AzlSonarModuleRoot -ChildPath 'web'
+            ConfigJson   = ConvertTo-AzlSonarJson $publicConfig
+            GuidanceJson = ConvertTo-AzlSonarJson $guidance
+            ClusterName  = $config.clusterName
+            Version      = $moduleVersion
+            Clients      = [System.Collections.Generic.List[hashtable]]::new()
+        }
+        if ($recordPath) {
+            # First, so the recording starts with the initial state.
+            $sessionJson = New-AzlSonarSessionJson -ConfigJson $server.ConfigJson -GuidanceJson $server.GuidanceJson -ServerId $shared.ServerId -Version $moduleVersion -Cluster $config.clusterName
+            $workerSpecs.Add(@{ Name = 'Recorder'; Command = 'Invoke-AzlSonarRecorderLoop'; Arguments = @{ Shared = $shared; Path = $recordPath; SessionJson = $sessionJson; Config = $config } })
+        }
+        $workerSpecs.Add(@{ Name = 'Poller'; Command = 'Invoke-AzlSonarPollerLoop'; Arguments = @{ Shared = $shared; Config = $config } })
+        $workerSpecs.Add(@{ Name = 'Tailer'; Command = 'Invoke-AzlSonarTailerLoop'; Arguments = @{ Shared = $shared; Config = $config; Credential = $logCredential } })
+        if ($config.provisioningRoute -ne 'simplified') {
+            # Reads Get-ArcBootstrapStatus / Get-ArcZeroDaySolutionUpdateStatus on each node, only while Arc registration (OEM image route) runs.
+            $workerSpecs.Add(@{ Name = 'NodeProbe'; Command = 'Invoke-AzlSonarNodeProbeLoop'; Arguments = @{ Shared = $shared; Config = $config; Credential = $logCredential } })
+        }
+        $startMessage = "AzL Sonar is listening on {0} for $($config.clusterName) (read-only). Press Ctrl+C to stop."
+        if ($recordPath) { $startMessage += " Recording to $recordPath." }
+    }
+    $shared = $server.Shared
     if (-not (Test-Path -LiteralPath (Join-Path $server.WebRoot 'index.html'))) {
         Write-Warning "The page is missing ($($server.WebRoot)\index.html); the API still works."
     }
@@ -678,14 +834,11 @@ function Start-AzlSonarServer {
 
     $workers = [System.Collections.Generic.List[hashtable]]::new()
     try {
-        $workers.Add((Start-AzlSonarWorker -Name 'Poller' -Command 'Invoke-AzlSonarPollerLoop' -Arguments @{ Shared = $shared; Config = $config }))
-        $workers.Add((Start-AzlSonarWorker -Name 'Tailer' -Command 'Invoke-AzlSonarTailerLoop' -Arguments @{ Shared = $shared; Config = $config; Credential = $logCredential }))
-        if ($config.provisioningRoute -ne 'simplified') {
-            # Reads Get-ArcBootstrapStatus / Get-ArcZeroDaySolutionUpdateStatus on each node, only while Arc registration (OEM image route) runs.
-            $workers.Add((Start-AzlSonarWorker -Name 'NodeProbe' -Command 'Invoke-AzlSonarNodeProbeLoop' -Arguments @{ Shared = $shared; Config = $config; Credential = $logCredential }))
+        foreach ($spec in $workerSpecs) {
+            $workers.Add((Start-AzlSonarWorker -Name $spec.Name -Command $spec.Command -Arguments $spec.Arguments))
         }
 
-        Write-Information -MessageData "AzL Sonar is listening on $url for $($config.clusterName) (read-only). Press Ctrl+C to stop." -InformationAction Continue
+        Write-Information -MessageData ($startMessage -f $url) -InformationAction Continue
         if (-not $NoBrowser) {
             try { Start-Process -FilePath $url } catch { Write-Warning "Could not open the browser: $($_.Exception.Message). Open $url yourself." }
         }

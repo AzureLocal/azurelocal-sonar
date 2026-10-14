@@ -1,6 +1,6 @@
 # AzL Sonar
 
-**Real-time monitor for Azure Local deployments.** Follow a deployment while it runs: how each machine gets ready (simplified machine provisioning or OEM image + Arc registration), every validation and deployment step and its status, and the live deployment logs from the seed node, in a modern local web view. PowerShell back end; nothing to install. Read-only.
+**Real-time monitor for Azure Local deployments.** Follow a deployment while it runs: how each machine gets ready (simplified machine provisioning or OEM image + Arc registration), every validation and deployment step and its status, and the live deployment logs from the seed node, in a modern local web view. PowerShell back end; nothing to install. Read-only towards Azure and the nodes. Record a run to a local file and replay it later, time-scrubbed, through the same page.
 
 Beacon checks the environment before deployment. Sonar listens to the deployment as it happens.
 
@@ -8,6 +8,7 @@ Beacon checks the environment before deployment. Sonar listens to the deployment
 
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
+- [Record and replay](#record-and-replay)
 - [Configuration reference](#configuration-reference)
 - [How the machines get ready: the two routes](#how-the-machines-get-ready-the-two-routes)
 - [What each phase shows](#what-each-phase-shows)
@@ -99,8 +100,41 @@ There is nothing to install: no service, no database, no build step.
 | `-Port` | `8642` | Local port. Pick another if 8642 is taken (Sonar says so). |
 | `-Credential` | (none) | The log account; overrides `credential.source`. |
 | `-NoBrowser` | off | Do not open the browser. |
+| `-Record` | (none) | Also append the run to this recording file (JSON Lines). See [Record and replay](#record-and-replay). |
 
-Add `?demo=1` to the page URL to see the page with built-in sample data (no API calls): a running deployment. `?demo=1&route=simplified` shows three machines on simplified machine provisioning (one provisioned, one installing the OS, one failed at `InstallExtensions`); `?demo=1&route=oem` shows two machines registering on the OEM image route (one updating its OS image, in `Download`; one bootstrapping, in `ArcConfiguration > ArcRegistration`).
+Add `?demo=1` to the page URL to see the page with built-in sample data (no API calls): a running deployment. `?demo=1&route=simplified` shows three machines on simplified machine provisioning (one provisioned, one installing the OS, one failed at `InstallExtensions`); `?demo=1&route=oem` shows two machines registering on the OEM image route (one updating its OS image, in `Download`; one bootstrapping, in `ArcConfiguration > ArcRegistration`). `?demo=1&replay=1` plays the demo deployment as a built-in recording, so you can try the replay controls without a file.
+
+## Record and replay
+
+Sonar can keep what the page was sent during a run and play it back later through the same page: the step tree, timers, phase chip, node status, tailer status and log pane rebuild exactly as they were at any moment of the run.
+
+**Record** (live; needs the same sign-in and access as a normal run):
+
+```powershell
+./Start-AzlSonar.ps1 -ConfigPath ./config/clus01.json -Record ./recordings/clus01.jsonl
+```
+
+- The recording is JSON Lines, one event per line with its UTC time: a `session` header (Sonar version, the public config and the guidance), every published state (the first as a keyframe, then only what changed), every tailer status and every log line. An unchanged state is not written; a new keyframe follows once the changes since the last one add up to its size, so a long deployment stays small and any moment can be rebuilt quickly.
+- Appending: start Sonar again with the same file and it adds a new session (nothing is overwritten). A file cut off mid-line (Sonar killed) is fine: the reader skips the partial line.
+- Masked: only what the page was sent is written, after masking. Every string is masked again on the way to the file (the log account's password, `password=`, `secret=`, `token=`, `Bearer ...`, SAS `sig=`, `-Password ...`), plus the Key Vault vault and secret names as exact values. No credential, token or secret name reaches the file; node addresses are not in it either.
+- `recordPath` in the config does the same as `-Record` (relative to the config file). The page shows a red **Recording** pill while it records.
+- The `recordings/` folder of this repository is git-ignored. A recording holds the deployment's log text: treat it like a log export.
+
+**Replay** (no Azure sign-in, no node access, nothing to configure):
+
+```powershell
+./Start-AzlSonar.ps1 -Replay ./recordings/clus01.jsonl -Speed 240 -StartAt deployment
+```
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `-Replay` | (required) | The recording (`.jsonl`, or `.jsonl.gz`). |
+| `-Speed` | `60` | Starting speed in recorded seconds per real second (0.1 to 3600). The page offers 1×, 30×, 60× and 240× (and yours). |
+| `-StartAt` | the start | An offset into the recording (`1:42:10`, `90m`, `1h30m`, `45s`), a UTC time inside it, or a phase: `arc-registration`, `validation`, `deployment`. |
+| `-Autoplay` | off | Start playing at once instead of paused. |
+| `-Port`, `-NoBrowser` | | As for a live run. |
+
+The page says **Replay of clus01 · recorded 11 Oct 2026, 08:00** (your cluster and date) in a striped bar under the header, with a **Replay** badge, *Replay (not live)* instead of *Live* and *Logs (replay)* as the log title, so it is never mistaken for a live run. The transport bar has play/pause (Space when nothing else has the focus), the speed buttons, a scrubber over the whole run with markers (Arc registration, Validate, Deploy, each main Deploy step, failures, a Sonar restart, the end; click one to jump, or use **Jump to…**) and the position as the time since the current phase began (**Deploy +1:42:10**) next to the recorded clock time. Scrubbing rebuilds the exact state at that moment (the last keyframe before it plus the changes after it). Timers, durations and *Last poll* run on the replay clock. Export is not offered in a replay (the recording is the export).
 
 ## Configuration reference
 
@@ -134,6 +168,7 @@ Unknown fields are ignored. Sonar validates the file at start and lists every pr
 | `credential.usernameSecret` | for `keyvault` | | Secret that holds the user name. |
 | `credential.passwordSecret` | for `keyvault` | | Secret that holds the password. |
 | `credential.password`, `.secret`, `.secretValue` | never | | Rejected: secrets never go in the config file. |
+| `recordPath` | no | (none) | Record every run to this file, as with `-Record` (which overrides it). Relative to the config file. See [Record and replay](#record-and-replay). |
 
 Fixed limits (not configurable): the folders are listed (`Get-ChildItem`) on every 3rd log poll or after 60 s, whichever comes first, and the known active files are tailed in between; at most 300 active files and 2000 tracked files; 1 MiB per file per poll; a file already present at start is read from 16 KiB before its end; the back end keeps the last 5000 log lines and up to 5000 state snapshots; at most 10 browser tabs stream at once.
 
@@ -203,7 +238,8 @@ Do not use the built-in `Administrator` for validation or deployment: deployment
 - **Loopback only.** The server binds `http://localhost:<port>/` and answers requests from this machine only (anything else gets 403). Only `GET` is accepted (others get 405). Static files are served from the `web` folder only.
 - **Never writes to Azure.** Every Azure call is a `GET` through `Invoke-AzRestMethod`. Arc run command and Arc SSH are not used because both write to Azure.
 - **Never writes to a node.** Each poll runs one read-only script that lists and reads log files with shared read access (the writer and log rotation are never blocked). Over SSH the script is streamed through stdin; no file is written on the node. Sonar keeps no state on the node.
-- **Never changes the workstation.** Sonar reads `TrustedHosts` and tells you what is missing; it never sets it.
+- **Never changes the workstation.** Sonar reads `TrustedHosts` and tells you what is missing; it never sets it. The only file it ever writes is the recording you ask for with `-Record` (or `recordPath`), and it only appends to it.
+- **Recordings.** A recording holds what the page was sent, masked again on the way to the file (see [Record and replay](#record-and-replay)): no credential, token, Key Vault name or node address. A replay (`-Replay`) reads that file only: no Azure sign-in, no call to Azure, no connection to a node.
 - **Secrets.** No secret is allowed in the config file. Key Vault secrets are read once at start and kept in memory as a `PSCredential`. `/api/config` and the export carry no secrets, no secret names and no node addresses. Log text is redacted before it is stored, served or exported: the log account's password, and common secret formats (`password=`, `secret=`, `token=`, `AccountKey=`, `Bearer ...`, SAS `sig=`, `-Password ...`).
 - **SSH host keys.** The SSH fallback accepts the node's host key on first use (Posh-SSH `-AcceptKey`). Use it on a management network you trust.
 - **Resource use.** Bounded memory (5000 lines, 5000 snapshots, 2000 tracked files), at most 10 live browser streams, and a slow or stuck browser tab is dropped instead of slowing the others.
@@ -223,6 +259,11 @@ Do not use the built-in `Administrator` for validation or deployment: deployment
 | `SSH: the Posh-SSH module is not installed` | `Install-Module Posh-SSH -Scope CurrentUser`, then restart Sonar. |
 | `Not created yet (checked at every folder listing): C:\CloudDeployment\Logs` | Normal early in Deploy: the folder appears later. The other folders are tailed meanwhile. |
 | `Cannot listen on http://localhost:8642/` | The port is in use (another Sonar?). Start with `-Port 9000`. |
+| `Cannot write the recording ...` or `The recording path is a folder` | `-Record` (or `recordPath`) must name a file in a folder you can write to, for example `./recordings/clus01.jsonl`. Sonar checks it before it starts. |
+| `The Recorder stopped unexpectedly` | Writing the recording failed (for example the disk is full). The live view carries on; restart Sonar with the same `-Record` file to append a new session. |
+| `... is not an AzL Sonar recording` or `... holds no state snapshots` | `-Replay` needs a file written by `-Record`. A recording made before the first state was published has nothing to play. |
+| `-StartAt ... is past the end of the recording` | The offset is longer than the recording; the message gives its length. |
+| `N line(s) of the recording are not valid events and were skipped` | Usually the last line of a session cut off when Sonar was killed. Harmless. |
 | The page says **Polling** instead of **Live** | The live stream dropped or 10 tabs are already open; the page polls every 5 s and reconnects by itself. Close extra tabs. |
 | The log account stopped working mid-deployment | It was the built-in `Administrator`, which deployment renames to `ASBuiltInAdmin`. Restart Sonar with the deployment local admin. |
 | `credential.source is keyvault but Az.KeyVault is not installed` | `Install-Module Az.KeyVault -Scope CurrentUser`; the signed-in account needs secret get on the vault. |

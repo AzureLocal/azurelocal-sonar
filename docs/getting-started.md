@@ -44,7 +44,23 @@ For a workgroup node or an IP address, add the seed node to `TrustedHosts` first
 Set-Item WSMan:\localhost\Client\TrustedHosts -Value '192.0.2.11' -Concatenate -Force
 ```
 
-To look at the page without a deployment, open `http://localhost:8642/?demo=1` (built-in sample data).
+To look at the page without a deployment, open `http://localhost:8642/?demo=1` (built-in sample data), or `?demo=1&replay=1` for the replay controls with a built-in recording.
+
+## Record a run, replay it later
+
+Add `-Record` to keep the run in a local file (JSON Lines, masked, appended to after a restart):
+
+```powershell
+./Start-AzlSonar.ps1 -ConfigPath ./config/my-cluster.json -Record ./recordings/my-cluster.jsonl   # recordings/ is git-ignored
+```
+
+Play it back later, anywhere, with no Azure sign-in and no access to the nodes:
+
+```powershell
+./Start-AzlSonar.ps1 -Replay ./recordings/my-cluster.jsonl -Speed 240 -StartAt deployment
+```
+
+The page is labelled `Replay of <cluster> · recorded <date>` and has a transport bar: play/pause, speed (1×, 30×, 60×, 240×), a scrubber with markers for Arc registration, Validate, Deploy and its main steps (click one to jump), and the position as **Deploy +1:42:10**. `-StartAt` takes an offset (`1:42:10`, `90m`), a UTC time or a phase (`arc-registration`, `validation`, `deployment`); `-Autoplay` starts playing at once. Details: [How it works](./how-it-works.md#record-and-replay) and the [README](https://github.com/AzureLocal/azurelocal-sonar#record-and-replay).
 
 ## Configuration
 

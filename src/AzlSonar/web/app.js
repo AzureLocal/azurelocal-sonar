@@ -22,6 +22,9 @@
   };
   var DEMO = typeof location !== 'undefined' && /(?:^|[?&])demo=(?:1|true|yes)(?:&|$)/i.test(location.search);
   // ?demo=1&route=simplified|oem shows the machine-readiness phase of that route instead of a running deployment.
+  // ?demo=1&replay=1 plays the demo deployment as a built-in recording (the replay transport bar without a file).
+  var DEMO_REPLAY = DEMO && /(?:^|[?&])replay=(?:1|true|yes)(?:&|$)/i.test(location.search);
+  var REPLAY_SPEEDS = [1, 30, 60, 240];
   var DEMO_ROUTE = (function () {
     if (typeof location === 'undefined') return '';
     var m = /(?:^|[?&])route=(simplified|oem|oem-image)(?:&|$)/i.exec(location.search);
@@ -31,6 +34,7 @@
   // ------------------------------------------------------------------ state
 
   var app = {
+    replay: null,               // replay engine while a recording plays (startReplay); null when live
     config: null,
     state: null,
     guidance: null,
@@ -118,9 +122,14 @@
     if (isNaN(t)) return '';
     try { return new Date(t).toLocaleString(); } catch (e) { return new Date(t).toISOString(); }
   }
+  // "Now" for timers, durations and "last poll": the wall clock when live, the playback position in a replay.
+  var clockSource = null;
+  function setClock(fn) { clockSource = typeof fn === 'function' ? fn : null; }
+  function nowMs() { return clockSource ? clockSource() : Date.now(); }
+
   function fmtAgo(t) {
     if (isNaN(t)) return '';
-    var s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    var s = Math.max(0, Math.round((nowMs() - t) / 1000));
     if (s < 5) return 'just now';
     if (s < 60) return s + ' s ago';
     if (s < 3600) return Math.floor(s / 60) + ' min ago';
@@ -452,6 +461,454 @@
     }[str(src)] || '';
   }
 
+  // ------------------------------------------------------------------ replay (pure; also run by tests under Node)
+  //
+  // A recording is a list of events { t, k, ... } (JSON Lines written by the back end, see Recording.ps1):
+  // session { config, guidance, server }, state { full } or state { ops }, tailer { tailer }, log { lines }, end.
+  // Delta ops: ['s', path, value] sets a key or index (index = length appends), ['d', path] deletes a key,
+  // ['t', path, length] truncates an array. The state at time t is the last keyframe before the last state event at or
+  // before t, plus the deltas after it.
+
+  function cloneJSON(v) { return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); }
+
+  // The ops that turn a into b (same rules as Compare-AzlSonarJsonNode in the back end).
+  function replayDiff(a, b, path, ops) {
+    path = path || [];
+    ops = ops || [];
+    if (JSON.stringify(a) === JSON.stringify(b)) return ops;
+    if (isObj(a) && isObj(b)) {
+      Object.keys(b).forEach(function (k) {
+        if (Object.prototype.hasOwnProperty.call(a, k)) replayDiff(a[k], b[k], path.concat([k]), ops);
+        else ops.push(['s', path.concat([k]), cloneJSON(b[k])]);
+      });
+      Object.keys(a).forEach(function (k) { if (!Object.prototype.hasOwnProperty.call(b, k)) ops.push(['d', path.concat([k])]); });
+      return ops;
+    }
+    if (Array.isArray(a) && Array.isArray(b)) {
+      var common = Math.min(a.length, b.length), i;
+      for (i = 0; i < common; i++) replayDiff(a[i], b[i], path.concat([i]), ops);
+      for (i = common; i < b.length; i++) ops.push(['s', path.concat([i]), cloneJSON(b[i])]);
+      if (a.length > b.length) ops.push(['t', path, b.length]);
+      return ops;
+    }
+    ops.push(['s', path, cloneJSON(b === undefined ? null : b)]);
+    return ops;
+  }
+
+  // Applies ops to root (in place where it can) and returns the result. Values are cloned.
+  function replayApplyOps(root, ops) {
+    arr(ops).forEach(function (op) {
+      if (!Array.isArray(op) || !Array.isArray(op[1])) throw new Error('A delta op is not [op, path, ...].');
+      var kind = op[0], path = op[1];
+      if (!path.length) { if (kind !== 's') throw new Error('Delta op ' + kind + ' needs a path.'); root = cloneJSON(op[2]); return; }
+      var parent = root;
+      for (var i = 0; i < path.length - 1; i++) {
+        parent = parent === null || parent === undefined ? undefined : parent[path[i]];
+        if (parent === null || parent === undefined) throw new Error('Delta op path not found at segment ' + i + '.');
+      }
+      var last = path[path.length - 1];
+      if (kind === 's') {
+        if (Array.isArray(parent) && typeof last === 'number') {
+          while (parent.length < last) parent.push(null);
+          parent[last] = cloneJSON(op[2]);
+        } else parent[last] = cloneJSON(op[2]);
+      } else if (kind === 'd') {
+        if (Array.isArray(parent) && typeof last === 'number') parent.splice(last, 1); else delete parent[last];
+      } else if (kind === 't') {
+        var target = parent[last];
+        if (!Array.isArray(target)) throw new Error('Delta op t (truncate) does not point at an array.');
+        target.length = Math.min(target.length, Number(op[2]) || 0);
+      } else throw new Error('Unknown delta op ' + kind + '.');
+    });
+    return root;
+  }
+
+  // JSON Lines text as events; lines that are not JSON objects are counted, not thrown.
+  function replayParseLines(text) {
+    var events = [], invalid = 0;
+    str(text).split(/\r?\n/).forEach(function (line) {
+      if (!line.trim()) return;
+      try { var e = JSON.parse(line); if (isObj(e)) events.push(e); else invalid++; } catch (err) { invalid++; }
+    });
+    return { events: events, invalid: invalid };
+  }
+
+  function bsearchLast(list, t) {   // index of the last item with item.t <= t, or -1
+    var lo = 0, hi = list.length - 1, ans = -1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1;
+      if (list[mid].t <= t) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return ans;
+  }
+
+  var REPLAY_PHASE_SHORT = { provisioning: 'Provisioning', 'arc-registration': 'Arc registration', validation: 'Validate', deployment: 'Deploy' };
+
+  function treeStartMin(nodes) {
+    var min = NaN;
+    (function walk(list) {
+      arr(list).forEach(function (n) {
+        if (!isObj(n)) return;
+        var a = parseTime(n.start);
+        if (!isNaN(a) && (isNaN(min) || a < min)) min = a;
+        walk(n.children);
+      });
+    })(nodes);
+    return min;
+  }
+
+  // The steps the scrubber marks for Deploy: the top-level steps, or the children of a single top-level step.
+  function mainSteps(tree) {
+    var t = arr(tree).filter(isObj);
+    return t.length === 1 && arr(t[0].children).length ? arr(t[0].children).filter(isObj) : t;
+  }
+
+  function firstError(nodes) {
+    var hit = null;
+    (function walk(list) {
+      arr(list).forEach(function (n) {
+        if (hit || !isObj(n)) return;
+        if (normStatus(n.status) === 'error' && !arr(n.children).some(function (c) { return isObj(c) && normStatus(c.status) === 'error'; })) { hit = n; return; }
+        walk(n.children);
+      });
+    })(nodes);
+    return hit;
+  }
+
+  function phaseOrigin(state, phase, t) {
+    var o = NaN;
+    if (phase === 'validation' || phase === 'deployment') o = treeStartMin(isObj(state[phase]) ? state[phase].tree : null);
+    else if (isObj(state.provisioning)) {
+      arr(state.provisioning.nodes).forEach(function (n) { var a = isObj(n) ? parseTime(n.start) : NaN; if (!isNaN(a) && (isNaN(o) || a < o)) o = a; });
+    }
+    return isNaN(o) || o > t ? t : o;
+  }
+
+  // Normalises recorded events: times in ms (never going back), log lines renumbered 1..n across sessions (each
+  // Sonar start numbers from 1), keyframe indexes, markers. meta: the /api/replay replay object (optional).
+  function replayLoad(events, meta) {
+    var rec = { meta: isObj(meta) ? meta : {}, sessions: [], states: [], lines: [], tailers: [], markers: [], invalid: 0,
+      start: NaN, end: NaN, cache: null, cluster: '' };
+    var lastT = -Infinity, seq = 0, haveFull = false;
+    arr(events).forEach(function (e) {
+      var t = isObj(e) ? parseTime(e.t) : NaN;
+      if (isNaN(t) || typeof e.k !== 'string') { rec.invalid++; return; }
+      if (t < lastT) t = lastT;
+      lastT = t;
+      if (e.k === 'session') {
+        haveFull = false;
+        rec.sessions.push({ t: t, server: str(e.server), version: str(e.version), cluster: str(e.cluster),
+          config: isObj(e.config) ? e.config : null, guidance: isObj(e.guidance) ? e.guidance : null });
+      } else if (e.k === 'state') {
+        if (isObj(e.full)) { haveFull = true; rec.states.push({ t: t, full: e.full }); }
+        else if (Array.isArray(e.ops) && haveFull) rec.states.push({ t: t, ops: e.ops });
+        else { rec.invalid++; return; }
+      } else if (e.k === 'log') {
+        arr(e.lines).forEach(function (l) {
+          if (!isObj(l)) return;
+          var c = {}; Object.keys(l).forEach(function (k) { c[k] = l[k]; });
+          c.seq = ++seq;
+          rec.lines.push({ t: t, line: c });
+        });
+      } else if (e.k === 'tailer') {
+        if (isObj(e.tailer)) rec.tailers.push({ t: t, tailer: e.tailer });
+      } else if (e.k !== 'end') return;
+      if (isNaN(rec.start)) rec.start = t;
+      rec.end = t;
+    });
+    if (!rec.states.length) throw new Error('The recording holds no state snapshots.');
+    var last = rec.sessions[rec.sessions.length - 1];
+    rec.cluster = str(rec.meta.cluster) || (last && (last.cluster || (last.config && (last.config.cluster || last.config.clusterName)))) || '';
+    rec.markers = replayMarkers(rec);
+    return rec;
+  }
+
+  function replayMarkers(rec) {
+    var marks = [], state = null, lastPhase = null, counts = {}, seenSteps = {}, errorRun = null;
+    rec.sessions.forEach(function (s, i) {
+      if (i > 0) marks.push({ kind: 'session', key: 'session:' + i, label: 'Sonar restarted', t: s.t, origin: s.t });
+    });
+    rec.states.forEach(function (ev, idx) {
+      state = ev.full ? cloneJSON(ev.full) : replayApplyOps(state, ev.ops);
+      if (!isObj(state)) return;
+      var ph = normPhase(state.phase), act = str(state.activePhase).toLowerCase() || ph;
+      var cur = ph === 'done' || ph === 'failed' ? ph : act;
+      if (cur !== lastPhase) {
+        counts[cur] = (counts[cur] || 0) + 1;
+        var n = counts[cur] > 1 ? ' (' + counts[cur] + ')' : '';
+        if (REPLAY_PHASE_SHORT[cur]) {
+          marks.push({ kind: 'phase', key: cur + ':' + counts[cur], phase: cur, label: REPLAY_PHASE_SHORT[cur] + n, short: REPLAY_PHASE_SHORT[cur],
+            t: ev.t, origin: phaseOrigin(state, cur, ev.t) });
+        } else if (cur === 'done') {
+          marks.push({ kind: 'end', key: 'done:' + counts[cur], label: 'Succeeded', short: 'Succeeded', t: ev.t, origin: ev.t });
+        } else if (cur === 'failed') {
+          marks.push({ kind: 'error', key: 'failed:' + counts[cur], label: 'Failed: ' + phaseLabel(act), short: 'Failed', t: ev.t, origin: ev.t });
+        }
+        lastPhase = cur;
+        errorRun = null;
+      }
+      var dep = isObj(state.deployment) ? state.deployment.tree : null;
+      mainSteps(dep).forEach(function (n) {
+        var key = 'step:' + str(n.id || n.name);
+        var st = normStatus(n.status);
+        if (seenSteps[key] || st === 'notstarted' || st === 'skipped' || st === 'unknown') return;
+        seenSteps[key] = true;
+        if (st !== 'running' && idx === 0) return;   // finished before the recording started
+        marks.push({ kind: 'step', key: key, label: str(n.name), t: ev.t, origin: ev.t });
+      });
+      ['validation', 'deployment'].forEach(function (sec) {
+        var bad = firstError(isObj(state[sec]) ? state[sec].tree : null);
+        var key = sec + ':' + (counts[sec] || 0);
+        if (bad && errorRun !== key) {
+          errorRun = key;
+          marks.push({ kind: 'error', key: 'error:' + key + ':' + str(bad.id || bad.name), label: 'Failed: ' + str(bad.name), t: ev.t, origin: ev.t });
+        }
+      });
+    });
+    marks.sort(function (a, b) { return a.t - b.t; });
+    return marks;
+  }
+
+  function replayStateIndexAt(rec, t) { return bsearchLast(rec.states, t); }
+
+  // The state at time t (a fresh copy the caller may change), or null before the first state.
+  function replayStateAt(rec, t) {
+    var i = replayStateIndexAt(rec, t);
+    if (i < 0) return null;
+    var c = rec.cache, state, j;
+    if (c && c.index <= i) {
+      state = c.state;
+      for (j = c.index + 1; j <= i; j++) state = rec.states[j].full ? cloneJSON(rec.states[j].full) : replayApplyOps(state, rec.states[j].ops);
+    } else {
+      var k = i;
+      while (k > 0 && !rec.states[k].full) k--;
+      state = cloneJSON(rec.states[k].full);
+      for (j = k + 1; j <= i; j++) state = rec.states[j].full ? cloneJSON(rec.states[j].full) : replayApplyOps(state, rec.states[j].ops);
+    }
+    rec.cache = { index: i, state: state };
+    return cloneJSON(state);
+  }
+
+  function replayLogCountAt(rec, t) { return bsearchLast(rec.lines, t) + 1; }
+  function replayTailerIndexAt(rec, t) { return bsearchLast(rec.tailers, t); }
+
+  // +h:mm:ss (or -h:mm:ss)
+  function fmtOffset(ms) {
+    if (ms === null || ms === undefined || isNaN(ms)) return '';
+    var neg = ms < 0, s = Math.floor(Math.abs(ms) / 1000);
+    return (neg ? '-' : '+') + Math.floor(s / 3600) + ':' + pad(Math.floor((s % 3600) / 60)) + ':' + pad(s % 60);
+  }
+
+  // The readout: "Deploy +1:42:10" (time since the current phase began), or "Recording +0:05:00" before any phase.
+  function replayPosition(rec, t) {
+    var m = null;
+    rec.markers.forEach(function (x) { if ((x.kind === 'phase' || x.kind === 'end') && x.t <= t) m = x; });
+    if (!m) return { label: 'Recording', offset: t - rec.start, text: 'Recording ' + fmtOffset(t - rec.start), marker: null };
+    return { label: m.short || m.label, offset: t - m.origin, text: (m.short || m.label) + ' ' + fmtOffset(t - m.origin), marker: m };
+  }
+
+  // Playback clock: recorded time advances by speed x wall time while playing; it stops at the end.
+  function clockCreate(start, end, speed) {
+    return { start: start, end: end, pos: start, anchor: 0, speed: Number(speed) > 0 ? Number(speed) : 60, playing: false };
+  }
+  function clockNow(c, wall) {
+    if (!c.playing) return c.pos;
+    var t = c.pos + (wall - c.anchor) * c.speed;
+    return t >= c.end ? c.end : t;
+  }
+  function clockPlay(c, wall) {
+    if (c.playing) return c;
+    if (c.pos >= c.end) c.pos = c.start;   // play at the end starts over
+    c.playing = true; c.anchor = wall;
+    return c;
+  }
+  function clockPause(c, wall) { c.pos = clockNow(c, wall); c.playing = false; return c; }
+  function clockSetSpeed(c, speed, wall) {
+    if (!(Number(speed) > 0)) return c;
+    c.pos = clockNow(c, wall); c.anchor = wall; c.speed = Number(speed);
+    return c;
+  }
+  function clockSeek(c, t, wall) {
+    c.pos = Math.max(c.start, Math.min(c.end, Number(t)));
+    c.anchor = wall;
+    return c;
+  }
+  function clockEnded(c, wall) { return clockNow(c, wall) >= c.end; }
+
+  // Scrubber position (0..1) for a time, and the time for a position.
+  function scrubFraction(rec, t) { var d = rec.end - rec.start; return d > 0 ? Math.max(0, Math.min(1, (t - rec.start) / d)) : 0; }
+  function scrubTime(rec, f) { return rec.start + Math.max(0, Math.min(1, Number(f) || 0)) * (rec.end - rec.start); }
+
+  // ------------------------------------------------------------------ demo data (pure; ?demo=1 and its replay)
+
+  function demoFactory(now) {
+    function iso(msAgo) { return new Date(now - msAgo).toISOString(); }
+    function step(id, name, status, startAgo, endAgo, children, errors, description) {
+      var st = startAgo === null ? null : iso(startAgo), en = endAgo === null ? null : iso(endAgo);
+      return { id: id, name: name, description: description || '', status: status, start: st, end: en,
+        durationSeconds: st && en ? (startAgo - endAgo) / 1000 : (st ? startAgo / 1000 : null),
+        errors: errors || [], children: children || [] };
+    }
+    return { iso: iso, step: step, M: 60000 };
+  }
+
+  // The ?demo=1 running deployment: state, config, guidance, tailer, files, log lines and the lines that keep coming.
+  function demoDeploymentSample(now) {
+    var f = demoFactory(now), iso = f.iso, step = f.step, M = f.M;
+    var validation = [
+      step('1', 'Validate deployment prerequisites', 'success', 58 * M, 41 * M, [
+        step('1.1', 'Validate hardware', 'success', 58 * M, 56 * M + 42000),
+        step('1.2', 'Validate network', 'success', 56 * M + 40000, 52 * M + 10000),
+        step('1.3', 'Validate external connectivity', 'success', 52 * M + 8000, 50 * M + 30000),
+        step('1.4', 'Validate storage', 'success', 50 * M + 28000, 47 * M),
+        step('1.5', 'Validate Azure Arc registration', 'success', 46 * M + 58000, 44 * M + 20000),
+        step('1.6', 'Validate memory and processor', 'success', 44 * M + 18000, 41 * M)
+      ])
+    ];
+    var deployment = [
+      step('2', 'Deploy Azure Local', 'running', 36 * M, null, [
+        step('2.1', 'Run pre-deployment checks', 'success', 36 * M, 33 * M + 12000),
+        step('2.2', 'Configure security baseline', 'success', 33 * M + 10000, 29 * M + 52000),
+        step('2.3', 'Deploy Arc infrastructure components', 'success', 29 * M + 50000, 22 * M + 4000),
+        step('2.4', 'Configure network intents', 'skipped', null, null, null, null, 'Already applied by provisioning'),
+        step('2.5', 'Create cluster', 'running', 22 * M, null, [
+          step('2.5.1', 'Install failover clustering features', 'success', 22 * M, 18 * M + 31000),
+          step('2.5.2', 'Configure Storage Spaces Direct', 'running', 18 * M + 29000, null),
+          step('2.5.3', 'Validate cluster', 'notstarted', null, null)
+        ]),
+        step('2.6', 'Deploy Arc resource bridge', 'notstarted', null, null),
+        step('2.7', 'Install Azure Local extensions', 'notstarted', null, null)
+      ])
+    ];
+    var state = {
+      cluster: 'clus01', mode: 'Deploy', provisioningState: 'Succeeded', phase: 'deployment',
+      validation: { status: 'Success', tree: validation, counts: {} },
+      deployment: { status: 'InProgress', tree: deployment, counts: {} },
+      nodes: [
+        { name: 'node01', arcStatus: 'Connected', lastStatusChange: iso(80 * M) },
+        { name: 'node02', arcStatus: 'Connected', lastStatusChange: iso(79 * M) }
+      ],
+      current: { phase: 'deployment', stepPath: ['2', '2.5', '2.5.2'], stepName: 'Configure Storage Spaces Direct' },
+      polledAt: iso(4000)
+    };
+    var config = { cluster: 'clus01', resourceGroup: 'rg-example-azl', identityModel: 'LocalIdentity', pollSeconds: 20,
+      nodes: [{ name: 'node01', seed: true }, { name: 'node02' }], logPaths: ['C:\\CloudDeployment\\Logs', 'C:\\MASLogs'] };
+    var guidance = {
+      identityModel: 'LocalIdentity',
+      phases: {
+        provisioning: { account: 'Local administrator on each node', where: ['C:\\MASLogs'], when: 'After the operating system install finishes', source: 'Sample data (demo mode)', verified: false },
+        validation: { account: 'Deployment user on the seed node', where: ['C:\\CloudDeployment\\Logs'], when: 'From the start of Validate, on the seed node first', source: 'Sample data (demo mode)', verified: false },
+        deployment: { account: 'Deployment user on the seed node', where: ['C:\\CloudDeployment\\Logs', 'C:\\MASLogs'], when: 'Throughout Deploy; files rotate as steps change', source: 'Sample data (demo mode)', verified: false, notes: 'Demo guidance only. The real card reads data/phase-guidance.json through /api/guidance.' }
+      }
+    };
+    var f1 = 'C:\\CloudDeployment\\Logs\\CloudDeployment.2026-10-10.1.log', f2 = 'C:\\MASLogs\\Lcm.log';
+    var seq = 0;
+    function line(msAgo, file, level, text) { return { seq: ++seq, time: iso(msAgo), received: iso(msAgo), timeSource: 'line', file: file, level: level, text: text }; }
+    var lines = [
+      line(46 * M, f2, 'info', 'Validate Azure Arc registration: node01 Connected, node02 Connected.'),
+      line(41 * M, f2, 'info', 'Validation completed: 6 of 6 steps succeeded.'),
+      line(36 * M, f1, 'info', 'Action plan "Deploy" started on node01.'),
+      line(33 * M, f1, 'info', 'Pre-deployment checks passed.'),
+      line(30 * M, f1, 'warning', 'WARNING: Time source on node02 differs from the configured NTP server by 2 s; within tolerance.'),
+      line(22 * M + 4000, f1, 'info', 'Arc infrastructure components deployed.'),
+      line(22 * M, f1, 'info', 'Step "Create cluster" started.'),
+      line(18 * M + 31000, f1, 'info', 'Failover clustering features installed on 2 nodes.'),
+      line(18 * M + 29000, f1, 'info', 'Step "Configure Storage Spaces Direct" started.'),
+      line(15 * M, f1, 'info', 'Enabling Storage Spaces Direct on cluster clus01.'),
+      line(12 * M, f1, 'error', 'Attempt 1 failed: Get-PhysicalDisk timed out on node02. Retrying in 30 s (transient).'),
+      line(11 * M + 30000, f1, 'info', 'Attempt 2: physical disk inventory complete, 8 eligible disks.'),
+      line(6 * M, f1, 'warning', 'Warning: cache device count differs between nodes; using capacity-only tier.'),
+      line(2 * M, f1, 'info', 'Creating storage pool "SU1_Pool".')
+    ];
+    var msgs = [
+      ['info', 'Storage pool health: Healthy.'],
+      ['info', 'Waiting for virtual disk "Infrastructure_1" to come online.'],
+      ['warning', 'Warning: storage job progress unchanged for 60 s; continuing to wait.'],
+      ['info', 'Storage job progress 42%.'],
+      ['info', 'Storage job progress 57%.'],
+      ['error', 'Retryable error: cluster resource "Infrastructure_1" is pending; will retry.'],
+      ['info', 'Storage job progress 71%.']
+    ];
+    return { state: state, config: config, guidance: guidance, tailer: { state: 'connected', reason: '', node: 'node01' },
+      files: [{ path: f1, size: 0, offset: 0 }, { path: f2, size: 0, offset: 0 }], lines: lines, msgs: msgs, file: f1 };
+  }
+
+  // A step tree as it stood at time T: steps not started yet are 'notstarted', unfinished ones 'running'.
+  function demoSliceTree(nodes, T, parentStarted) {
+    return arr(nodes).map(function (n) {
+      var c = {};
+      Object.keys(n).forEach(function (k) { c[k] = n[k]; });
+      var a = parseTime(n.start), b = parseTime(n.end), started = !isNaN(a) && a <= T;
+      if (isNaN(a)) c.status = normStatus(n.status) === 'skipped' && parentStarted ? n.status : 'notstarted';
+      else if (!started) { c.status = 'notstarted'; c.start = null; c.end = null; c.durationSeconds = null; }
+      else if (isNaN(b) || b > T) { c.status = 'running'; c.end = null; c.durationSeconds = Math.round((T - a) / 1000); }
+      c.children = demoSliceTree(n.children, T, started);
+      c.errors = arr(n.errors).slice();
+      return c;
+    });
+  }
+
+  function runningPath(nodes) {
+    var best = [];
+    (function walk(list, path) {
+      arr(list).forEach(function (n) {
+        if (!isObj(n) || normStatus(n.status) !== 'running') return;
+        var here = path.concat([n]);
+        if (here.length > best.length) best = here;
+        walk(n.children, here);
+      });
+    })(nodes, []);
+    return best;
+  }
+
+  // ?demo=1&replay=1: the demo deployment as a built-in recording (64 minutes, a poll every 20 s): Arc registration,
+  // Validate, Deploy, the log lines at their times. Built with replayDiff, so it is a real keyframe + delta recording.
+  function demoRecording(now) {
+    var d = demoDeploymentSample(now), M = 60000, final = d.state;
+    var start = now - 64 * M, valStart = now - 58 * M, depStart = now - 36 * M;
+    function at(T) { return new Date(T).toISOString(); }
+    function stateAt(T) {
+      var vs = T >= valStart, ds = T >= depStart;
+      var val = demoSliceTree(final.validation.tree, T, true), dep = demoSliceTree(final.deployment.tree, T, true);
+      var valDone = vs && val.every(function (n) { return normStatus(n.status) === 'success'; });
+      var phase = ds ? 'deployment' : vs ? 'validation' : 'arc-registration';
+      var path = runningPath(ds ? dep : vs ? val : []);
+      return {
+        cluster: final.cluster, mode: ds ? 'Deploy' : vs ? 'Validate' : null, provisioningState: ds ? 'Succeeded' : vs ? 'Accepted' : null,
+        phase: phase, activePhase: phase,
+        validation: { status: vs ? (valDone ? 'Success' : 'InProgress') : 'notstarted', tree: vs ? val : [], counts: {} },
+        deployment: { status: ds ? 'InProgress' : 'notstarted', tree: ds ? dep : [], counts: {} },
+        nodes: cloneJSON(final.nodes),
+        current: { phase: phase, stepPath: path.map(function (n) { return n.id; }), stepName: path.length ? path[path.length - 1].name : null },
+        polledAt: at(T)
+      };
+    }
+    var events = [{ t: at(start), k: 'session', format: 1, tool: 'AzL Sonar', version: 'demo', server: 'demo', cluster: final.cluster,
+      config: d.config, guidance: d.guidance }];
+    events.push({ t: at(start + 500), k: 'tailer', tailer: d.tailer });
+    var prev = null, deltas = 0;
+    for (var T = start + 1000; ; T = Math.min(now, T + 20000)) {
+      var s = stateAt(T);
+      if (!prev || deltas >= 30) { events.push({ t: at(T), k: 'state', full: s }); deltas = 0; }
+      else {
+        var ops = replayDiff(prev, s);
+        if (ops.length) { events.push({ t: at(T), k: 'state', ops: ops }); deltas++; }
+      }
+      prev = s;
+      if (T >= now) break;
+    }
+    var lines = d.lines.slice(), mi = 0;
+    for (var L = now - 17 * M; L < now; L += 75000) {
+      var m = d.msgs[mi++ % d.msgs.length];
+      lines.push({ time: at(L), received: at(L), timeSource: 'line', file: d.file, level: m[0], text: m[1] });
+    }
+    lines.forEach(function (l) { events.push({ t: l.received, k: 'log', lines: [l] }); });
+    events.push({ t: at(now), k: 'end' });
+    var order = events.map(function (e, i) { return { e: e, i: i, t: Date.parse(e.t) }; });
+    order.sort(function (a, b) { return a.t - b.t || a.i - b.i; });
+    return order.map(function (x) { return x.e; });
+  }
+
   app.store = createLogStore(MAX_STORED_LINES);
 
   if (typeof module === 'object' && module && module.exports && typeof document === 'undefined') {
@@ -463,7 +920,14 @@
       normStatus: normStatus, phaseLabel: phaseLabel, phaseChipText: phaseChipText, provisioningTreeOf: provisioningTreeOf,
       provisioningSummary: provisioningSummary, provisioningCollapse: provisioningCollapse, arcSourceText: arcSourceText,
       lifecycleLabel: lifecycleLabel, stepGroupOf: stepGroupOf, probeNote: probeNote, extensionsTreeOf: extensionsTreeOf,
-      readyForValidate: readyForValidate
+      readyForValidate: readyForValidate,
+      replayDiff: replayDiff, replayApplyOps: replayApplyOps, replayParseLines: replayParseLines, replayLoad: replayLoad,
+      replayStateIndexAt: replayStateIndexAt, replayStateAt: replayStateAt, replayLogCountAt: replayLogCountAt,
+      replayTailerIndexAt: replayTailerIndexAt, replayPosition: replayPosition, fmtOffset: fmtOffset, mainSteps: mainSteps,
+      clockCreate: clockCreate, clockNow: clockNow, clockPlay: clockPlay, clockPause: clockPause, clockSetSpeed: clockSetSpeed,
+      clockSeek: clockSeek, clockEnded: clockEnded, scrubFraction: scrubFraction, scrubTime: scrubTime,
+      demoDeploymentSample: demoDeploymentSample, demoRecording: demoRecording, setClock: setClock, nowMs: nowMs,
+      nodeDuration: nodeDuration
     };
     return;
   }
@@ -598,9 +1062,10 @@
     var node = $('conn');
     node.setAttribute('data-conn', c);
     node.title = { live: 'Live updates over Server-Sent Events', polling: 'Live stream unavailable: polling /api/state and /api/logs every 5 s while it reconnects',
-      offline: 'The Sonar back end is not answering; retrying', connecting: 'Connecting to the Sonar back end', demo: 'Demo mode: built-in sample data, no API calls' }[c] || '';
+      offline: 'The Sonar back end is not answering; retrying', connecting: 'Connecting to the Sonar back end', demo: 'Demo mode: built-in sample data, no API calls',
+      replay: 'Replay of a recording: nothing here is live; no Azure or node access' }[c] || '';
     $('conn-label').textContent = { live: 'Live', polling: 'Polling', offline: 'Offline, retrying',
-      connecting: 'Connecting', demo: 'Demo' }[c] || c;
+      connecting: 'Connecting', demo: 'Demo', replay: 'Replay (not live)' }[c] || c;
   }
 
   function connectSSE() {
@@ -689,7 +1154,8 @@
     var prev = app.config;
     app.config = c;
     renderHeader();
-    if (!prev || DEMO) return;
+    renderRecording();
+    if (!prev || DEMO || app.replay) return;
     // A new serverId (or, from older back ends, a new startedAt) means the back end restarted.
     var restarted;
     if (c.serverId) {
@@ -711,7 +1177,7 @@
     if (c.identityModel) meta.push(c.identityModel);
     if (s.provisioningState) meta.push('ARM ' + s.provisioningState);
     $('cluster-meta').textContent = meta.join(' \u00b7 ');
-    document.title = (name !== 'Unknown cluster' ? name + ' \u2013 ' : '') + 'AzL Sonar';
+    document.title = (app.replay ? 'Replay \u2013 ' : '') + (name !== 'Unknown cluster' ? name + ' \u2013 ' : '') + 'AzL Sonar';
 
     var phase = app.state ? normPhase(s.phase) : 'unknown';
     var chip = $('phase-chip');
@@ -811,7 +1277,7 @@
     var e = $('elapsed');
     if (!r) { e.textContent = '\u2014'; e.removeAttribute('title'); }
     else {
-      var end = r.end === null ? Date.now() : r.end;
+      var end = r.end === null ? nowMs() : r.end;
       e.textContent = fmtDuration((end - r.start) / 1000) || '0s';
       e.title = 'Since ' + fmtDateTime(r.start);
     }
@@ -821,7 +1287,7 @@
     lp.textContent = fmtAgo(t);
     lp.title = fmtDateTime(t);
     var pollS = Number(app.config && app.config.pollSeconds) || 20;
-    lp.setAttribute('data-stale', String(Date.now() - t > Math.max(60, pollS * 3) * 1000));
+    lp.setAttribute('data-stale', String(nowMs() - t > Math.max(60, pollS * 3) * 1000));
   }
 
   function renderNodes() {
@@ -1012,7 +1478,7 @@
 
   function nodeDuration(n) {
     var st = normStatus(n.status), a = parseTime(n.start), b = parseTime(n.end);
-    if (st === 'running' && !isNaN(a)) return (Date.now() - a) / 1000;
+    if (st === 'running' && !isNaN(a)) return (nowMs() - a) / 1000;
     if (typeof n.durationSeconds === 'number' && n.durationSeconds >= 0) return n.durationSeconds;
     if (!isNaN(a) && !isNaN(b)) return (b - a) / 1000;
     return null;
@@ -1436,7 +1902,7 @@
   }
 
   function tickTimers() {
-    var now = Date.now();
+    var now = nowMs();
     var nodes = document.querySelectorAll('.dur[data-start]');
     for (var i = 0; i < nodes.length; i++) {
       var a = Number(nodes[i].getAttribute('data-start'));
@@ -1955,6 +2421,7 @@
       }
     });
 
+    wireReplay();
     setInterval(function () { tickTimers(); tickHeader(); }, 1000);
   }
 
@@ -1966,9 +2433,239 @@
     if (DEMO) { startDemo(); return; }
     setConn('connecting');
     Promise.allSettled([loadConfig(), loadGuidance(), loadState(), loadLogs()]).then(function (res) {
+      if (isObj(app.config) && isObj(app.config.replay)) { loadReplay(); return; }   // Start-AzlSonar.ps1 -Replay
       var ok = res.some(function (r) { return r.status === 'fulfilled'; });
       if (!ok) setConn('offline');
       connectSSE();
+    });
+  }
+
+  // ------------------------------------------------------------------ replay (Start-AzlSonar.ps1 -Replay, or ?demo=1&replay=1)
+  //
+  // The whole recording is loaded once (/api/replay); the page rebuilds the state, the tailer status and the log lines
+  // at the playback position and renders them through the same functions as live data. Nothing is polled or streamed.
+
+  // Live, recording (-Record): a small pill in the header says so.
+  function renderRecording() {
+    var pill = $('rec-pill');
+    if (!pill) return;
+    var r = isObj(app.config) && isObj(app.config.recording) && !app.replay ? app.config.recording : null;
+    pill.hidden = !r;
+    if (r) pill.title = 'Recording this run to ' + str(r.file) + ' (masked). Replay it with Start-AzlSonar.ps1 -Replay.';
+  }
+
+  function loadReplay() {
+    setConn('replay');
+    return getJSON('/api/replay').then(function (b) {
+      if (!isObj(b) || !Array.isArray(b.events)) throw new Error('/api/replay returned no events');
+      setError('replay', null);
+      startReplay(b.events, b.replay, app.config, app.guidance, false);
+    }).catch(function (e) { setError('replay', 'Could not load the recording: ' + e.message); });
+  }
+
+  function fmtRecorded(t) {
+    if (isNaN(t)) return '';
+    try { return new Date(t).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+    catch (e) { return new Date(t).toISOString(); }
+  }
+
+  function startReplay(events, meta, config, guidance, demo) {
+    var rec;
+    try { rec = replayLoad(events, meta); } catch (e) { setError('replay', 'The recording cannot be played: ' + e.message); return; }
+    var r = app.replay = { rec: rec, clock: clockCreate(rec.start, rec.end, rec.meta.speed), stateIdx: -2, logCount: -1, tailerIdx: -2,
+      dragging: false, needsSync: false, demo: !!demo, timer: null };
+    setClock(function () { return clockNow(r.clock, Date.now()); });
+    document.body.classList.add('is-replay');
+    setConn('replay');
+    if (es) { es.close(); es = null; }
+    clearTimeout(sseTimer);
+    stopPolling();
+    var session = rec.sessions[rec.sessions.length - 1] || {};
+    app.config = null;   // a replay never detects back-end restarts
+    applyConfig(isObj(config) ? config : (session.config || { cluster: rec.cluster }));
+    app.guidance = isObj(guidance) && Object.keys(guidance).length ? guidance : session.guidance;
+    renderGuidance();
+    app.logGen++;
+    logStoreReset(app.store, 'replay');
+    buildReplayBar();
+    var startAt = parseTime(rec.meta.startAt);
+    if (rec.meta.startAtPhase) {
+      var m = rec.markers.filter(function (x) { return x.phase === rec.meta.startAtPhase; })[0];
+      if (m) startAt = m.t;
+      else setError('replay', 'The recording has no ' + phaseLabel(rec.meta.startAtPhase) + ' phase; starting at the beginning.');
+    }
+    if (!isNaN(startAt)) clockSeek(r.clock, startAt, Date.now());
+    replaySync();
+    if (rec.meta.autoplay) clockPlay(r.clock, Date.now());
+    renderReplayBar();
+    r.timer = setInterval(replayTick, 200);
+    if (rec.invalid) setError('replay-invalid', rec.invalid + ' event(s) of the recording could not be read and were skipped.');
+    announce('Replay of ' + (rec.cluster || 'the cluster') + ' loaded. Nothing on this page is live.');
+  }
+
+  // Brings the page to the playback position: state, log lines, tailer status, timers.
+  function replaySync() {
+    var r = app.replay;
+    if (!r) return;
+    var rec = r.rec, T = clockNow(r.clock, Date.now());
+    var si = Math.max(0, replayStateIndexAt(rec, T));
+    if (si !== r.stateIdx) {
+      r.stateIdx = si;
+      applyState(replayStateAt(rec, rec.states[si].t));
+    }
+    var lc = replayLogCountAt(rec, T);
+    if (lc !== r.logCount) {
+      var take = function (from, to) { return rec.lines.slice(from, to).map(function (x) { return x.line; }); };
+      if (r.logCount >= 0 && lc > r.logCount && lc - r.logCount <= 1500) {
+        applyLogBatch(take(r.logCount, lc), { server: 'replay', source: 'live' });   // forward: lines arrive as if live
+      } else {
+        app.logGen++;   // backward or a long jump: rebuild the log pane at the position
+        logStoreReset(app.store, 'replay');
+        logStoreIngest(app.store, take(Math.max(0, lc - MAX_STORED_LINES), lc), { server: 'replay', source: 'live' });
+        recount();
+        renderCounts();
+        renderFileOptions();
+        rerenderLogs();
+      }
+      r.logCount = lc;
+    }
+    var ti = replayTailerIndexAt(rec, T);
+    if (ti !== r.tailerIdx) {
+      r.tailerIdx = ti;
+      applyTailer(ti >= 0 ? rec.tailers[ti].tailer : { state: 'unknown', reason: '' });
+    }
+    tickTimers();
+    tickHeader();
+  }
+
+  function replayTick() {
+    var r = app.replay;
+    if (!r) return;
+    if (r.clock.playing || r.needsSync) {
+      r.needsSync = false;
+      replaySync();
+      if (r.clock.playing && clockEnded(r.clock, Date.now())) {
+        clockPause(r.clock, Date.now());
+        announce('The replay reached the end of the recording.');
+      }
+    }
+    renderReplayBar();
+  }
+
+  // immediate: rebuild now (a click); otherwise on the next tick (dragging the scrubber).
+  function replaySeek(t, immediate) {
+    var r = app.replay;
+    if (!r) return;
+    clockSeek(r.clock, t, Date.now());
+    if (immediate) replaySync(); else r.needsSync = true;
+    renderReplayBar();
+  }
+
+  function replayToggle() {
+    var r = app.replay;
+    if (!r) return;
+    var now = Date.now();
+    if (r.clock.playing) clockPause(r.clock, now);
+    else { clockPlay(r.clock, now); replaySync(); }
+    renderReplayBar();
+    announce(r.clock.playing ? 'Playing at ' + r.clock.speed + ' times speed.' : 'Paused.');
+  }
+
+  function buildReplayBar() {
+    var r = app.replay, rec = r.rec;
+    $('replay-bar').hidden = false;
+    $('replay-badge').hidden = false;
+    $('demo-badge').hidden = !r.demo;
+    $('export-btn').hidden = true;
+    $('log-title').textContent = 'Logs (replay)';
+    $('replay-title').textContent = 'Replay of ' + (rec.cluster || 'the cluster') + ' · recorded ' + fmtRecorded(rec.start) + (r.demo ? ' (demo data)' : '');
+    $('replay-title').title = (rec.meta.file ? 'Recording ' + rec.meta.file + '. ' : '') + 'Recorded ' + fmtDateTime(rec.start) + ' to ' +
+      fmtDateTime(rec.end) + '. Nothing on this page is live.';
+    var scrub = $('rp-scrub');
+    scrub.min = '0';
+    scrub.max = String(Math.max(1, Math.round((rec.end - rec.start) / 1000)));
+    scrub.step = '1';
+    var speeds = REPLAY_SPEEDS.slice();
+    if (speeds.indexOf(r.clock.speed) < 0) { speeds.push(r.clock.speed); speeds.sort(function (a, b) { return a - b; }); }
+    var host = $('rp-speed');
+    host.textContent = '';
+    speeds.forEach(function (s) {
+      host.appendChild(el('button', { type: 'button', 'data-speed': String(s), 'aria-pressed': 'false', title: s + ' recorded second' + (s === 1 ? '' : 's') + ' per second', text: s + '×' }));
+    });
+    var mk = $('rp-markers'), jump = $('rp-jump');
+    mk.textContent = '';
+    jump.textContent = '';
+    jump.appendChild(el('option', { value: '', text: 'Jump to…' }));
+    rec.markers.forEach(function (m, i) {
+      var into = fmtOffset(m.t - rec.start);
+      var pct = scrubFraction(rec, m.t) * 100;
+      var b = el('button', { type: 'button', class: 'rp-mark', 'data-kind': m.kind, 'data-i': String(i), 'data-edge': pct < 7 ? 'start' : pct > 93 ? 'end' : null,
+        style: 'left:' + pct.toFixed(3) + '%',
+        title: m.label + ' (' + into + ' into the recording)', 'aria-label': 'Jump to ' + m.label + ', ' + into + ' into the recording' });
+      if (m.kind === 'phase' || m.kind === 'end') b.appendChild(el('span', { class: 'rp-mark-label', text: m.short || m.label }));
+      mk.appendChild(b);
+      jump.appendChild(el('option', { value: String(i), text: into + '  ' + m.label }));
+    });
+    jump.disabled = !rec.markers.length;
+  }
+
+  function renderReplayBar() {
+    var r = app.replay;
+    if (!r) return;
+    var rec = r.rec, wall = Date.now(), T = clockNow(r.clock, wall), playing = r.clock.playing;
+    var play = $('rp-play');
+    play.setAttribute('data-playing', String(playing));
+    play.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+    $('rp-play-label').textContent = playing ? 'Pause' : (clockEnded(r.clock, wall) ? 'Play again' : 'Play');
+    Array.prototype.forEach.call($('rp-speed').querySelectorAll('button'), function (b) {
+      b.setAttribute('aria-pressed', String(Number(b.getAttribute('data-speed')) === r.clock.speed));
+    });
+    var pos = replayPosition(rec, T);
+    var scrub = $('rp-scrub');
+    if (!r.dragging) scrub.value = String(Math.round((T - rec.start) / 1000));
+    scrub.setAttribute('aria-valuetext', pos.text + ', ' + fmtDateTime(T));
+    $('rp-pos').textContent = pos.text;
+    $('rp-clock').textContent = fmtDateTime(T) + ' · ' + fmtOffset(T - rec.start).slice(1) + ' of ' + fmtOffset(rec.end - rec.start).slice(1);
+  }
+
+  function wireReplay() {
+    $('rp-play').addEventListener('click', replayToggle);
+    $('rp-speed').addEventListener('click', function (e) {
+      var b = e.target.closest('button[data-speed]');
+      if (!b || !app.replay) return;
+      clockSetSpeed(app.replay.clock, Number(b.getAttribute('data-speed')), Date.now());
+      renderReplayBar();
+    });
+    var scrub = $('rp-scrub');
+    scrub.addEventListener('input', function () {
+      if (!app.replay) return;
+      app.replay.dragging = true;
+      replaySeek(app.replay.rec.start + Number(scrub.value) * 1000, false);
+    });
+    scrub.addEventListener('change', function () {
+      if (!app.replay) return;
+      app.replay.dragging = false;
+      replaySeek(app.replay.rec.start + Number(scrub.value) * 1000, true);
+    });
+    $('rp-markers').addEventListener('click', function (e) {
+      var b = e.target.closest('.rp-mark');
+      if (!b || !app.replay) return;
+      var m = app.replay.rec.markers[Number(b.getAttribute('data-i'))];
+      if (m) { replaySeek(m.t, true); announce('Jumped to ' + m.label + '.'); }
+    });
+    $('rp-jump').addEventListener('change', function (e) {
+      var i = e.target.value;
+      e.target.value = '';
+      if (i === '' || !app.replay) return;
+      var m = app.replay.rec.markers[Number(i)];
+      if (m) { replaySeek(m.t, true); announce('Jumped to ' + m.label + '.'); }
+    });
+    // Space plays or pauses when nothing else has the focus (the step tree and buttons keep their own Space).
+    document.addEventListener('keydown', function (e) {
+      if (!app.replay || e.key !== ' ' || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.target !== document.body && e.target !== document.documentElement) return;
+      e.preventDefault();
+      replayToggle();
     });
   }
 
@@ -1976,99 +2673,26 @@
 
   function startDemo() {
     $('demo-badge').hidden = false;
-    setConn('demo');
     var now = Date.now();
-    function iso(msAgo) { return new Date(now - msAgo).toISOString(); }
-    function step(id, name, status, startAgo, endAgo, children, errors, description) {
-      var st = startAgo === null ? null : iso(startAgo), en = endAgo === null ? null : iso(endAgo);
-      return { id: id, name: name, description: description || '', status: status, start: st, end: en,
-        durationSeconds: st && en ? (startAgo - endAgo) / 1000 : (st ? startAgo / 1000 : null),
-        errors: errors || [], children: children || [] };
+    if (DEMO_REPLAY) {
+      startReplay(demoRecording(now), { cluster: 'clus01', file: 'built-in demo recording', speed: 60 }, null, null, true);
+      return;
     }
-    var M = 60000;
-    if (DEMO_ROUTE) { startRouteDemo(DEMO_ROUTE, iso, step, M); return; }
-    var validation = [
-      step('1', 'Validate deployment prerequisites', 'success', 58 * M, 41 * M, [
-        step('1.1', 'Validate hardware', 'success', 58 * M, 56 * M + 42000),
-        step('1.2', 'Validate network', 'success', 56 * M + 40000, 52 * M + 10000),
-        step('1.3', 'Validate external connectivity', 'success', 52 * M + 8000, 50 * M + 30000),
-        step('1.4', 'Validate storage', 'success', 50 * M + 28000, 47 * M),
-        step('1.5', 'Validate Azure Arc registration', 'success', 46 * M + 58000, 44 * M + 20000),
-        step('1.6', 'Validate memory and processor', 'success', 44 * M + 18000, 41 * M)
-      ])
-    ];
-    var deployment = [
-      step('2', 'Deploy Azure Local', 'running', 36 * M, null, [
-        step('2.1', 'Run pre-deployment checks', 'success', 36 * M, 33 * M + 12000),
-        step('2.2', 'Configure security baseline', 'success', 33 * M + 10000, 29 * M + 52000),
-        step('2.3', 'Deploy Arc infrastructure components', 'success', 29 * M + 50000, 22 * M + 4000),
-        step('2.4', 'Configure network intents', 'skipped', null, null, null, null, 'Already applied by provisioning'),
-        step('2.5', 'Create cluster', 'running', 22 * M, null, [
-          step('2.5.1', 'Install failover clustering features', 'success', 22 * M, 18 * M + 31000),
-          step('2.5.2', 'Configure Storage Spaces Direct', 'running', 18 * M + 29000, null),
-          step('2.5.3', 'Validate cluster', 'notstarted', null, null)
-        ]),
-        step('2.6', 'Deploy Arc resource bridge', 'notstarted', null, null),
-        step('2.7', 'Install Azure Local extensions', 'notstarted', null, null)
-      ])
-    ];
-    var state = {
-      cluster: 'clus01', mode: 'Deploy', provisioningState: 'Succeeded', phase: 'deployment',
-      validation: { status: 'Success', tree: validation, counts: {} },
-      deployment: { status: 'InProgress', tree: deployment, counts: {} },
-      nodes: [
-        { name: 'node01', arcStatus: 'Connected', lastStatusChange: iso(80 * M) },
-        { name: 'node02', arcStatus: 'Connected', lastStatusChange: iso(79 * M) }
-      ],
-      current: { phase: 'deployment', stepPath: ['2', '2.5', '2.5.2'], stepName: 'Configure Storage Spaces Direct' },
-      polledAt: iso(4000)
-    };
-    applyConfig({ cluster: 'clus01', resourceGroup: 'rg-example-azl', identityModel: 'LocalIdentity', pollSeconds: 20,
-      nodes: [{ name: 'node01', seed: true }, { name: 'node02' }], logPaths: ['C:\\CloudDeployment\\Logs', 'C:\\MASLogs'] });
-    app.guidance = {
-      identityModel: 'LocalIdentity',
-      phases: {
-        provisioning: { account: 'Local administrator on each node', where: ['C:\\MASLogs'], when: 'After the operating system install finishes', source: 'Sample data (demo mode)', verified: false },
-        validation: { account: 'Deployment user on the seed node', where: ['C:\\CloudDeployment\\Logs'], when: 'From the start of Validate, on the seed node first', source: 'Sample data (demo mode)', verified: false },
-        deployment: { account: 'Deployment user on the seed node', where: ['C:\\CloudDeployment\\Logs', 'C:\\MASLogs'], when: 'Throughout Deploy; files rotate as steps change', source: 'Sample data (demo mode)', verified: false, notes: 'Demo guidance only. The real card reads data/phase-guidance.json through /api/guidance.' }
-      }
-    };
+    setConn('demo');
+    var f = demoFactory(now);
+    if (DEMO_ROUTE) { startRouteDemo(DEMO_ROUTE, f.iso, f.step, f.M); return; }
+    var d = demoDeploymentSample(now), state = d.state;
+    applyConfig(d.config);
+    app.guidance = d.guidance;
     applyState(state);
-    applyTailer({ state: 'connected', reason: '', node: 'node01' });
-    var f1 = 'C:\\CloudDeployment\\Logs\\CloudDeployment.2026-10-10.1.log', f2 = 'C:\\MASLogs\\Lcm.log';
-    applyFiles([{ path: f1, size: 0, offset: 0 }, { path: f2, size: 0, offset: 0 }]);
-    var seq = 0;
-    function line(msAgo, file, level, text) { return { seq: ++seq, time: iso(msAgo), received: iso(msAgo), timeSource: 'line', file: file, level: level, text: text }; }
-    applyLogBatch([
-      line(46 * M, f2, 'info', 'Validate Azure Arc registration: node01 Connected, node02 Connected.'),
-      line(41 * M, f2, 'info', 'Validation completed: 6 of 6 steps succeeded.'),
-      line(36 * M, f1, 'info', 'Action plan "Deploy" started on node01.'),
-      line(33 * M, f1, 'info', 'Pre-deployment checks passed.'),
-      line(30 * M, f1, 'warning', 'WARNING: Time source on node02 differs from the configured NTP server by 2 s; within tolerance.'),
-      line(22 * M + 4000, f1, 'info', 'Arc infrastructure components deployed.'),
-      line(22 * M, f1, 'info', 'Step "Create cluster" started.'),
-      line(18 * M + 31000, f1, 'info', 'Failover clustering features installed on 2 nodes.'),
-      line(18 * M + 29000, f1, 'info', 'Step "Configure Storage Spaces Direct" started.'),
-      line(15 * M, f1, 'info', 'Enabling Storage Spaces Direct on cluster clus01.'),
-      line(12 * M, f1, 'error', 'Attempt 1 failed: Get-PhysicalDisk timed out on node02. Retrying in 30 s (transient).'),
-      line(11 * M + 30000, f1, 'info', 'Attempt 2: physical disk inventory complete, 8 eligible disks.'),
-      line(6 * M, f1, 'warning', 'Warning: cache device count differs between nodes; using capacity-only tier.'),
-      line(2 * M, f1, 'info', 'Creating storage pool "SU1_Pool".')
-    ], { source: 'live' });
-    var msgs = [
-      ['info', 'Storage pool health: Healthy.'],
-      ['info', 'Waiting for virtual disk "Infrastructure_1" to come online.'],
-      ['warning', 'Warning: storage job progress unchanged for 60 s; continuing to wait.'],
-      ['info', 'Storage job progress 42%.'],
-      ['info', 'Storage job progress 57%.'],
-      ['error', 'Retryable error: cluster resource "Infrastructure_1" is pending; will retry.'],
-      ['info', 'Storage job progress 71%.']
-    ];
-    var mi = 0;
+    applyTailer(d.tailer);
+    applyFiles(d.files);
+    applyLogBatch(d.lines, { source: 'live' });
+    var seq = d.lines.length, mi = 0;
     setInterval(function () {
-      var m = msgs[mi++ % msgs.length];
+      var m = d.msgs[mi++ % d.msgs.length];
       var nowIso = new Date().toISOString();
-      applyLogBatch([{ seq: ++seq, time: nowIso, received: nowIso, timeSource: 'line', file: f1, level: m[0], text: m[1] }], { source: 'live' });
+      applyLogBatch([{ seq: ++seq, time: nowIso, received: nowIso, timeSource: 'line', file: d.file, level: m[0], text: m[1] }], { source: 'live' });
     }, 2500);
     setInterval(function () {
       state.polledAt = new Date().toISOString();

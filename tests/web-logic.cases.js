@@ -376,4 +376,220 @@ test('extensionsTreeOf: the mandatory extensions appear only once the back end s
   eq(tree[0].children[0].name, 'AzureEdgeDeviceManagement');
 });
 
+// ---------------------------------------------------------------- record and replay (S-11)
+
+var fs = require('fs');
+var pathMod = require('path');
+var FIXTURE = pathMod.join(__dirname, 'fixtures', 'recording-sample.jsonl');
+function T(hms) { return Date.parse('2026-10-11T' + hms + 'Z'); }
+function sample() { return m.replayLoad(m.replayParseLines(fs.readFileSync(FIXTURE, 'utf8')).events, {}); }
+// Key order does not matter for a state: compare with sorted keys.
+function canon(v) {
+  if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
+  if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map(function (k) { return JSON.stringify(k) + ':' + canon(v[k]); }).join(',') + '}';
+  return JSON.stringify(v);
+}
+// The state at t the slow way: every state event from the start, keyframes replacing, deltas applied.
+function naiveStateAt(rec, t) {
+  var s = null;
+  rec.states.forEach(function (e) { if (e.t <= t) s = e.full ? JSON.parse(JSON.stringify(e.full)) : m.replayApplyOps(s, e.ops); });
+  return s;
+}
+
+test('replay: the sample recording loads (two sessions, keyframes and deltas, renumbered log lines)', function () {
+  var rec = sample();
+  eq(rec.sessions.length, 2);
+  eq(rec.start, T('08:00:00'));
+  eq(rec.end, T('09:06:00'));
+  eq(rec.cluster, 'clus01');
+  eq(rec.states.filter(function (s) { return s.full; }).length > 1, true, 'a keyframe after the first');
+  eq(rec.states.some(function (s) { return s.ops; }), true, 'deltas');
+  eq(rec.lines.map(function (l) { return l.line.seq; }), [1, 2, 3, 4, 5, 6, 7, 8, 9], 'each session numbers from 1; the replay numbers across sessions');
+  eq(rec.invalid, 0);
+});
+
+test('replay: the state at a time is the keyframe plus the deltas up to that time', function () {
+  var rec = sample();
+  eq(m.replayStateAt(rec, T('07:59:00')), null, 'before the first state');
+  var s = m.replayStateAt(rec, T('08:03:00'));
+  eq([s.phase, s.polledAt, s.provisioning.status], ['arc-registration', '2026-10-11T08:00:21Z', 'running']);
+  s = m.replayStateAt(rec, T('08:07:00'));
+  eq([s.provisioning.status, s.provisioning.readyForValidate], ['success', true]);
+  s = m.replayStateAt(rec, T('08:11:00'));
+  eq([s.phase, s.validation.tree[0].status, s.validation.tree.length], ['validation', 'running', 2], 'after the restart (keyframe of session 2)');
+  s = m.replayStateAt(rec, T('08:13:00'));
+  eq([s.validation.tree[0].status, s.validation.tree[1].status, s.current.stepName], ['success', 'running', 'Validate Hardware']);
+  s = m.replayStateAt(rec, T('08:35:00'));
+  eq([s.phase, s.deployment.tree[0].status, s.deployment.tree[1].status, s.deployment.tree[2].status], ['deployment', 'success', 'running', 'notstarted']);
+  s = m.replayStateAt(rec, T('08:52:00'));
+  eq([s.phase, s.deployment.tree[2].status], ['failed', 'error']);
+  eq(s.deployment.tree[2].errors[0].indexOf('***') > 0, true, 'the recorded error text is masked');
+  s = m.replayStateAt(rec, T('08:56:00'));
+  eq([s.phase, s.deployment.tree[2].status, s.deployment.tree[2].errors], ['deployment', 'running', []], 'retry: the error is gone');
+  s = m.replayStateAt(rec, T('09:59:00'));
+  eq(s.phase, 'done', 'after the end: the last state');
+});
+
+test('replay: seeking forward, backward and to every recorded time matches applying every event from the start', function () {
+  var rec = sample(), times = rec.states.map(function (e) { return e.t; });
+  var order = times.concat(times.slice().reverse()).concat([times[5], times[1], times[times.length - 1], times[2]]);
+  order.forEach(function (t) {
+    eq(canon(m.replayStateAt(rec, t)), canon(naiveStateAt(rec, t)), 'at ' + new Date(t).toISOString());
+    eq(canon(m.replayStateAt(rec, t + 999)), canon(naiveStateAt(rec, t + 999)), 'between events');
+  });
+});
+
+test('replay: a returned state is a copy (the page may change it)', function () {
+  var rec = sample();
+  var a = m.replayStateAt(rec, T('08:35:00'));
+  a.deployment.tree[0].status = 'changed by the page';
+  a.__key = 'x';
+  eq(m.replayStateAt(rec, T('08:35:00')).deployment.tree[0].status, 'success');
+  eq(m.replayStateAt(rec, T('08:36:00')).__key, undefined);
+});
+
+test('replay: log lines and the tailer status at a time', function () {
+  var rec = sample();
+  eq(m.replayLogCountAt(rec, T('07:00:00')), 0);
+  eq(m.replayLogCountAt(rec, T('08:12:01')), 4);
+  eq(rec.lines[3].line.text, 'WARNING: Validate Hardware: one disk has an older firmware.');
+  eq(rec.lines[1].line.text, 'Connecting with password=*** and Bearer ***', 'recorded after masking');
+  eq(m.replayLogCountAt(rec, T('09:59:00')), 9);
+  eq(m.replayTailerIndexAt(rec, T('08:00:00')), -1);
+  eq(rec.tailers[m.replayTailerIndexAt(rec, T('08:09:00'))].tailer.activeFiles, ['C:\\Windows\\System32\\Bootstrap\\Logs\\setup.log']);
+  eq(rec.tailers[m.replayTailerIndexAt(rec, T('08:11:00'))].tailer.activeFiles, ['C:\\CloudDeployment\\Logs\\CloudDeployment.log']);
+});
+
+test('replay: markers for Arc registration, Validate, Deploy and its main steps, failures, the restart and the end', function () {
+  var rec = sample();
+  var got = rec.markers.map(function (x) { return [x.kind, x.label, new Date(x.t).toISOString().slice(11, 19)]; });
+  eq(got, [
+    ['phase', 'Arc registration', '08:00:01'],
+    ['session', 'Sonar restarted', '08:10:00'],
+    ['phase', 'Validate', '08:10:01'],
+    ['phase', 'Deploy', '08:20:01'],
+    ['step', 'Before Cloud Deployment', '08:20:01'],
+    ['step', 'Deploy Arc infrastructure', '08:30:01'],
+    ['step', 'Deploy Arc resource bridge', '08:40:01'],
+    ['error', 'Failed: Deployment', '08:50:01'],
+    ['error', 'Failed: Deploy Arc resource bridge', '08:50:01'],
+    ['phase', 'Deploy (2)', '08:55:01'],
+    ['end', 'Succeeded', '09:05:01']
+  ]);
+  var arc = rec.markers[0], val = rec.markers[2];
+  eq(new Date(arc.origin).toISOString(), '2026-10-11T07:50:00.000Z', 'Arc registration began before the recording (earliest machine start)');
+  eq(new Date(val.origin).toISOString(), '2026-10-11T08:09:30.000Z', 'Validate began at its first step');
+});
+
+test('replay: the position readout is the time since the current phase began ("Deploy +h:mm:ss")', function () {
+  var rec = sample();
+  eq(m.replayPosition(rec, T('08:00:00')).text, 'Recording +0:00:00');
+  eq(m.replayPosition(rec, T('08:05:00')).text, 'Arc registration +0:15:00');
+  eq(m.replayPosition(rec, T('08:12:00')).text, 'Validate +0:02:30');
+  eq(m.replayPosition(rec, T('08:35:00')).text, 'Deploy +0:15:10');
+  eq(m.replayPosition(rec, T('09:05:31')).text, 'Succeeded +0:00:30');
+  eq(m.fmtOffset(6130000), '+1:42:10');
+  eq(m.fmtOffset(-61000), '-0:01:01');
+  eq(m.fmtOffset(0), '+0:00:00');
+});
+
+test('replay clock: speed math, speed changes, pause, seek and the end', function () {
+  var c = m.clockCreate(0, 3600000, 60);
+  eq(m.clockNow(c, 5000), 0, 'paused at the start');
+  m.clockPlay(c, 1000);
+  eq(m.clockNow(c, 11000), 600000, '10 s at 60x is 10 recorded minutes');
+  m.clockSetSpeed(c, 240, 11000);
+  eq(m.clockNow(c, 11000), 600000, 'changing the speed keeps the position');
+  eq(m.clockNow(c, 12000), 840000, '1 s at 240x is 4 recorded minutes');
+  m.clockPause(c, 12000);
+  eq(m.clockNow(c, 99999999), 840000, 'paused: the position holds');
+  m.clockSetSpeed(c, 1, 13000);
+  m.clockPlay(c, 20000);
+  eq(m.clockNow(c, 21000), 841000, '1x is real time');
+  eq(m.clockNow(c, 1e12), 3600000, 'never past the end');
+  eq(m.clockEnded(c, 1e12), true);
+  m.clockPause(c, 1e12);
+  m.clockPlay(c, 1e12 + 1);
+  eq(m.clockNow(c, 1e12 + 1), 0, 'play at the end starts over');
+  m.clockSeek(c, -50, 0);
+  eq(c.pos, 0, 'seek clamps to the start');
+  m.clockSeek(c, 9e9, 0);
+  eq(c.pos, 3600000, 'seek clamps to the end');
+  m.clockSetSpeed(c, 0, 0);
+  eq(c.speed, 1, 'a zero speed is ignored');
+});
+
+test('replay transport bar: scrubber fraction and time round-trip, clamped', function () {
+  var rec = { start: 1000, end: 11000 };
+  eq(m.scrubFraction(rec, 6000), 0.5);
+  eq(m.scrubTime(rec, 0.5), 6000);
+  eq(m.scrubFraction(rec, 0), 0);
+  eq(m.scrubFraction(rec, 99999), 1);
+  eq(m.scrubTime(rec, 2), 11000);
+  eq(m.scrubFraction({ start: 5, end: 5 }, 5), 0, 'a zero-length recording');
+});
+
+test('replay: timers and durations run on the playback clock', function () {
+  m.setClock(function () { return T('08:35:00'); });
+  try {
+    eq(m.nowMs(), T('08:35:00'));
+    eq(m.nodeDuration({ status: 'InProgress', start: '2026-10-11T08:29:00Z' }), 360, 'running step: 6 minutes at the playback position');
+  } finally { m.setClock(null); }
+  eq(Math.abs(m.nowMs() - Date.now()) < 1000, true, 'live again: wall clock');
+});
+
+test('replay: delta ops round-trip (set, delete, truncate, append, type change, root)', function () {
+  var pairs = [
+    [{ a: 1, b: [1, 2, 3], c: { d: 'x', e: true } }, { a: 2, b: [1, 5], c: { d: 'x', f: [1] }, g: null }],
+    [{ list: [] }, { list: [{ id: 1 }, { id: 2 }] }],
+    [{ v: [1, 2] }, { v: 'now a string' }],
+    [{ deep: { er: { est: [0, { x: 1 }] } } }, { deep: { er: { est: [0, { x: 2, y: [] }] } } }],
+    [[1, 2], { root: 'replaced' }],
+    [{ same: 1 }, { same: 1 }]
+  ];
+  pairs.forEach(function (p, i) {
+    var ops = m.replayDiff(p[0], p[1]);
+    eq(canon(m.replayApplyOps(JSON.parse(JSON.stringify(p[0])), ops)), canon(p[1]), 'pair ' + i);
+  });
+  eq(m.replayDiff({ same: 1 }, { same: 1 }), [], 'no change, no ops');
+  eq(m.replayApplyOps({ a: [] }, [['s', ['a', 2], 'x']]), { a: [null, null, 'x'] }, 'an index past the end pads with null');
+});
+
+test('replay: invalid recordings and lines', function () {
+  var p = m.replayParseLines('{"t":"2026-10-11T08:00:00Z","k":"session"}\nnot json\n\n[1,2]\n{"t":"2026-10-11T08:00:01Z","k":"state","full":{"phase":"validation"}}\n{"t":"2026-10-11T08:00:02Z","k":"sta');
+  eq([p.events.length, p.invalid], [2, 3], 'bad lines are counted, not thrown');
+  var rec = m.replayLoad(p.events.concat([{ t: 'no time', k: 'state', full: {} }, { t: '2026-10-11T08:00:03Z', k: 'future-kind' }]), {});
+  eq(rec.states.length, 1);
+  eq(rec.invalid, 1, 'an event without a valid time');
+  var threw = '';
+  try { m.replayLoad([{ t: '2026-10-11T08:00:00Z', k: 'session' }], {}); } catch (e) { threw = e.message; }
+  eq(threw, 'The recording holds no state snapshots.');
+  rec = m.replayLoad([{ t: '2026-10-11T08:00:00Z', k: 'session' }, { t: '2026-10-11T08:00:01Z', k: 'state', ops: [['s', ['a'], 1]] },
+    { t: '2026-10-11T08:00:02Z', k: 'state', full: { a: 0 } }], {});
+  eq([rec.states.length, rec.invalid], [1, 1], 'a delta before the first keyframe of its session is skipped');
+  rec = m.replayLoad([{ t: '2026-10-11T08:00:05Z', k: 'session' }, { t: '2026-10-11T08:00:01Z', k: 'state', full: { a: 1 } }], {});
+  eq(rec.states[0].t, Date.parse('2026-10-11T08:00:05Z'), 'times never go backwards');
+});
+
+test('replay: the built-in demo recording (?demo=1&replay=1) plays the demo deployment', function () {
+  var now = Date.parse('2026-10-11T12:00:00Z');
+  var events = m.demoRecording(now);
+  eq(events[0].k, 'session');
+  eq(events[events.length - 1].k, 'end');
+  var rec = m.replayLoad(events, {});
+  eq(rec.start, now - 64 * 60000);
+  eq(rec.end, now);
+  eq(rec.states.filter(function (s) { return s.full; }).length > 1, true, 'keyframes and deltas');
+  var phases = rec.markers.filter(function (x) { return x.kind === 'phase'; }).map(function (x) { return x.label; });
+  eq(phases, ['Arc registration', 'Validate', 'Deploy']);
+  eq(rec.markers.filter(function (x) { return x.kind === 'step'; }).map(function (x) { return x.label; }),
+    ['Run pre-deployment checks', 'Configure security baseline', 'Deploy Arc infrastructure components', 'Create cluster']);
+  var end = m.replayStateAt(rec, now), live = m.demoDeploymentSample(now).state;
+  eq([end.phase, end.current.stepPath], [live.phase, live.current.stepPath], 'the end of the replay is the live demo');
+  eq(end.deployment.tree[0].children.map(function (c) { return c.status; }), live.deployment.tree[0].children.map(function (c) { return c.status; }));
+  var mid = m.replayStateAt(rec, now - 50 * 60000);
+  eq([mid.phase, mid.validation.tree[0].children[3].status, mid.deployment.tree.length], ['validation', 'running', 0], '50 minutes ago: validating storage');
+  eq(m.replayLogCountAt(rec, now) > m.replayLogCountAt(rec, now - 30 * 60000), true);
+});
+
 process.stdout.write(JSON.stringify(cases));

@@ -4,3 +4,4 @@ docs/.vitepress/cache/
 
 config/
 *.local.json
+recordings/

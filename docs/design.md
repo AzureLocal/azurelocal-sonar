@@ -6,9 +6,9 @@ This is the contract every part of Sonar is built to (plan task S-4). Back end, 
 
 | Path | What |
 | --- | --- |
-| `Start-AzlSonar.ps1` | Entry point. `-ConfigPath <file>` (required), `-Port` (default 8642), `-NoBrowser`, `-Credential <pscredential>` (node logs; optional). Imports the module, starts the server, opens the browser, runs until Ctrl+C. |
+| `Start-AzlSonar.ps1` | Entry point. Live: `-ConfigPath <file>` (required), `-Port` (default 8642), `-NoBrowser`, `-Credential <pscredential>` (node logs; optional), `-Record <file>` (optional). Replay: `-Replay <file>` (required), `-Speed` (default 60), `-StartAt`, `-Autoplay`, `-Port`, `-NoBrowser`. Imports the module, starts the server, opens the browser, runs until Ctrl+C. |
 | `src/AzlSonar/AzlSonar.psd1`, `AzlSonar.psm1` | PowerShell 7 module, `Set-StrictMode -Version Latest`. Public functions: `Start-AzlSonarServer`, `Get-AzlSonarDeploymentState`, `ConvertTo-AzlSonarStepTree`, `Get-AzlSonarPhaseGuidance`, `Read-AzlSonarConfig`. |
-| `src/AzlSonar/Private/*.ps1` | Azure poller, log tailer, node probe (Arc registration status on the nodes, OEM image route), HTTP/SSE server, helpers. |
+| `src/AzlSonar/Private/*.ps1` | Azure poller, log tailer, node probe (Arc registration status on the nodes, OEM image route), recorder and recording reader (`Recording.ps1`), HTTP/SSE server, helpers. |
 | `src/AzlSonar/web/index.html`, `app.js`, `app.css` | The page. Vanilla HTML/CSS/JS, no build step, no CDN, no external fonts. Light and dark theme (`prefers-color-scheme` + toggle). |
 | `src/AzlSonar/data/phase-guidance.json` | Which account reads which logs in which phase (see below). |
 | `examples/sonar.config.example.json` | Example config with neutral values (zero GUIDs, RFC 5737 / documentation addresses). |
@@ -117,7 +117,8 @@ Per phase and identity model: which account reads the node logs, where the logs 
 | Route | Returns |
 | --- | --- |
 | `GET /` , `/app.js`, `/app.css` | the page |
-| `GET /api/config` | config without secrets: cluster, resourceGroup, identityModel, provisioningRoute, nodes (name, seed), log paths, pollSeconds, `startedAt`, `serverId` |
+| `GET /api/config` | config without secrets: cluster, resourceGroup, identityModel, provisioningRoute, nodes (name, seed), log paths, pollSeconds, `startedAt`, `serverId`; `recording: { file }` while recording; in a replay the recorded config plus `replay: { cluster, file, recordedFrom, recordedTo, sessions, invalid, speed, startAt, startAtPhase, autoplay }` |
+| `GET /api/replay` | replay only: `{ replay, events[] }`, every valid event of the recording in file order (404 when live) |
 | `GET /api/state` | latest `Get-AzlSonarDeploymentState` result |
 | `GET /api/guidance` | phase guidance for the configured identity model |
 | `GET /api/logs?since={seq}` | `{ server, lastSeq, tailer: {state, reason, node, activeFiles[], ...}, files[{path, size, offset, lastWriteUtc}], lines[] }` — lines with seq > since (ring buffer of the last 5000) |
@@ -145,6 +146,24 @@ A log line is `{ seq, time, received, timeSource, file, level, text }`: `seq` co
 | `logLinesDropped` | lines that left the ring buffer before the export (`logLastSeq − logLinesKept`) |
 
 The server binds `http://localhost:{port}/` only and answers loopback clients only. No route changes Azure or a node.
+
+## Record and replay (plan task S-11)
+
+**Recording** (`-Record <file>` or config `recordPath`, relative to the config file): a `Recorder` runspace (started before the other workers) appends to a JSON Lines file (UTF-8, one event per line, `{ "t": "<UTC yyyy-MM-ddTHH:mm:ss.fffZ>", "k": "<kind>", ... }`, times never go backwards):
+
+| `k` | Fields |
+| --- | --- |
+| `session` | `format` (1), `tool`, `version`, `server`, `cluster`, `config` (the `/api/config` body), `guidance` |
+| `state` | `full` (keyframe) or `ops` (delta). Ops: `["s", path, value]` set a key or index (index = length appends), `["d", path]` delete a key, `["t", path, length]` truncate an array; `path` is a list of keys and indexes. Each session starts with a keyframe; a new keyframe is written when the deltas since the last one would add up to more than its size, or after 200 deltas. A state equal to the last one is not written. |
+| `tailer` | `tailer` (the tailer status), when it changed |
+| `log` | `lines[]` as in `/api/logs`; `lost` when lines left the ring buffer before they were recorded |
+| `end` | (none) Sonar stopped cleanly |
+
+The recorder polls the shared table every 500 ms (state version, tailer version, log sequence), so it writes exactly what the page was sent. Every string value is masked again with `Protect-AzlSonarText`, with the log account's password and the Key Vault vault and secret names as exact values. The file is opened for append with shared read; an existing file gets a new session (on a new line if the last one was cut off). The path is checked (folder created, file opened) before the server binds.
+
+**Replay** (`-Replay <file>`): no Azure sign-in, credential, poller, tailer or node probe. `Read-AzlSonarRecording` checks the file (`.jsonl` or gzip `.jsonl.gz`): the first event must be a `session` with `format` 1; lines that are not JSON objects with `t` and `k`, a delta before its session's first keyframe, and malformed `log`/`tailer` events are skipped and counted; unknown kinds are ignored; a file without a state is refused. `-StartAt` is an offset (`h:mm[:ss]`, `90m`, `1h30m`, `45s`), a UTC time inside the recording, or a phase (`arc-registration`, `validation`, `deployment`; resolved by the page from its markers). `/api/state` is the state at the start position; `/api/events` and `/api/export` answer 404.
+
+**Page in replay.** When `/api/config` has `replay` (or with `?demo=1&replay=1`, a built-in recording of the demo deployment), the page loads `/api/replay` and plays it locally: state at time t = the last keyframe at or before the last state event at or before t, plus the deltas after it (cached forward). Log lines are renumbered across sessions; moving forward appends lines as live, moving back or more than 1500 lines ahead rebuilds the log store at t. Timers, durations and *Last poll* use the replay clock (`position = pos + (wall − anchor) × speed`, clamped to the recording, paused at the end). Markers: each phase change (`activePhase`, or `done`/`failed`), each main Deploy step when first seen running (top-level steps, or the children of a single top-level step), the first failed step of a run, each session after the first, the end. The readout is the time since the current phase began (`Deploy +1:42:10`; a phase's start is its earliest step start, or the earliest machine start for provisioning and Arc registration). The page is labelled `Replay of <cluster> · recorded <date>` with a Replay badge and `Replay (not live)` connection state; Export is hidden.
 
 ## Page
 
