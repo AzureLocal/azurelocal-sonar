@@ -1,0 +1,143 @@
+# Checks AzL Sonar: the Pester suite (one job per test file), the Node-run page logic, PSScriptAnalyzer, the Markdown
+# links and the docs build. Nothing here touches Azure or a node: the tests mock every ARM and remoting call.
+# Run the same checks locally:
+#   pwsh -Command "Invoke-Pester -Path ./tests -CI"
+#   pwsh -Command "Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1"
+#   pwsh ./scripts/Test-MarkdownLinks.ps1
+# Actions are pinned to full commit SHAs (the comment names the release). A bump moves them by hand.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PESTER_VERSION: 5.9.1
+  PSSA_VERSION: 1.25.0
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      files: ${{ steps.list.outputs.files }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: list
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -Path tests -Filter '*.Tests.ps1' -File | Sort-Object Name | ForEach-Object Name)
+          "files=$($files | ConvertTo-Json -Compress -AsArray)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+  pester:
+    needs: plan
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        file: ${{ fromJson(needs.plan.outputs.files) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Pester
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          # -SkipPublisherCheck: the runner image ships Pester 3.4 signed by Microsoft; the pinned 5.9.1 has a different publisher.
+          Install-Module Pester -RequiredVersion $env:PESTER_VERSION -Scope CurrentUser -Force -SkipPublisherCheck
+      - name: Pester ${{ matrix.file }}
+        shell: pwsh
+        run: |
+          Import-Module Pester -RequiredVersion $env:PESTER_VERSION
+          $config = New-PesterConfiguration
+          $config.Run.Path = Join-Path tests '${{ matrix.file }}'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Normal'
+          $config.TestResult.Enabled = $true
+          $config.TestResult.OutputPath = 'pester-${{ matrix.file }}.xml'
+          Invoke-Pester -Configuration $config
+      - name: Keep the result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pester-${{ matrix.file }}
+          path: pester-*.xml
+          if-no-files-found: ignore
+
+  web-logic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+      - name: Run the page logic cases under Node (the same cases tests/WebLogic.Tests.ps1 reports)
+        shell: bash
+        run: |
+          node tests/web-logic.cases.js src/AzlSonar/web/app.js > web-logic.json
+          node -e "const r=JSON.parse(require('fs').readFileSync('web-logic.json','utf8')); const bad=r.filter(c=>!c.ok); console.log(r.length+' cases, '+bad.length+' failed'); bad.forEach(c=>console.log('FAILED '+c.name+': '+c.message)); process.exit(bad.length||r.length===0?1:0)"
+
+  analyzer:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: PSScriptAnalyzer (Error and Warning fail)
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -RequiredVersion $env:PSSA_VERSION -Scope CurrentUser -Force
+          $findings = @(Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1)
+          $findings | Format-Table RuleName, Severity, ScriptName, Line -AutoSize | Out-String -Width 200
+          if ($findings.Count -gt 0) { throw "$($findings.Count) PSScriptAnalyzer finding(s)." }
+
+  links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Relative Markdown links resolve (files and headings)
+        shell: pwsh
+        run: ./scripts/Test-MarkdownLinks.ps1
+      - name: External links (lychee, offline cache; failures are reported, not fatal for rate limits)
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --no-progress --max-concurrency 4 --accept 200,201,204,301,302,403,429 --exclude '^http://localhost' --exclude '^https://github.com/AzureLocal/azurelocal-sonar' --exclude-path docs/node_modules --exclude-path docs/.vitepress './**/*.md'
+          fail: true
+
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+      - name: 'Build the docs site (dead links fail the build, ignoreDeadLinks is off)'
+        shell: bash
+        run: |
+          cd docs
+          npm ci || npm install
+          npm run docs:build

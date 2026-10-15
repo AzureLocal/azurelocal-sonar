@@ -5,3 +5,9 @@ docs/.vitepress/cache/
 config/
 *.local.json
 recordings/
+
+# Output of the publishing tools
+bundle/
+artifacts/
+*.NOT-PUBLISHABLE
+*.partial
