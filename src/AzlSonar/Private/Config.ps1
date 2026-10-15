@@ -79,6 +79,14 @@ function Test-AzlSonarConfig {
         $problems.Add('recordPath must be a file path (a recording, for example ./recordings/clus01.jsonl) when given.')
     }
 
+    $ztpEvents = Get-AzlSonarMember $Config 'ztpEvents'
+    if ($null -ne $ztpEvents) {
+        $ztpPath = Get-AzlSonarMember $ztpEvents 'path'
+        if ($ztpPath -isnot [string] -or [string]::IsNullOrWhiteSpace($ztpPath)) {
+            $problems.Add('ztpEvents.path must be the path of the ZTP event file (JSON Lines written by azurelocal-ztp), for example ./ztp-events.jsonl.')
+        }
+    }
+
     $nodes = ConvertTo-AzlSonarArray (Get-AzlSonarMember $Config 'nodes')
     if ($nodes.Count -eq 0) {
         $problems.Add('nodes must list at least one node.')
@@ -285,6 +293,12 @@ function Read-AzlSonarConfig {
         $recordPath = [System.IO.Path]::GetFullPath((Join-Path -Path ([System.IO.Path]::GetDirectoryName($source)) -ChildPath $recordPath))
     }
 
+    # ztpEvents.path: the event file the ZTP provisioning scripts write; relative to the config file's folder.
+    $ztpEventsPath = [string](Get-AzlSonarMember (Get-AzlSonarMember $raw 'ztpEvents') 'path' '')
+    if ($ztpEventsPath -and -not [System.IO.Path]::IsPathRooted($ztpEventsPath) -and $PSCmdlet.ParameterSetName -eq 'Path') {
+        $ztpEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ([System.IO.Path]::GetDirectoryName($source)) -ChildPath $ztpEventsPath))
+    }
+
     return [pscustomobject]@{
         subscriptionId = ([string]$raw.subscriptionId).ToLowerInvariant()
         resourceGroup  = [string]$raw.resourceGroup
@@ -299,6 +313,7 @@ function Read-AzlSonarConfig {
         logs           = $logsNormalised
         credential     = $credentialNormalised
         recordPath     = $recordPath
+        ztpEventsPath  = $ztpEventsPath
         sourcePath     = $source
     }
 }

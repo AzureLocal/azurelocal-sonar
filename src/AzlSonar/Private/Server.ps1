@@ -809,6 +809,10 @@ function Start-AzlSonarServer {
         }
         $workerSpecs.Add(@{ Name = 'Poller'; Command = 'Invoke-AzlSonarPollerLoop'; Arguments = @{ Shared = $shared; Config = $config } })
         $workerSpecs.Add(@{ Name = 'Tailer'; Command = 'Invoke-AzlSonarTailerLoop'; Arguments = @{ Shared = $shared; Config = $config; Credential = $logCredential } })
+        if ($config.ztpEventsPath) {
+            # azurelocal-ztp event file (JSON Lines): provisioning states of the machines, shown in the log pane.
+            $workerSpecs.Add(@{ Name = 'ZtpEvents'; Command = 'Invoke-AzlSonarZtpEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
+        }
         if ($config.provisioningRoute -ne 'simplified') {
             # Reads Get-ArcBootstrapStatus / Get-ArcZeroDaySolutionUpdateStatus on each node, only while Arc registration (OEM image route) runs.
             $workerSpecs.Add(@{ Name = 'NodeProbe'; Command = 'Invoke-AzlSonarNodeProbeLoop'; Arguments = @{ Shared = $shared; Config = $config; Credential = $logCredential } })
