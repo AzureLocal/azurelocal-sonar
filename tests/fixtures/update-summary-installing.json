@@ -1,0 +1,20 @@
+{
+  "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.AzureStackHCI/clusters/clus01/updateSummaries/default",
+  "name": "default",
+  "type": "microsoft.azurestackhci/clusters/updatesummaries",
+  "properties": {
+    "state": "UpdateInProgress",
+    "healthState": "Warning",
+    "currentVersion": "12.2609.1003.7",
+    "currentSbeVersion": "4.1.2609.5",
+    "currentOemVersion": "4.1.2609.5",
+    "hardwareModel": "Example Server R1",
+    "oemFamily": "Example",
+    "lastChecked": "2026-10-14T20:00:00Z",
+    "lastUpdated": "2026-09-01T10:00:00Z",
+    "healthCheckResult": [
+      { "title": "Storage pool health", "displayName": "Storage pool health", "severity": "Warning", "status": "Error", "remediation": "Check the storage pool." },
+      { "title": "Time sync", "displayName": "Time sync", "severity": "Informational", "status": "Success" }
+    ]
+  }
+}

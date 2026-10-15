@@ -1,0 +1,7 @@
+{
+  "value": [
+    { "name": "Solution12.2609.1003.7", "properties": { "state": "Installed", "version": "12.2609.1003.7", "displayName": "Azure Local solution update 12.2609.1003.7" } },
+    { "name": "Solution12.2610.1002.4", "properties": { "state": "Installing", "version": "12.2610.1002.4", "displayName": "Azure Local solution update 12.2610.1002.4", "rebootRequired": "True", "availabilityType": "Online" } },
+    { "name": "SBE4.1.2610.1", "properties": { "state": "Ready", "version": "4.1.2610.1", "displayName": "Example SBE 4.1.2610.1" } }
+  ]
+}

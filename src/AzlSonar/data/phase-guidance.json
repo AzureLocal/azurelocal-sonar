@@ -82,7 +82,8 @@
       "available": "Environment Checker output is written to C:\\CloudDeployment\\Logs when validation runs as part of deployment, and each run overwrites the file. Standalone checker runs write to $HOME\\.AzStackHci instead. Learn documents C:\\MASLogs\\LcmEceLiteLogs for upgrade validation only; for deployment it is unverified. The mandatory Arc extensions (AzureEdgeDeviceManagement, AzureEdgeLifecycleManager, AzureEdgeRemoteSupport, AzureEdgeTelemetryAndDiagnostics) install during Validate; their logs are under C:\\ProgramData\\GuestConfig\\extension_logs on each node.",
       "access": "WinRM to the seed node by IP: TrustedHosts or HTTPS 5986, -Credential, and an account in local Administrators. CredSSP is not needed.",
       "source": "https://learn.microsoft.com/azure/azure-local/manage/use-environment-checker?view=azloc-2609",
-      "verified": false
+      "verified": false,
+      "timing": "Learn (ARM template flow, 12.2609 latest): Validate mode takes about 10 minutes (the portal wizard and the rack aware template say about 15 minutes for one or two machines, longer for bigger deployments). Do not select Try again while validation tasks are running."
     },
     {
       "phase": "validation",
@@ -97,7 +98,8 @@
       "available": "Environment Checker output is written to C:\\CloudDeployment\\Logs when validation runs as part of deployment, and each run overwrites the file. C:\\MASLogs\\LcmEceLiteLogs is documented for upgrade validation only. The mandatory Arc extensions (AzureEdgeDeviceManagement, AzureEdgeLifecycleManager, AzureEdgeRemoteSupport, AzureEdgeTelemetryAndDiagnostics) install during Validate; their logs are under C:\\ProgramData\\GuestConfig\\extension_logs on each node.",
       "access": "Nodes are not yet joined to the domain unless that was done before deployment, so use WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential.",
       "source": "https://learn.microsoft.com/azure/azure-local/manage/use-environment-checker?view=azloc-2609",
-      "verified": false
+      "verified": false,
+      "timing": "Learn (ARM template flow, 12.2609 latest): Validate mode takes about 10 minutes (the portal wizard and the rack aware template say about 15 minutes for one or two machines, longer for bigger deployments). Do not select Try again while validation tasks are running."
     },
     {
       "phase": "deployment",
@@ -114,7 +116,8 @@
       "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-local-identity-with-key-vault-template?view=azloc-2609",
       "verified": true,
       "observed": "Seen live 10 Oct 2026 on a Local Identity Deploy pass: logs written to C:\\CloudContent\\MASLogs, C:\\MASLogs and C:\\Observability; C:\\CloudDeployment\\Logs did not exist yet ~10 min in.",
-      "confirmedOn": "Azure Local 2609 (Local Identity)"
+      "confirmedOn": "Azure Local 2609 (Local Identity)",
+      "timing": "Learn (12.2609 latest): once Deploy mode starts, a limited Environment Checker run and then a full Environment Checker run happen first, then cloud deployment starts; after a few minutes you can watch it in the portal. The whole deployment takes 2.5 to 3 hours and several steps take 40-50 minutes or more. Begin cloud deployment takes 45-60 minutes. The longest step is Deploy Moc and ARB Stack: 40-45 minutes. Azure can lag behind the node: the step list may say Deploy not started while the seed node is already working (Sonar labels that)."
     },
     {
       "phase": "deployment",
@@ -130,7 +133,8 @@
       "access": "Use WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential until the domain join completes. After that, Kerberos by host name with the LCM user works without TrustedHosts.",
       "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-prep-active-directory?view=azloc-2609#considerations-for-large-scale-deployments",
       "verified": false,
-      "observed": "Seen live 10 Oct 2026 on a Local Identity Deploy pass: logs written to C:\\CloudContent\\MASLogs, C:\\MASLogs and C:\\Observability; C:\\CloudDeployment\\Logs did not exist yet ~10 min in."
+      "observed": "Seen live 10 Oct 2026 on a Local Identity Deploy pass: logs written to C:\\CloudContent\\MASLogs, C:\\MASLogs and C:\\Observability; C:\\CloudDeployment\\Logs did not exist yet ~10 min in.",
+      "timing": "Learn (12.2609 latest): once Deploy mode starts, a limited Environment Checker run and then a full Environment Checker run happen first, then cloud deployment starts; after a few minutes you can watch it in the portal. The whole deployment takes 2.5 to 3 hours and several steps take 40-50 minutes or more. Begin cloud deployment takes 45-60 minutes. The longest step is Deploy Moc and ARB Stack: 40-45 minutes. Azure can lag behind the node: the step list may say Deploy not started while the seed node is already working (Sonar labels that)."
     },
     {
       "phase": "post-deployment",
@@ -159,6 +163,142 @@
       "access": "WinRM with Kerberos by host name and a domain account (no TrustedHosts needed). Connecting by IP falls back to NTLM and needs TrustedHosts or HTTPS. RDP is turned off after deployment.",
       "source": "https://learn.microsoft.com/azure/azure-local/concepts/security-features?view=azloc-2609#local-built-in-user-accounts",
       "verified": false
+    },
+    {
+      "phase": "update",
+      "identityModel": "LocalIdentity",
+      "account": "The deployment local admin: the non-built-in local administrator with the same credentials on every node (Learn names this account for cluster management operations such as adding or repairing a node; it names no separate update account). Reading the logs needs an account in local Administrators on the node.",
+      "logPaths": [
+        "C:\\CloudDeployment\\Logs",
+        "C:\\MASLogs",
+        "C:\\Observability"
+      ],
+      "available": "During a solution update the orchestrator (Lifecycle Manager) runs an update action plan: Sonar follows it from the Azure update run (clusters/updates/updateRuns: steps, start and end times, errors) and shows the node log of the seed node as it is written. Learn names no update log files. A failed update can be resumed in the portal (Resume an update) or watched on a node with Start-MonitoringActionplanInstanceToComplete -ActionPlanInstanceID <id>. Cluster-Aware Updating runs inside the update; if CAU attempts fail, investigate the first failure by its start and end time with Get-CauReport.",
+      "timing": "Learn does not give one duration for a solution update: each step may carry an expected execution time (Sonar shows it when Azure reports it). A node reboots during the run; the Arc agent and the logs are unreachable meanwhile.",
+      "commands": [
+        "Start-MonitoringActionplanInstanceToComplete -ActionPlanInstanceID <id> (on a node, as the deployment user)",
+        "Get-ActionPlanInstance -ActionPlanInstanceID <id> | Out-File log.txt (capture a failure)",
+        "Get-CauReport (Cluster-Aware Updating run details)"
+      ],
+      "access": "WinRM to the seed node by IP (TrustedHosts or HTTPS 5986, -Credential) or, once the nodes are domain-joined, Kerberos by host name. Sonar only reads.",
+      "source": "https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2?view=azloc-2609#troubleshoot-update-failures",
+      "verified": false,
+      "observed": "Built from Microsoft Learn and the REST reference only: unverified against a live run."
+    },
+    {
+      "phase": "update",
+      "identityModel": "ActiveDirectory",
+      "account": "The domain user that runs updates from a node: AzureStackLCMUser or an equivalent user (the LCM user from deployment), which is in local Administrators on the nodes. Reading the logs needs an account in local Administrators on the node.",
+      "logPaths": [
+        "C:\\CloudDeployment\\Logs",
+        "C:\\MASLogs",
+        "C:\\Observability"
+      ],
+      "available": "During a solution update the orchestrator (Lifecycle Manager) runs an update action plan: Sonar follows it from the Azure update run (clusters/updates/updateRuns: steps, start and end times, errors) and shows the node log of the seed node as it is written. Learn names no update log files. A failed update can be resumed in the portal (Resume an update) or watched on a node with Start-MonitoringActionplanInstanceToComplete -ActionPlanInstanceID <id>. Cluster-Aware Updating runs inside the update; if CAU attempts fail, investigate the first failure by its start and end time with Get-CauReport.",
+      "timing": "Learn does not give one duration for a solution update: each step may carry an expected execution time (Sonar shows it when Azure reports it). A node reboots during the run; the Arc agent and the logs are unreachable meanwhile.",
+      "commands": [
+        "Start-MonitoringActionplanInstanceToComplete -ActionPlanInstanceID <id> (on a node, as the deployment user)",
+        "Get-ActionPlanInstance -ActionPlanInstanceID <id> | Out-File log.txt (capture a failure)",
+        "Get-CauReport (Cluster-Aware Updating run details)"
+      ],
+      "access": "WinRM to the seed node by IP (TrustedHosts or HTTPS 5986, -Credential) or, once the nodes are domain-joined, Kerberos by host name. Sonar only reads.",
+      "source": "https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2?view=azloc-2609#troubleshoot-update-failures",
+      "verified": false,
+      "observed": "Built from Microsoft Learn and the REST reference only: unverified against a live run."
+    },
+    {
+      "phase": "add-node",
+      "identityModel": "LocalIdentity",
+      "account": "Run on an existing node: Add-Server with the new node local administrator credentials; on Local Identity deployments the cluster management account is the deployment local admin (non-built-in, same credentials on every node), which you keep up. Reading the logs: an account in local Administrators on the nodes.",
+      "logPaths": [
+        "C:\\CloudDeployment\\Logs",
+        "C:\\MASLogs",
+        "C:\\Observability"
+      ],
+      "available": "From Add-Server (PowerShell) or Add machine (portal, preview). Since release 2508 a validation runs first and returns details when a test fails. Learn names no add node log files. Monitor with Start-MonitoringActionplanInstanceToComplete and the operation id that Add-Server returns; after it ends the storage pool rebalances in the background (low priority, can take days: Get-VirtualDisk | Get-StorageJob returns nothing when done). The new node can take several hours to show in the portal (Sync-AzureStackHCI speeds it up). Rerun a failed operation with Add-Server -Rerun.",
+      "timing": "Validation, then the add node action plan, then a storage rebalance that can run for multiple days (Learn).",
+      "commands": [
+        "Add-Server -Name <node> -HostIpv4 <ip> -LocalAdminCredential $Cred (on an existing node)",
+        "Start-MonitoringActionplanInstanceToComplete -ActionPlanInstanceID <id>",
+        "Get-ActionPlanInstance -ActionPlanInstanceID <id> | Out-File log.txt",
+        "Add-Server -Rerun",
+        "Get-VirtualDisk | Get-StorageJob",
+        "Sync-AzureStackHCI"
+      ],
+      "access": "WinRM to the existing seed node by IP or by host name (domain-joined: Kerberos). The incoming node is still in a workgroup until it is added; use TrustedHosts or HTTPS 5986 and -Credential for it.",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/add-server?view=azloc-2609",
+      "verified": false,
+      "observed": "Built from Microsoft Learn and the REST reference only: unverified against a live run. Azure does not publish an update-run style resource for this operation in the REST reference; set track to add-node in the config and Sonar shows the Arc machine and the node log."
+    },
+    {
+      "phase": "add-node",
+      "identityModel": "ActiveDirectory",
+      "account": "Run on an existing node as the domain user from deployment (AzureStackLCMUser or equivalent) with the new node local administrator credentials. Reading the logs: an account in local Administrators on the nodes.",
+      "logPaths": [
+        "C:\\CloudDeployment\\Logs",
+        "C:\\MASLogs",
+        "C:\\Observability"
+      ],
+      "available": "From Add-Server (PowerShell) or Add machine (portal, preview). Since release 2508 a validation runs first and returns details when a test fails. Learn names no add node log files. Monitor with Start-MonitoringActionplanInstanceToComplete and the operation id that Add-Server returns; after it ends the storage pool rebalances in the background (low priority, can take days: Get-VirtualDisk | Get-StorageJob returns nothing when done). The new node can take several hours to show in the portal (Sync-AzureStackHCI speeds it up). Rerun a failed operation with Add-Server -Rerun.",
+      "timing": "Validation, then the add node action plan, then a storage rebalance that can run for multiple days (Learn).",
+      "commands": [
+        "Add-Server -Name <node> -HostIpv4 <ip> -LocalAdminCredential $Cred (on an existing node)",
+        "Start-MonitoringActionplanInstanceToComplete -ActionPlanInstanceID <id>",
+        "Get-ActionPlanInstance -ActionPlanInstanceID <id> | Out-File log.txt",
+        "Add-Server -Rerun",
+        "Get-VirtualDisk | Get-StorageJob",
+        "Sync-AzureStackHCI"
+      ],
+      "access": "WinRM to the existing seed node by IP or by host name (domain-joined: Kerberos). The incoming node is still in a workgroup until it is added; use TrustedHosts or HTTPS 5986 and -Credential for it.",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/add-server?view=azloc-2609",
+      "verified": false,
+      "observed": "Built from Microsoft Learn and the REST reference only: unverified against a live run. Azure does not publish an update-run style resource for this operation in the REST reference; set track to add-node in the config and Sonar shows the Arc machine and the node log."
+    },
+    {
+      "phase": "repair",
+      "identityModel": "LocalIdentity",
+      "account": "Run on another member node: Repair-Server with the repaired node local administrator credentials (by default the built-in Administrator); the cluster management account is the deployment local admin (non-built-in, same credentials on every node). The node name must be the NetBIOS name.",
+      "logPaths": [
+        "C:\\CloudDeployment\\Logs",
+        "C:\\MASLogs",
+        "C:\\Observability"
+      ],
+      "available": "From Repair-Server. Before it, reimage the node, register it with Arc with the same parameters as the others and give it the Azure Stack HCI Device Management role and Key Vault Secrets User. Since release 2508 a validation runs first. The operating system, drivers and firmware are updated as part of the repair. Monitor with Start-MonitoringActionplanInstanceToComplete; storage rebalances on the reimaged node afterwards (can take days). Rerun a failed operation with Repair-Server -Rerun. Learn names no repair log files.",
+      "timing": "Validation, the repair action plan, then a storage rebalance that can run for multiple days (Learn).",
+      "commands": [
+        "Repair-Server -Name <node> -LocalAdminCredential $Cred (on another member node)",
+        "Start-MonitoringActionplanInstanceToComplete -ActionPlanInstanceID <id>",
+        "Get-ActionPlanInstance -ActionPlanInstanceID <id> | Out-File log.txt",
+        "Repair-Server -Rerun",
+        "Get-VirtualDisk | Get-StorageJob"
+      ],
+      "access": "WinRM to a member node by host name (Kerberos) or by IP with TrustedHosts or HTTPS 5986 and -Credential. The node being repaired is reachable by IP only until it has rejoined.",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/repair-server?view=azloc-2609",
+      "verified": false,
+      "observed": "Built from Microsoft Learn and the REST reference only: unverified against a live run. Set track to repair in the config and Sonar shows the Arc machine and the node log."
+    },
+    {
+      "phase": "repair",
+      "identityModel": "ActiveDirectory",
+      "account": "Run on another member node as the domain user from deployment (AzureStackLCMUser or equivalent) with the repaired node local administrator credentials (by default the built-in Administrator). The node name must be the NetBIOS name.",
+      "logPaths": [
+        "C:\\CloudDeployment\\Logs",
+        "C:\\MASLogs",
+        "C:\\Observability"
+      ],
+      "available": "From Repair-Server. Before it, reimage the node, register it with Arc with the same parameters as the others and give it the Azure Stack HCI Device Management role and Key Vault Secrets User. Since release 2508 a validation runs first. The operating system, drivers and firmware are updated as part of the repair. Monitor with Start-MonitoringActionplanInstanceToComplete; storage rebalances on the reimaged node afterwards (can take days). Rerun a failed operation with Repair-Server -Rerun. Learn names no repair log files.",
+      "timing": "Validation, the repair action plan, then a storage rebalance that can run for multiple days (Learn).",
+      "commands": [
+        "Repair-Server -Name <node> -LocalAdminCredential $Cred (on another member node)",
+        "Start-MonitoringActionplanInstanceToComplete -ActionPlanInstanceID <id>",
+        "Get-ActionPlanInstance -ActionPlanInstanceID <id> | Out-File log.txt",
+        "Repair-Server -Rerun",
+        "Get-VirtualDisk | Get-StorageJob"
+      ],
+      "access": "WinRM to a member node by host name (Kerberos) or by IP with TrustedHosts or HTTPS 5986 and -Credential. The node being repaired is reachable by IP only until it has rejoined.",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/repair-server?view=azloc-2609",
+      "verified": false,
+      "observed": "Built from Microsoft Learn and the REST reference only: unverified against a live run. Set track to repair in the config and Sonar shows the Arc machine and the node log."
     }
   ]
 }

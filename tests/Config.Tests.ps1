@@ -211,8 +211,8 @@ Describe 'Read-AzlSonarConfig' {
         }
 
         It 'applies apiVersion and edgeApiVersion defaults' {
-            $script:minimalConfig.apiVersion | Should -Be '2025-09-15-preview'
-            $script:minimalConfig.edgeApiVersion | Should -Be '2025-12-01-preview'
+            $script:minimalConfig.apiVersion | Should -Be '2026-10-01'
+            $script:minimalConfig.edgeApiVersion | Should -Be '2026-10-01'
         }
 
         It 'applies pollSeconds and lowercases the subscription id' {

@@ -1,0 +1,19 @@
+{
+  "value": [
+    {
+      "name": "20261014-2100-run",
+      "properties": {
+        "timeStarted": "2026-10-14T21:00:00Z",
+        "progress": {
+          "name": "Update the solution",
+          "status": "Error",
+          "startTimeUtc": "2026-10-14T21:00:00Z",
+          "endTimeUtc": "2026-10-14T22:10:00Z",
+          "steps": [
+            { "name": "Install the solution update", "status": "Error", "startTimeUtc": "2026-10-14T21:10:00Z", "endTimeUtc": "2026-10-14T22:10:00Z", "errorMessage": "Cluster-Aware Updating failed: max retries exceeded", "steps": [] }
+          ]
+        }
+      }
+    }
+  ]
+}

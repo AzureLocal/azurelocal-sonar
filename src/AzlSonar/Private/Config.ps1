@@ -49,11 +49,28 @@ function Test-AzlSonarConfig {
         $problems.Add('clusterName is required and must not contain / \ ? #.')
     }
 
-    foreach ($versionKey in 'apiVersion', 'edgeApiVersion') {
+    foreach ($versionKey in 'apiVersion', 'apiVersionFallback', 'edgeApiVersion') {
         $version = Get-AzlSonarMember $Config $versionKey
         if ($null -ne $version -and [string]$version -notmatch '^\d{4}-\d{2}-\d{2}(-preview)?$') {
             $problems.Add("$versionKey must look like 2025-09-15 or 2025-09-15-preview.")
         }
+    }
+
+    $patternValue = Get-AzlSonarMember $Config 'clusterPattern'
+    if ($null -ne $patternValue -and ([string]$patternValue).ToLowerInvariant() -notin 'standard', 'rackaware') {
+        $problems.Add('clusterPattern must be Standard or RackAware.')
+    }
+    $architectureValue = Get-AzlSonarMember $Config 'architecture'
+    if ($null -ne $architectureValue -and ([string]$architectureValue).ToLowerInvariant() -notin 'hyperconverged', 'disaggregated') {
+        $problems.Add('architecture must be hyperconverged or disaggregated.')
+    }
+    $trackValue = Get-AzlSonarMember $Config 'track'
+    if ($null -ne $trackValue -and ([string]$trackValue).ToLowerInvariant() -notin 'auto', 'deployment', 'update', 'add-node', 'repair') {
+        $problems.Add('track must be auto, deployment, update, add-node or repair.')
+    }
+    $updateTrackValue = Get-AzlSonarMember $Config 'updateTrack'
+    if ($null -ne $updateTrackValue -and ([string]$updateTrackValue).ToLowerInvariant() -notin 'auto', 'off') {
+        $problems.Add('updateTrack must be auto or off.')
     }
 
     $identityModel = [string](Get-AzlSonarMember $Config 'identityModel' '')
@@ -289,9 +306,19 @@ function Read-AzlSonarConfig {
         subscriptionId = ([string]$raw.subscriptionId).ToLowerInvariant()
         resourceGroup  = [string]$raw.resourceGroup
         clusterName    = [string]$raw.clusterName
-        apiVersion     = [string](Get-AzlSonarMember $raw 'apiVersion' '2025-09-15-preview')
-        edgeApiVersion = [string](Get-AzlSonarMember $raw 'edgeApiVersion' '2025-12-01-preview')
+        # GA versions, current on Microsoft Learn for 12.2609 (latest); a preview version stays configurable. The fallback is
+        # tried once when the first is not accepted ('' = no fallback).
+        apiVersion     = [string](Get-AzlSonarMember $raw 'apiVersion' '2026-10-01')
+        apiVersionFallback = [string](Get-AzlSonarMember $raw 'apiVersionFallback' '2025-10-01')
+        edgeApiVersion = [string](Get-AzlSonarMember $raw 'edgeApiVersion' '2026-10-01')
         provisioningRoute = ([string](Get-AzlSonarMember $raw 'provisioningRoute' 'auto')).ToLowerInvariant()
+        # Which operation is followed once the deployment is done: auto (an update when Azure reports one), update, add-node or repair.
+        # The shape of the deployment (release 2609): what the page and the guidance say about it; the steps come from Azure either way.
+        clusterPattern = $(if (([string](Get-AzlSonarMember $raw 'clusterPattern' 'Standard')).ToLowerInvariant() -eq 'rackaware') { 'RackAware' } else { 'Standard' })
+        architecture   = ([string](Get-AzlSonarMember $raw 'architecture' 'hyperconverged')).ToLowerInvariant()
+        internalDns    = [bool](Get-AzlSonarMember $raw 'internalDns' $false)
+        track          = ([string](Get-AzlSonarMember $raw 'track' 'auto')).ToLowerInvariant()
+        updateTrack    = ([string](Get-AzlSonarMember $raw 'updateTrack' 'auto')).ToLowerInvariant()
         identityModel  = $identityModel
         pollSeconds    = $pollSeconds
         nodes          = $nodeArray
@@ -335,6 +362,10 @@ function ConvertTo-AzlSonarPublicConfig {
         nodes         = @($nodes)
         logs          = [ordered]@{ paths = [string[]]@($Config.logs.paths) }
         pollSeconds   = $Config.pollSeconds
+        profile       = $(if ($null -ne (Get-AzlSonarMember $Config 'clusterPattern')) {
+                $p = Get-AzlSonarDeploymentProfile -Config $Config
+                [ordered]@{ clusterPattern = $p.clusterPattern; architecture = $p.architecture; internalDns = $p.internalDns; notes = [string[]]@($p.notes) }
+            } else { $null })
         startedAt     = Format-AzlSonarDate $StartedAt
         serverId      = if ($ServerId) { $ServerId } else { $null }
     }

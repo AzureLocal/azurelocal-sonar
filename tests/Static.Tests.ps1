@@ -88,17 +88,17 @@ Describe 'Web files (no CDN, no external resources)' {
 }
 
 Describe 'Module manifest' {
-    It 'is valid and exports the five public functions of the design' {
+    It 'is valid and exports the five public functions of the design and the three recording tools' {
         $manifest = Test-ModuleManifest -Path $script:SonarManifest -ErrorAction Stop
         @($manifest.ExportedFunctions.Keys | Sort-Object) | Should -Be @(
-            'ConvertTo-AzlSonarStepTree', 'Get-AzlSonarDeploymentState', 'Get-AzlSonarPhaseGuidance', 'Read-AzlSonarConfig', 'Start-AzlSonarServer'
+            'ConvertTo-AzlSonarStepTree', 'Export-AzlSonarBundle', 'Export-AzlSonarPublishableRecording', 'Get-AzlSonarDeploymentState', 'Get-AzlSonarPhaseGuidance', 'Read-AzlSonarConfig', 'Start-AzlSonarServer', 'Test-AzlSonarPublishableRecording'
         )
     }
 
-    It 'imports and exports the same five functions' {
+    It 'imports and exports the same functions as the manifest' {
         Import-SonarTestModule
         @((Get-Module AzlSonar).ExportedFunctions.Keys | Sort-Object) | Should -Be @(
-            'ConvertTo-AzlSonarStepTree', 'Get-AzlSonarDeploymentState', 'Get-AzlSonarPhaseGuidance', 'Read-AzlSonarConfig', 'Start-AzlSonarServer'
+            'ConvertTo-AzlSonarStepTree', 'Export-AzlSonarBundle', 'Export-AzlSonarPublishableRecording', 'Get-AzlSonarDeploymentState', 'Get-AzlSonarPhaseGuidance', 'Read-AzlSonarConfig', 'Start-AzlSonarServer', 'Test-AzlSonarPublishableRecording'
         )
     }
 }

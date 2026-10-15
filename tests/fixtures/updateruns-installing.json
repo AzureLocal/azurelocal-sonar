@@ -1,0 +1,35 @@
+{
+  "value": [
+    {
+      "name": "20261010-0900-old",
+      "properties": {
+        "timeStarted": "2026-10-10T09:00:00Z",
+        "duration": "PT2H",
+        "progress": { "name": "Update", "status": "Error", "startTimeUtc": "2026-10-10T09:00:00Z", "endTimeUtc": "2026-10-10T11:00:00Z", "steps": [ { "name": "Old step", "status": "Error", "errorMessage": "an earlier attempt failed" } ] }
+      }
+    },
+    {
+      "name": "20261014-2100-run",
+      "properties": {
+        "timeStarted": "2026-10-14T21:00:00Z",
+        "duration": "PT0H42M",
+        "lastUpdatedTime": "2026-10-14T21:40:00Z",
+        "progress": {
+          "name": "Update the solution",
+          "status": "InProgress",
+          "startTimeUtc": "2026-10-14T21:00:00Z",
+          "steps": [
+            { "name": "Prepare", "status": "Success", "startTimeUtc": "2026-10-14T21:00:00Z", "endTimeUtc": "2026-10-14T21:10:00Z", "expectedExecutionTime": "PT10M", "steps": [
+                { "name": "Check health", "status": "Success", "startTimeUtc": "2026-10-14T21:00:00Z", "endTimeUtc": "2026-10-14T21:05:00Z" }
+            ] },
+            { "name": "Install the solution update", "status": "InProgress", "startTimeUtc": "2026-10-14T21:10:00Z", "steps": [
+                { "name": "Update node 1", "status": "Success", "startTimeUtc": "2026-10-14T21:10:00Z", "endTimeUtc": "2026-10-14T21:30:00Z" },
+                { "name": "Update node 2", "status": "InProgress", "startTimeUtc": "2026-10-14T21:30:00Z", "steps": [ { "name": "Reboot node", "status": "Unknown status" } ] }
+            ] },
+            { "name": "Finish", "status": "Unknown status", "steps": [] }
+          ]
+        }
+      }
+    }
+  ]
+}

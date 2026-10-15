@@ -1,0 +1,7 @@
+{
+  "value": [
+    { "name": "azlocal-validate-0001", "properties": { "provisioningState": "Running", "timestamp": "2026-10-11T18:20:00Z", "mode": "Incremental" } },
+    { "name": "azlocal-validate-0002", "properties": { "provisioningState": "Running", "timestamp": "2026-10-11T18:55:00Z", "mode": "Incremental" } },
+    { "name": "unrelated", "properties": { "provisioningState": "Succeeded", "timestamp": "2026-10-11T19:30:00Z", "mode": "Incremental" } }
+  ]
+}

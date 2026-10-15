@@ -100,6 +100,8 @@
     <button id="banner-close" type="button" class="btn btn-ghost btn-sm" aria-label="Dismiss message">Dismiss</button>
   </div>
 
+  <ul id="live-notes" class="live-notes" aria-label="Notes on this run" role="status" hidden></ul>
+
   <main id="main" class="layout">
     <div class="col-left">
       <section id="prov-panel" class="panel panel-prov" aria-labelledby="prov-title" hidden>
@@ -128,9 +130,15 @@
           <h2 id="guidance-title">Log access</h2>
           <span id="guidance-model" class="pill pill-muted"></span>
         </div>
-        <div id="guidance-tabs" class="seg seg-sm" role="group" aria-label="Show guidance for phase"></div>
-        <div id="guidance-body" class="panel-body guidance-body">
-          <p class="muted">Loading guidance&hellip;</p>
+        <div class="guidance-line">
+          <p id="guidance-summary" class="guidance-summary">Log access: waiting for data</p>
+          <button id="guidance-toggle" type="button" class="btn btn-ghost btn-sm" aria-expanded="false" aria-controls="guidance-detail">Show details</button>
+        </div>
+        <div id="guidance-detail" class="guidance-detail" hidden>
+          <div id="guidance-tabs" class="seg seg-sm" role="group" aria-label="Show guidance for phase"></div>
+          <div id="guidance-body" class="panel-body guidance-body">
+            <p class="muted">Loading guidance&hellip;</p>
+          </div>
         </div>
       </section>
     </div>

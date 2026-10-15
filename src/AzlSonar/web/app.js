@@ -10,10 +10,12 @@
   var POLL_MS = 5000;              // fallback polling interval
   var SSE_MAX_BACKOFF_MS = 30000;
   var THEME_KEY = 'azlsonar.theme';
-  var PHASES = ['provisioning', 'arc-registration', 'validation', 'deployment', 'done', 'failed'];
+  var GUIDANCE_KEY = 'azlsonar.guidanceOpen';
+  var PHASES = ['provisioning', 'arc-registration', 'validation', 'deployment', 'done', 'failed', 'update', 'add-node', 'repair'];
   var PHASE_LABEL = {
     provisioning: 'Provisioning', 'arc-registration': 'Arc registration', validation: 'Validation',
-    deployment: 'Deployment', done: 'Done', failed: 'Failed', 'post-deployment': 'Post-deployment'
+    deployment: 'Deployment', done: 'Done', failed: 'Failed', 'post-deployment': 'Post-deployment',
+    update: 'Update', 'add-node': 'Add node', repair: 'Repair'
   };
   var ROUTE_LABEL = { simplified: 'Simplified machine provisioning (preview)', 'oem-image': 'OEM image + Arc registration' };
   var STATUS_LABEL = {
@@ -49,14 +51,14 @@
     follow: true,
     newWhilePaused: 0,
     rendered: 0,
-    treeSig: { provisioning: null, validation: null, extensions: null, deployment: null },
+    treeSig: { provisioning: null, validation: null, extensions: null, deployment: null, update: null },
     expanded: new Map(),        // key -> bool (user choice)
-    sectionCollapsed: { provisioning: false, validation: false, extensions: false, deployment: false },
+    sectionCollapsed: { provisioning: false, validation: false, extensions: false, deployment: false, update: false },
     provAutoCollapsed: false,   // the provisioning section was collapsed once validation started
     provTree: [],               // one synthetic tree item per machine (provisioningTreeOf)
     extTree: [],                // OEM image route, from Validate on: one item per machine with its extensions
     stepIndex: new Map(),       // key -> { node, section, parentKey }
-    focusKey: { provisioning: null, validation: null, extensions: null, deployment: null },
+    focusKey: { provisioning: null, validation: null, extensions: null, deployment: null, update: null },
     selectedKey: null,
     currentKey: null,
     lastAutoKey: null,
@@ -524,6 +526,43 @@
   }
 
   // JSON Lines text as events; lines that are not JSON objects are counted, not thrown.
+  // Notes under the header that explain what the step list alone would hide (all read from the state):
+  // Azure lagging behind the node, the Environment Checker stage of Deploy mode, and the tracks built from the
+  // REST reference only (update, add-node, repair), which are marked as not verified against a live run.
+  function liveNotes(s) {
+    var out = [];
+    if (!isObj(s)) return out;
+    var lag = isObj(s.lag) ? s.lag : null;
+    if (lag && lag.detected && lag.message) {
+      out.push({ kind: 'lag', text: str(lag.message) + ' (read from ' + (str(lag.source) || 'another source') + ', not from the Azure step list)' });
+    }
+    var ec = isObj(s.environmentChecker) ? s.environmentChecker : null;
+    if (ec && ec.stage && ec.stage !== 'none' && ec.stage !== 'validate' && ec.stage !== 'cloud-deployment' && ec.label) {
+      out.push({ kind: 'checker', text: str(ec.label) + (ec.source ? ' (' + (ec.source === 'node log' ? 'from the node log' : str(ec.source)) + ')' : '') });
+    }
+    var up = isObj(s.update) ? s.update : null;
+    if (up && ['installing', 'preparing', 'failed', 'attention'].indexOf(str(up.phase)) >= 0) {
+      var what = up.active && up.active.version ? ' ' + str(up.active.version) : '';
+      out.push({ kind: 'update', text: 'Update' + what + ': ' + str(up.phase) + '. This track is built from the Microsoft Learn REST reference and is unverified against a live run.' });
+    }
+    var tr = str(s.track).toLowerCase();
+    if (tr === 'add-node' || tr === 'repair') {
+      out.push({ kind: 'track', text: phaseLabel(tr) + ' (set in the config): Sonar shows the Arc machines and the node log; the steps are not reported by Azure. Unverified against a live run.' });
+    }
+    return out;
+  }
+
+  function renderLiveNotes() {
+    var host = $('live-notes');
+    if (!host) return;
+    var notes = liveNotes(app.state);
+    host.textContent = '';
+    host.hidden = !notes.length;
+    notes.forEach(function (n) {
+      host.appendChild(el('li', { class: 'live-note live-note-' + n.kind, text: n.text }));
+    });
+  }
+
   function replayParseLines(text) {
     var events = [], invalid = 0;
     str(text).split(/\r?\n/).forEach(function (line) {
@@ -542,7 +581,7 @@
     return ans;
   }
 
-  var REPLAY_PHASE_SHORT = { provisioning: 'Provisioning', 'arc-registration': 'Arc registration', validation: 'Validate', deployment: 'Deploy' };
+  var REPLAY_PHASE_SHORT = { provisioning: 'Provisioning', 'arc-registration': 'Arc registration', validation: 'Validate', deployment: 'Deploy', update: 'Update' };
 
   function treeStartMin(nodes) {
     var min = NaN;
@@ -920,7 +959,7 @@
       normStatus: normStatus, phaseLabel: phaseLabel, phaseChipText: phaseChipText, provisioningTreeOf: provisioningTreeOf,
       provisioningSummary: provisioningSummary, provisioningCollapse: provisioningCollapse, arcSourceText: arcSourceText,
       lifecycleLabel: lifecycleLabel, stepGroupOf: stepGroupOf, probeNote: probeNote, extensionsTreeOf: extensionsTreeOf,
-      readyForValidate: readyForValidate,
+      readyForValidate: readyForValidate, liveNotes: liveNotes, guidanceSummary: guidanceSummary,
       replayDiff: replayDiff, replayApplyOps: replayApplyOps, replayParseLines: replayParseLines, replayLoad: replayLoad,
       replayStateIndexAt: replayStateIndexAt, replayStateAt: replayStateAt, replayLogCountAt: replayLogCountAt,
       replayTailerIndexAt: replayTailerIndexAt, replayPosition: replayPosition, fmtOffset: fmtOffset, mainSteps: mainSteps,
@@ -1226,7 +1265,7 @@
     var phase = normPhase(s.phase);
     if (phase === 'failed') return { key: 'error', label: 'Failed' };
     if (phase === 'done') return { key: 'success', label: 'Succeeded' };
-    if (phase === 'deployment' || phase === 'validation') {
+    if (phase === 'deployment' || phase === 'validation' || phase === 'update') {
       var k = sectionStatus(s[phase]);
       var label = STATUS_LABEL[k];
       if (k === 'success' && phase === 'validation') label = 'Validation succeeded';
@@ -1340,6 +1379,7 @@
     indexSection('validation');
     indexSection('extensions');
     indexSection('deployment');
+    indexSection('update');
     var stillIndexed = !!filterKey && app.stepIndex.has(filterKey);
     var change = stepFilterChange(filterKey, stillIndexed, windowBefore, stillIndexed ? windowSignature(stepWindow()) : null);
     if (change === 'clear') {
@@ -1363,6 +1403,7 @@
       autoScroll = true;
     }
     renderHeader();
+    renderLiveNotes();
     renderTree(autoScroll);
     renderGuidance();
     if (app.filter.stepKey) renderChips();
@@ -1395,7 +1436,7 @@
     var s = app.state, cur = isObj(s.current) ? s.current : null;
     // 1. follow current.stepPath (ids or names) in the named phase
     if (cur && Array.isArray(cur.stepPath) && cur.stepPath.length) {
-      var secs = cur.phase === 'validation' || cur.phase === 'deployment' ? [cur.phase] :
+      var secs = cur.phase === 'validation' || cur.phase === 'deployment' || cur.phase === 'update' ? [cur.phase] :
         (cur.phase === 'provisioning' || cur.phase === 'arc-registration' ? ['provisioning'] : ['deployment', 'validation']);
       for (var si = 0; si < secs.length; si++) {
         var nodes = secs[si] === 'provisioning' ? app.provTree : (isObj(s[secs[si]]) ? arr(s[secs[si]].tree) : []), found = null;
@@ -1422,7 +1463,7 @@
         walk(n.children, depth + 1);
       });
     }
-    ['deployment', 'validation'].forEach(function (sec) {
+    ['update', 'deployment', 'validation'].forEach(function (sec) {
       if (!best && isObj(s[sec])) walk(s[sec].tree, 0);
     });
     if (!best && (s.activePhase === 'provisioning' || s.activePhase === 'arc-registration')) walk(app.provTree, 0);
@@ -1493,7 +1534,7 @@
     var s = app.state || {};
 
     renderProvisioningPanel();
-    ['provisioning', 'validation', 'extensions', 'deployment'].forEach(function (section) {
+    ['provisioning', 'validation', 'extensions', 'deployment', 'update'].forEach(function (section) {
       var sec = section === 'provisioning' ? (isObj(s.provisioning) ? s.provisioning : {}) : (isObj(s[section]) ? s[section] : {});
       var tree = section === 'provisioning' ? app.provTree : section === 'extensions' ? app.extTree : arr(sec.tree);
       var target = section === 'provisioning' ? provHost : host;
@@ -1508,7 +1549,7 @@
     });
 
     // keep validation, then the extensions installed during Validate, above deployment
-    var order = ['validation', 'extensions', 'deployment'].map(function (k) { return host.querySelector('[data-section="' + k + '"]'); })
+    var order = ['validation', 'extensions', 'deployment', 'update'].map(function (k) { return host.querySelector('[data-section="' + k + '"]'); })
       .filter(Boolean);
     for (var oi = 1; oi < order.length; oi++) {
       if (order[oi - 1].nextSibling !== order[oi]) host.insertBefore(order[oi], order[oi - 1].nextSibling);
@@ -1556,7 +1597,7 @@
   function buildSection(section, sec, tree) {
     var isProv = section === 'provisioning' || section === 'extensions';
     var title = section === 'provisioning' ? 'Machines' : section === 'extensions' ? 'Extensions (installed during Validate)' :
-      section === 'validation' ? 'Validation' : 'Deployment';
+      section === 'validation' ? 'Validation' : section === 'update' ? 'Update (unverified against a live run)' : 'Deployment';
     var what = section === 'extensions' ? 'Extensions' : phaseLabel(sec.phase);
     var st = isProv ? normStatus(sec.status) : sectionStatus(sec);
     var collapsed = !!app.sectionCollapsed[section];
@@ -1950,6 +1991,46 @@
     return out;
   }
 
+  // The one-line status of the Log access panel (collapsed by default): where the logs are read from, with which
+  // account, whether tailing works and when the last line arrived.
+  function guidanceSummary(tailer, g, lastLineMs, hasConfig) {
+    var parts = [];
+    var t = isObj(tailer) ? tailer : null;
+    var st = t ? str(t.state).toLowerCase() : '';
+    if (st === 'connected') parts.push('Tailing ' + (t.node ? 'node ' + str(t.node) : 'the seed node'));
+    else if (st) parts.push('Tailer ' + st + (t && t.node ? ' (node ' + str(t.node) + ')' : ''));
+    else parts.push('Tailer not started');
+    if (t && t.credential) parts.push('as ' + str(t.credential));
+    else if (isObj(g)) {
+      var a = pick(g, ['account', 'accounts', 'user', 'who', 'readBy']);
+      if (a !== undefined) {
+        var first = str(listOf(a)[0]).split(/(?<=[.;])\s/)[0];
+        parts.push('account: ' + (first.length > 90 ? first.slice(0, 87) + '\u2026' : first));
+      }
+    }
+    if (typeof lastLineMs === 'number' && !isNaN(lastLineMs)) parts.push('last line ' + fmtAgo(lastLineMs));
+    else if (st === 'connected') parts.push('no line yet');
+    return 'Log access: ' + parts.join(' \u00b7 ');
+  }
+
+  function guidanceOpen() {
+    try { return localStorage.getItem(GUIDANCE_KEY) === '1'; } catch (e) { return false; }
+  }
+
+  function setGuidanceOpen(open, remember) {
+    $('guidance-detail').hidden = !open;
+    var b = $('guidance-toggle');
+    b.setAttribute('aria-expanded', String(open));
+    b.textContent = open ? 'Hide details' : 'Show details';
+    if (remember) { try { localStorage.setItem(GUIDANCE_KEY, open ? '1' : '0'); } catch (e) { /* storage blocked: the panel still opens */ } }
+  }
+
+  function renderGuidanceSummary() {
+    var last = app.store && app.store.lines.length ? parseTime(app.store.lines[app.store.lines.length - 1].received || app.store.lines[app.store.lines.length - 1].time) : NaN;
+    var view = app.guidancePhase || (app.state ? normPhase(app.state.activePhase || app.state.phase) : '');
+    $('guidance-summary').textContent = guidanceSummary(app.tailer, app.guidance ? phaseGuidance(view) : null, last, !!app.config);
+  }
+
   function listOf(v) {
     if (v === null || v === undefined || v === '') return [];
     if (Array.isArray(v)) return v.map(function (x) { return isObj(x) ? (x.path || x.name || x.text || JSON.stringify(x)) : str(x); }).filter(Boolean);
@@ -1965,6 +2046,7 @@
   }
 
   function renderGuidance() {
+    renderGuidanceSummary();
     var body = $('guidance-body'), tabs = $('guidance-tabs');
     var cur = app.state ? normPhase(app.state.phase) : 'provisioning';
     var model = guidanceModel();
@@ -2028,6 +2110,10 @@
     if (when !== undefined) row('When', textList(listOf(when), false));
     var how = pick(g, ['how', 'access', 'method']);
     if (how !== undefined) row('How', textList(listOf(how), false));
+    var profile = app.config && isObj(app.config.profile) ? arr(app.config.profile.notes) : [];
+    if (profile.length) row('This deployment', textList(profile.map(str), false));
+    var timing = pick(g, ['timing', 'duration', 'expected']);
+    if (timing !== undefined) row('How long', textList(listOf(timing), false));
     var cmds = pick(g, ['commands', 'checks']);
     if (cmds !== undefined && listOf(cmds).length) row('Commands', textList(listOf(cmds), true));
 
@@ -2356,6 +2442,10 @@
       if (mql.addEventListener) mql.addEventListener('change', onChange); else if (mql.addListener) mql.addListener(onChange);
     }
     $('export-btn').addEventListener('click', doExport);
+    setGuidanceOpen(guidanceOpen(), false);
+    $('guidance-toggle').addEventListener('click', function () { setGuidanceOpen($('guidance-detail').hidden, true); });
+    var alertLink = document.querySelector('#tailer-alert a[href="#guidance-panel"]');
+    if (alertLink) alertLink.addEventListener('click', function () { setGuidanceOpen(true, false); });
     $('banner-close').addEventListener('click', function () {
       app.bannerDismissed = Array.from(app.errors.values()).join('|');
       $('banner').hidden = true;

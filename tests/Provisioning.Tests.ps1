@@ -4,14 +4,14 @@ param()
 Set-StrictMode -Version Latest
 
 # The two ways Azure Local machines get ready before the cluster deployment (plan task S-8):
-#  - simplified machine provisioning: edge machines (api 2025-12-01-preview) with their jobs/ProvisionOs. The fixtures in
+#  - simplified machine provisioning: edge machines (api 2026-10-01) with their jobs/ProvisionOs. The fixtures in
 #    tests/fixtures are the recorded live responses of the 10 Oct 2026 run (copied from azurelocal-ztp, neutral ids);
 #    job-provisionos-failed.json is derived from them with a sample InstallExtensions failure (an extension download
 #    error: 'Failed to download extension AzureEdgeRemoteSupport: unable to connect to the remote server'; the message
 #    and the error code are placeholders).
 #  - OEM image + Arc registration: no edge machines; the Arc machine carries the host name. Arc registration is read
 #    on the node (OS image update and bootstrap, tests/fixtures/arc-*.json) and in Azure (the Arc machine); the four
-#    mandatory extensions (Microsoft.HybridCompute/machines/extensions, api 2024-07-10) install during Validate and
+#    mandatory extensions (Microsoft.HybridCompute/machines/extensions, api 2026-07-15) install during Validate and
 #    are read only once a validation exists.
 # Every ARM call is mocked; nothing reaches Azure.
 
@@ -155,7 +155,7 @@ Describe 'Simplified machine provisioning (edge machines, recorded live shapes)'
         $state.current.stepPath[0] | Should -Be 'node-02'
         $state.current.status | Should -Be 'running'
         $state.nodes[0].arcSource | Should -Be 'edgeMachine.job'
-        $script:ArmCalls | Should -Contain '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example/providers/Microsoft.HybridCompute/machines/00000000-0000-0000-0000-000000000000-1?api-version=2024-07-10'
+        $script:ArmCalls | Should -Contain '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example/providers/Microsoft.HybridCompute/machines/00000000-0000-0000-0000-000000000000-1?api-version=2026-07-15'
         ($script:ArmCalls -match 'machines/node-0[12]\?') | Should -BeNullOrEmpty -Because 'simplified provisioning does not name the Arc machine after the host'
         ($script:ArmCalls -match '/extensions\?') | Should -BeNullOrEmpty -Because 'the simplified route reads the extensions from the edge machine'
         Should -Invoke -ModuleName AzlSonar -CommandName Invoke-AzRestMethod -ParameterFilter { $Method -ne 'GET' } -Times 0 -Exactly
@@ -213,7 +213,7 @@ Describe 'Simplified machine provisioning (edge machines, recorded live shapes)'
         $state = Get-AzlSonarDeploymentState -Config (New-RouteConfig -ArcNames @{ 'node-01' = 'my-arc-01' }) -Now $script:Now
         $state.nodes[0].arcMachineName | Should -Be 'my-arc-01'
         $state.nodes[0].arcSource | Should -Be 'config'
-        $script:ArmCalls | Should -Contain '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.HybridCompute/machines/my-arc-01?api-version=2024-07-10'
+        $script:ArmCalls | Should -Contain '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.HybridCompute/machines/my-arc-01?api-version=2026-07-15'
         $state.nodes[1].arcSource | Should -Be 'edgeMachine.job'
     }
 
@@ -510,7 +510,7 @@ Describe 'OEM image + Arc registration (no edge machines)' {
         $state.provisioning.routeSource | Should -Be 'auto'
         $state.phase | Should -Be 'validation'
         $state.provisioning.readyForValidate | Should -BeFalse -Because 'validation has started'
-        $script:ArmCalls | Should -Contain '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.HybridCompute/machines/node-01/extensions?api-version=2024-07-10'
+        $script:ArmCalls | Should -Contain '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.HybridCompute/machines/node-01/extensions?api-version=2026-07-15'
         @($state.provisioning.nodes[0].tree | ForEach-Object { $_['name'] }) | Should -Be @('OS image update', 'Bootstrap', 'Azure registration') -Because 'the extensions are not part of Arc registration'
 
         $state.extensions.shown | Should -BeTrue

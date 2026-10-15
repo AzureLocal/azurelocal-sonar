@@ -1,6 +1,7 @@
 Set-StrictMode -Version Latest
 
-$script:AzlSonarArcApiVersion = '2024-07-10'
+# Microsoft.HybridCompute machines and machines/extensions: the current GA version on Microsoft Learn (no property changes since 2024-07-10).
+$script:AzlSonarArcApiVersion = '2026-07-15'
 # The mandatory Arc extensions of an Azure Local machine (extension resource names on the Arc machine).
 $script:AzlSonarMandatoryExtensions = @('AzureEdgeDeviceManagement', 'AzureEdgeLifecycleManager', 'AzureEdgeRemoteSupport', 'AzureEdgeTelemetryAndDiagnostics')
 # An Arc machine resource id Sonar will GET (ids read from Azure are checked against it before use).
@@ -28,11 +29,13 @@ function Invoke-AzlSonarArmGet {
         try { $body = ConvertFrom-Json -InputObject $content -Depth 64 } catch { $body = $null }
     }
     $message = $null
+    $errorCode = ''
     if ($code -ge 400) {
         $message = [string](Get-AzlSonarMember $body 'error.message' '')
+        $errorCode = [string](Get-AzlSonarMember $body 'error.code' '')
         if (-not $message) { $message = "HTTP $code" }
     }
-    return [pscustomobject]@{ StatusCode = $code; Body = $body; ErrorMessage = $message }
+    return [pscustomobject]@{ StatusCode = $code; Body = $body; ErrorMessage = $message; ErrorCode = $errorCode }
 }
 
 function Get-AzlSonarResourceGroupPath {
@@ -199,7 +202,7 @@ function Get-AzlSonarArcExtension {
         The mandatory Azure Local extensions of one Arc machine (OEM image route; read once a validation exists:
         the extensions install during cluster Validate, not during Arc registration).
     .DESCRIPTION
-        GETs {arc machine}/extensions (api 2024-07-10) and returns one entry per mandatory extension
+        GETs {arc machine}/extensions (api 2026-07-15) and returns one entry per mandatory extension
         (AzureEdgeDeviceManagement, AzureEdgeLifecycleManager, AzureEdgeRemoteSupport, AzureEdgeTelemetryAndDiagnostics):
         { name, present, rawStatus (properties.provisioningState), status (normalised), message
         (properties.instanceView.status.message), start (systemData.createdAt), end (systemData.lastModifiedAt or
@@ -1121,7 +1124,11 @@ function Get-AzlSonarDeploymentState {
 
         [AllowNull()]
         [AllowEmptyCollection()]
-        [string[]]$Secret = @()
+        [string[]]$Secret = @(),
+
+        # What the newest node log lines say (Get-AzlSonarLogHint): used to label an Azure state that lags behind the node.
+        [AllowNull()]
+        [System.Collections.IDictionary]$LogHint
     )
 
     $ErrorActionPreference = 'Stop'
@@ -1132,6 +1139,15 @@ function Get-AzlSonarDeploymentState {
 
     $settingsPath = '{0}/providers/Microsoft.AzureStackHCI/clusters/{1}/deploymentSettings/default?api-version={2}' -f $rgPath, [uri]::EscapeDataString($Config.clusterName), $Config.apiVersion
     $settings = Invoke-AzlSonarArmGet -Path $settingsPath
+    $fallback = [string](Get-AzlSonarMember $Config 'apiVersionFallback' '')
+    if ($settings.StatusCode -eq 400 -and $settings.ErrorCode -in 'InvalidApiVersionParameter', 'NoRegisteredProviderFound' -and $fallback -and $fallback -ne $Config.apiVersion) {
+        # The configured api-version is not served here (a preview that is not rolled out, or a new GA): try the fallback once.
+        $retry = Invoke-AzlSonarArmGet -Path ($settingsPath -replace 'api-version=[^&]+$', "api-version=$fallback")
+        if ($retry.StatusCode -ne 400) {
+            $settings = $retry
+            $warnings.Add("api-version $($Config.apiVersion) was not accepted for deploymentSettings; used $fallback. Set apiVersion in the config to stop this warning.")
+        }
+    }
     $properties = $null
     if ($settings.StatusCode -eq 200) {
         $properties = Get-AzlSonarMember $settings.Body 'properties'
@@ -1233,19 +1249,59 @@ function Get-AzlSonarDeploymentState {
         }
     }
 
+    # Azure lag and the Environment Checker stage (gap 4), and the update track (gap 5). All read-only and best effort.
+    $modeValue = Get-AzlSonarMember $properties 'deploymentMode'
+    $provisioningStateValue = Get-AzlSonarMember $properties 'provisioningState'
+    foreach ($profileWarning in @((Get-AzlSonarDeploymentProfile -Config $Config).warnings)) { $warnings.Add([string]$profileWarning) }
+    $armDeployment = if ($provisioningStateValue -ne 'Succeeded') { Get-AzlSonarRunningArmDeployment -Config $Config } else { $null }
+    $lag = Get-AzlSonarLagStatus -Mode $modeValue -DeploymentTree $deploymentTree -ProvisioningState $provisioningStateValue -SettingsModifiedAt ([string](Get-AzlSonarMember $settings.Body 'systemData.lastModifiedAt' '')) -LogHint $LogHint -ArmDeployment $armDeployment -Now $Now
+    $environmentChecker = Get-AzlSonarEnvironmentCheckerStage -Mode $modeValue -DeploymentTree $deploymentTree -DeploymentStatus $deploymentStatus -ProvisioningState $provisioningStateValue -LogHint $LogHint
+    if ($lag.detected -and $lag.kind -eq 'deploy-not-reported') {
+        # Azure has no step yet: show the role:interface that runs on the seed node as the live step, marked as read from the node log.
+        $current = [ordered]@{ phase = 'deployment'; stepPath = @(); stepNames = @($lag.nodeStep); stepName = [string]$lag.nodeStep; stepId = $null; status = 'running'; source = 'node log' }
+    }
+    $trackSetting = ([string](Get-AzlSonarMember $Config 'track' 'auto')).ToLowerInvariant()
+    $updateSetting = ([string](Get-AzlSonarMember $Config 'updateTrack' 'auto')).ToLowerInvariant()
+    $update = $null
+    $phaseOut = $phaseInfo.phase
+    $activeOut = $active
+    if ($updateSetting -ne 'off' -and ($phaseInfo.phase -eq 'done' -or $trackSetting -eq 'update')) {
+        $update = Get-AzlSonarUpdateState -Config $Config -Now $Now -Warnings $warnings
+        if ($update.status -eq 'running' -and $update.phase -in 'installing', 'preparing') {
+            $phaseOut = 'update'
+            $activeOut = 'update'
+            $current = Get-AzlSonarCurrentStep -Tree @($update.tree) -Phase 'update'
+        }
+        elseif ($update.status -eq 'error' -and $update.phase -in 'failed', 'attention') {
+            $phaseOut = 'failed'
+            $activeOut = 'update'
+            $current = Get-AzlSonarCurrentStep -Tree @($update.tree) -Phase 'update'
+        }
+    }
+    # add-node and repair have no resource of their own in the REST reference: the track is declared in the config and
+    # Sonar follows the Arc machines and the node log (guidance card, phase label); unverified against a live run.
+    if ($trackSetting -in 'add-node', 'repair' -and $phaseOut -eq 'done') {
+        $phaseOut = $trackSetting
+        $activeOut = $trackSetting
+    }
+
     return [ordered]@{
         cluster           = $Config.clusterName
         resourceGroup     = $Config.resourceGroup
-        mode              = Get-AzlSonarMember $properties 'deploymentMode'
-        provisioningState = Get-AzlSonarMember $properties 'provisioningState'
-        phase             = $phaseInfo.phase
-        activePhase       = $active
+        mode              = $modeValue
+        provisioningState = $provisioningStateValue
+        phase             = $phaseOut
+        activePhase       = $activeOut
         provisioning      = [ordered]@{ route = $route; routeSource = $routeSource; phase = $provisioningPhase; status = $provisioningStatus; readyForValidate = $readyForValidate; nodes = $provisioningNodes }
         extensions        = $extensionsSection
         validation        = [ordered]@{ status = $validationStatus; tree = $validationTree; counts = (Measure-AzlSonarStepTree -Tree $validationTree) }
         deployment        = [ordered]@{ status = $deploymentStatus; tree = $deploymentTree; counts = (Measure-AzlSonarStepTree -Tree $deploymentTree) }
         nodes             = $nodes
         edgeMachines      = @($edgeOut)
+        update            = $update
+        track             = $trackSetting
+        lag               = $lag
+        environmentChecker = $environmentChecker
         current           = $current
         warnings          = $warnings.ToArray()
         pollError         = $null
@@ -1314,7 +1370,8 @@ function Invoke-AzlSonarPollerLoop {
         try {
             $probe = if ($Shared.Contains('NodeProbe')) { $Shared['NodeProbe'] } else { $null }
             $secret = if ($Shared.Contains('Redact')) { [string[]]@($Shared['Redact'] | Where-Object { $_ }) } else { [string[]]@() }
-            $state = Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret
+            $hint = try { Get-AzlSonarLogHint -Shared $Shared } catch { $null }
+            $state = Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint
             Publish-AzlSonarState -Shared $Shared -State $state
         }
         catch {

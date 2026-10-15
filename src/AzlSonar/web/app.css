@@ -303,6 +303,17 @@ a { color: var(--accent); }
 .banner-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .banner-text ul { margin: 0; padding-left: 18px; }
 
+/* Notes under the header: Azure lagging behind the node, the Environment Checker stage, tracks that are not verified live. */
+.live-notes { list-style: none; margin: 10px 20px 0; padding: 0; display: grid; gap: 6px; }
+.live-notes[hidden] { display: none; }
+.live-note {
+  padding: 8px 12px; border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 13px; overflow-wrap: anywhere;
+}
+.live-note-lag { border-left-color: var(--warn); background: var(--warn-soft); }
+.live-note-update, .live-note-track { border-left-color: var(--muted); }
+@media (max-width: 720px) { .live-notes { margin: 10px 16px 0; } }
+
 /* ---------- Layout ---------- */
 
 .layout {
@@ -347,6 +358,10 @@ a { color: var(--accent); }
   .panel-prov .panel-body { max-height: none; flex: 1; }
   .panel-steps .panel-body { max-height: none; flex: 1; }
   .panel-guidance { flex: none; max-height: 42%; }
+.guidance-line { display: flex; align-items: center; gap: 10px; padding: 0 14px 10px; }
+.guidance-summary { flex: 1; min-width: 0; margin: 0; color: var(--text-2); font-size: 13px; overflow-wrap: anywhere; }
+.guidance-detail { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.guidance-detail[hidden] { display: none; }
   .panel-guidance .guidance-body { flex: 1; min-height: 0; overflow: auto; }
   .panel-logs { height: auto; min-height: 0; }
 }

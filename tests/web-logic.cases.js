@@ -592,4 +592,60 @@ test('replay: the built-in demo recording (?demo=1&replay=1) plays the demo depl
   eq(m.replayLogCountAt(rec, now) > m.replayLogCountAt(rec, now - 30 * 60000), true);
 });
 
+// ---------------------------------------------------------------- hardening 2610: lag, Environment Checker stage, update track
+
+test('liveNotes: nothing to say for a plain deployment state', function () {
+  eq(m.liveNotes({ phase: 'validation', lag: { detected: false }, environmentChecker: { stage: 'none' }, update: null, track: 'auto' }), []);
+  eq(m.liveNotes(null), []);
+});
+
+test('liveNotes: Azure lagging behind the node is labelled with where it was read', function () {
+  var n = m.liveNotes({ lag: { detected: true, kind: 'deploy-not-reported', source: 'node log', message: 'Azure still shows Deploy not started, but the seed node is running BareMetal:X.' } });
+  eq(n.length, 1);
+  eq(n[0].kind, 'lag');
+  eq(/read from node log, not from the Azure step list/.test(n[0].text), true);
+});
+
+test('liveNotes: the limited and full Environment Checker stages show with their source; cloud deployment does not repeat itself', function () {
+  var limited = m.liveNotes({ environmentChecker: { stage: 'limited', label: 'Limited Environment Checker run', source: 'node log' } });
+  eq(limited.map(function (x) { return x.text; }), ['Limited Environment Checker run (from the node log)']);
+  var starting = m.liveNotes({ environmentChecker: { stage: 'starting', label: 'Deploy mode started', source: 'Learn' } });
+  eq(starting.map(function (x) { return x.text; }), ['Deploy mode started (Learn)']);
+  eq(m.liveNotes({ environmentChecker: { stage: 'cloud-deployment', label: 'Cloud deployment', source: 'Azure steps' } }), []);
+});
+
+test('liveNotes: the update, add-node and repair tracks are marked unverified against a live run', function () {
+  var u = m.liveNotes({ update: { phase: 'installing', active: { version: '12.2610.1002.4' } } });
+  eq(u.length, 1);
+  eq(/12\.2610\.1002\.4: installing/.test(u[0].text) && /unverified against a live run/.test(u[0].text), true);
+  eq(m.liveNotes({ update: { phase: 'idle' } }), []);
+  eq(m.liveNotes({ update: { phase: 'available' } }), [], 'an update that is only available is not an operation in progress');
+  var t = m.liveNotes({ track: 'add-node' });
+  eq(/^Add node \(set in the config\)/.test(t[0].text) && /Unverified against a live run/.test(t[0].text), true);
+  eq(m.liveNotes({ track: 'repair' })[0].text.indexOf('Repair'), 0);
+});
+
+test('the update, add-node and repair phases have labels and a header chip', function () {
+  eq(m.phaseLabel('update'), 'Update');
+  eq(m.phaseLabel('add-node'), 'Add node');
+  eq(m.phaseChipText({ phase: 'failed', activePhase: 'update' }), 'Failed: Update');
+  eq(m.phaseChipText({ phase: 'update', activePhase: 'update' }), 'Update');
+});
+
+// ---------------------------------------------------------------- S-12: the one-line Log access status
+
+test('guidanceSummary: tailing, with the account from the guidance and the age of the last line', function () {
+  var now = Date.parse('2026-10-11T12:00:00Z');
+  m.setClock(function () { return now; });
+  var s = m.guidanceSummary({ state: 'connected', node: 'node-01' }, { account: 'The deployment local admin (localAdminUserName): non-built-in. Learn documents no separate LCM user.' }, now - 90000, true);
+  eq(s, 'Log access: Tailing node node-01 \u00b7 account: The deployment local admin (localAdminUserName): non-built-in. \u00b7 last line 1 min ago');
+  m.setClock(null);
+});
+
+test('guidanceSummary: a tailer that failed says so, and the credential in use wins over the guidance', function () {
+  eq(m.guidanceSummary({ state: 'unavailable', node: 'node-01', credential: 'user-01' }, { account: 'x' }, NaN, true), 'Log access: Tailer unavailable (node node-01) \u00b7 as user-01');
+  eq(m.guidanceSummary(null, null, NaN, false), 'Log access: Tailer not started');
+  eq(m.guidanceSummary({ state: 'connected' }, null, NaN, true), 'Log access: Tailing the seed node \u00b7 no line yet');
+});
+
 process.stdout.write(JSON.stringify(cases));

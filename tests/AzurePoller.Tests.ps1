@@ -48,6 +48,26 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
         }
     }
 
+    It 'tries the fallback api-version once when the configured one is not served, and says so' {
+        $script:ArmRoutes.Clear()
+        Add-ArmRoute 'deploymentSettings/default\?api-version=2026-10-01' (New-SonarArmResponse 400 @{ error = @{ code = 'InvalidApiVersionParameter'; message = 'The api-version 2026-10-01 is invalid.' } })
+        Add-ArmRoute 'deploymentSettings/default\?api-version=2025-10-01' (New-SonarArmResponse 200 (Get-SettingsBody -Validation (Get-SonarValidationSuccessFixture) -Deployment ([pscustomobject]@{})))
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 404 $null)
+        $state = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
+        $state.validation.status | Should -Be 'success'
+        $state.pollError | Should -BeNullOrEmpty
+        @($state.warnings) -join ' ' | Should -Match 'api-version 2026-10-01 was not accepted for deploymentSettings; used 2025-10-01'
+        @($script:ArmCalls | Where-Object { $_ -match 'deploymentSettings' }).Count | Should -Be 2
+    }
+
+    It 'does not retry a 400 that is not an api-version problem' {
+        $script:ArmRoutes.Clear()
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 400 @{ error = @{ code = 'BadRequest'; message = 'something else' } })
+        { Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now } | Should -Throw '*something else*'
+        @($script:ArmCalls | Where-Object { $_ -match 'deploymentSettings' }).Count | Should -Be 1
+    }
+
     It 'validation succeeded and deployment {}: phase validation, validation done' {
         Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 200 (Get-SettingsBody -Validation (Get-SonarValidationSuccessFixture) -Deployment ([pscustomobject]@{})))
         Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
@@ -75,9 +95,9 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
         Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
         Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 404 $null)
         $null = Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now
-        $script:ArmCalls[0] | Should -Be '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.AzureStackHCI/clusters/clus01/deploymentSettings/default?api-version=2025-09-15-preview'
-        $script:ArmCalls | Should -Contain '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.HybridCompute/machines/node02?api-version=2024-07-10'
-        ($script:ArmCalls -match 'edgeMachines\?api-version=2025-12-01-preview$') | Should -Not -BeNullOrEmpty
+        $script:ArmCalls[0] | Should -Be '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.AzureStackHCI/clusters/clus01/deploymentSettings/default?api-version=2026-10-01'
+        $script:ArmCalls | Should -Contain '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.HybridCompute/machines/node02?api-version=2026-07-15'
+        ($script:ArmCalls -match 'edgeMachines\?api-version=2026-10-01$') | Should -Not -BeNullOrEmpty
         Should -Invoke -ModuleName AzlSonar -CommandName Invoke-AzRestMethod -ParameterFilter { $Method -ne 'GET' } -Times 0 -Exactly
     }
 
