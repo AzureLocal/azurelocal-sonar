@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://azurelocal.cloud/azurelocal-sonar/reference/events.schema.json",
+  "title": "AzL Sonar event feed (recording format 1)",
+  "description": "One JSON object per line (UTF-8, JSON Lines). The same lines are what Sonar records with -Record and what -Replay plays back, so any tool that appends valid lines to a .jsonl file can be followed or replayed by Sonar. Every line has t (UTC time the event was seen) and k (kind). The first valid line of a file must be a session event. Lines that are not valid JSON objects with t and k are skipped and counted; an unknown kind is ignored (an extension point: a producer may add its own kinds, replay shows only the kinds below). State events come as a keyframe (full) or a delta (ops); a delta before the first keyframe of its session is skipped.",
+  "type": "object",
+  "required": ["t", "k"],
+  "properties": {
+    "t": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC time of the event, ISO 8601 with Z, for example 2026-10-11T08:00:01.000Z. Never goes backwards inside a file."
+    },
+    "k": {
+      "type": "string",
+      "description": "Event kind. Known kinds: session, state, tailer, log, end."
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/session" },
+    { "$ref": "#/$defs/stateFull" },
+    { "$ref": "#/$defs/stateDelta" },
+    { "$ref": "#/$defs/tailer" },
+    { "$ref": "#/$defs/log" },
+    { "$ref": "#/$defs/end" },
+    { "$ref": "#/$defs/unknownKind" }
+  ],
+  "$defs": {
+    "session": {
+      "title": "session: one per Sonar (or producer) start; appending a new session to an existing file is allowed",
+      "type": "object",
+      "properties": {
+        "k": { "const": "session" },
+        "format": { "type": "integer", "minimum": 1, "maximum": 1, "description": "Recording format. A reader refuses a format newer than it knows." },
+        "tool": { "type": "string", "description": "Producer name, for example AzL Sonar." },
+        "version": { "type": "string" },
+        "server": { "type": "string", "description": "Opaque id of this session (hex)." },
+        "cluster": { "type": "string" },
+        "config": {
+          "type": "object",
+          "description": "The public config (no addresses, secret names or secrets): clusterName, cluster, resourceGroup, identityModel, provisioningRoute, nodes[{name, seed}], logs.paths, pollSeconds, startedAt, serverId.",
+          "properties": {
+            "clusterName": { "type": "string" },
+            "cluster": { "type": "string" },
+            "resourceGroup": { "type": "string" },
+            "identityModel": { "type": "string" },
+            "provisioningRoute": { "enum": ["auto", "simplified", "oem-image"] },
+            "nodes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": { "name": { "type": "string" }, "seed": { "type": "boolean" } },
+                "required": ["name"]
+              }
+            },
+            "logs": { "type": "object", "properties": { "paths": { "type": "array", "items": { "type": "string" } } } },
+            "pollSeconds": { "type": "integer" },
+            "startedAt": { "type": "string" },
+            "serverId": { "type": "string" }
+          }
+        },
+        "guidance": { "type": "object", "description": "The per-phase log-access guidance the page shows (data/phase-guidance.json)." }
+      },
+      "required": ["t", "k", "format"]
+    },
+    "stateFull": {
+      "title": "state, keyframe: the whole state the page shows",
+      "type": "object",
+      "properties": {
+        "k": { "const": "state" },
+        "full": { "$ref": "#/$defs/deploymentState" }
+      },
+      "required": ["t", "k", "full"]
+    },
+    "stateDelta": {
+      "title": "state, delta: ops that turn the previous state into the next",
+      "type": "object",
+      "properties": {
+        "k": { "const": "state" },
+        "ops": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "array", "prefixItems": [{ "const": "s" }, { "$ref": "#/$defs/path" }, {}], "minItems": 3, "maxItems": 3, "description": "set: object key, or array index (index = length appends)" },
+              { "type": "array", "prefixItems": [{ "const": "d" }, { "$ref": "#/$defs/path" }], "minItems": 2, "maxItems": 2, "description": "delete an object key (or array item by index)" },
+              { "type": "array", "prefixItems": [{ "const": "t" }, { "$ref": "#/$defs/path" }, { "type": "integer", "minimum": 0 }], "minItems": 3, "maxItems": 3, "description": "truncate the array at path to a length" }
+            ]
+          }
+        }
+      },
+      "required": ["t", "k", "ops"]
+    },
+    "path": {
+      "type": "array",
+      "items": { "type": ["string", "integer"] },
+      "description": "Object keys (strings) and array indexes (integers) from the root of the state."
+    },
+    "deploymentState": {
+      "type": "object",
+      "description": "What /api/state returns. Only the fields below are read by the page; a producer fills what it knows. Step trees are arrays of { id, name, description, status, rawStatus, start, end, durationSeconds, errors[], children[] }; status is one of notstarted, running, success, error, skipped, unknown.",
+      "properties": {
+        "cluster": { "type": "string" },
+        "resourceGroup": { "type": "string" },
+        "mode": { "type": ["string", "null"], "description": "Validate or Deploy, as Azure reports it." },
+        "provisioningState": { "type": ["string", "null"] },
+        "phase": { "type": "string", "description": "provisioning, arc-registration, validation, deployment, post-deployment, done or failed." },
+        "activePhase": { "type": "string" },
+        "polledAt": { "type": ["string", "null"] },
+        "provisioning": { "type": "object" },
+        "extensions": { "type": "object" },
+        "nodes": { "type": "array", "items": { "type": "object" } },
+        "validation": { "$ref": "#/$defs/stepSection" },
+        "deployment": { "$ref": "#/$defs/stepSection" },
+        "current": { "type": "object", "properties": { "phase": { "type": "string" }, "stepName": { "type": ["string", "null"] }, "stepPath": { "type": "array", "items": { "type": "string" } } } },
+        "warnings": { "type": "array", "items": { "type": "string" } },
+        "pollError": { "type": ["string", "null"] }
+      }
+    },
+    "stepSection": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string" },
+        "counts": { "type": "object", "additionalProperties": { "type": "integer" } },
+        "tree": { "type": "array", "items": { "$ref": "#/$defs/step" } }
+      }
+    },
+    "step": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": ["string", "null"] },
+        "status": { "enum": ["notstarted", "running", "success", "error", "skipped", "unknown"] },
+        "rawStatus": { "type": ["string", "null"] },
+        "start": { "type": ["string", "null"], "format": "date-time" },
+        "end": { "type": ["string", "null"], "format": "date-time" },
+        "durationSeconds": { "type": ["number", "null"] },
+        "errors": { "type": "array", "items": { "type": "string" } },
+        "children": { "type": "array", "items": { "$ref": "#/$defs/step" } }
+      },
+      "required": ["name"]
+    },
+    "tailer": {
+      "title": "tailer: the status of the log reader",
+      "type": "object",
+      "properties": {
+        "k": { "const": "tailer" },
+        "tailer": {
+          "type": "object",
+          "properties": {
+            "state": { "type": "string", "description": "connected, connecting, unavailable ..." },
+            "reason": { "type": ["string", "null"] },
+            "node": { "type": ["string", "null"] },
+            "activeFiles": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      "required": ["t", "k", "tailer"]
+    },
+    "log": {
+      "title": "log: new log lines, in order",
+      "type": "object",
+      "properties": {
+        "k": { "const": "log" },
+        "lines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "seq": { "type": "integer", "minimum": 1, "description": "Increases by one per line inside a session." },
+              "time": { "type": "string", "description": "Time the line was written (node UTC offset applied)." },
+              "received": { "type": "string", "description": "Time Sonar received the line." },
+              "timeSource": { "enum": ["log", "received"] },
+              "file": { "type": "string" },
+              "level": { "enum": ["info", "warning", "error", "debug", "verbose"] },
+              "text": { "type": "string" }
+            },
+            "required": ["seq", "time", "file", "level", "text"]
+          }
+        },
+        "lost": { "type": "integer", "minimum": 1, "description": "Lines dropped before they were recorded." }
+      },
+      "required": ["t", "k", "lines"]
+    },
+    "end": {
+      "title": "end: the producer stopped cleanly",
+      "type": "object",
+      "properties": { "k": { "const": "end" } },
+      "required": ["t", "k"]
+    },
+    "unknownKind": {
+      "title": "any other kind: skipped by the reader (extension point for other tools)",
+      "type": "object",
+      "properties": { "k": { "not": { "enum": ["session", "state", "tailer", "log", "end"] } } },
+      "required": ["t", "k"]
+    }
+  }
+}

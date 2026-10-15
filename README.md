@@ -100,7 +100,9 @@ There is nothing to install: no service, no database, no build step.
 | `-Port` | `8642` | Local port. Pick another if 8642 is taken (Sonar says so). |
 | `-Credential` | (none) | The log account; overrides `credential.source`. |
 | `-NoBrowser` | off | Do not open the browser. |
-| `-Record` | (none) | Also append the run to this recording file (JSON Lines). See [Record and replay](#record-and-replay). |
+| `-Record` | (none) | Also append the run to this recording file (JSON Lines). See [Record and replay](#record-and-replay). A normal recording keeps identifiers (GUIDs, IP addresses, host and cluster names). |
+| `-Publishable` | off | With `-Record`: also replace every identifier with a stable pseudonym, so the recording can be shared. Needs a new file. See [Share a recording](#share-a-recording-publishable). |
+| `-ExtraTerm` | (none) | With `-Publishable`: extra strings that must never appear (a company or site name). |
 
 Add `?demo=1` to the page URL to see the page with built-in sample data (no API calls): a running deployment. `?demo=1&route=simplified` shows three machines on simplified machine provisioning (one provisioned, one installing the OS, one failed at `InstallExtensions`); `?demo=1&route=oem` shows two machines registering on the OEM image route (one updating its OS image, in `Download`; one bootstrapping, in `ArcConfiguration > ArcRegistration`). `?demo=1&replay=1` plays the demo deployment as a built-in recording, so you can try the replay controls without a file.
 
@@ -116,7 +118,8 @@ Sonar can keep what the page was sent during a run and play it back later throug
 
 - The recording is JSON Lines, one event per line with its UTC time: a `session` header (Sonar version, the public config and the guidance), every published state (the first as a keyframe, then only what changed), every tailer status and every log line. An unchanged state is not written; a new keyframe follows once the changes since the last one add up to its size, so a long deployment stays small and any moment can be rebuilt quickly.
 - Appending: start Sonar again with the same file and it adds a new session (nothing is overwritten). A file cut off mid-line (Sonar killed) is fine: the reader skips the partial line.
-- Masked: only what the page was sent is written, after masking. Every string is masked again on the way to the file (the log account's password, `password=`, `secret=`, `token=`, `Bearer ...`, SAS `sig=`, `-Password ...`), plus the Key Vault vault and secret names as exact values. No credential, token or secret name reaches the file; node addresses are not in it either.
+- Masked: only what the page was sent is written, after masking. Every string is masked again on the way to the file (the log account's password, `password=`, `secret=`, `token=`, `Bearer ...`, SAS `sig=`, `-Password ...`), plus the Key Vault vault and secret names as exact values. No credential, token or secret name reaches the file.
+- **Recordings keep identifiers unless you record with `-Publishable`.** Masking removes secrets only. A normal recording still holds the subscription, tenant and principal GUIDs, IP and MAC addresses, the resource group, cluster and node names and host and domain names that appear in the logs and the step tree. Treat it like a log export and do not publish it as it is; see [Share a recording](#share-a-recording-publishable).
 - `recordPath` in the config does the same as `-Record` (relative to the config file). The page shows a red **Recording** pill while it records.
 - The `recordings/` folder of this repository is git-ignored. A recording holds the deployment's log text: treat it like a log export.
 
@@ -134,7 +137,26 @@ Sonar can keep what the page was sent during a run and play it back later throug
 | `-Autoplay` | off | Start playing at once instead of paused. |
 | `-Port`, `-NoBrowser` | | As for a live run. |
 
+**Large recordings.** The page is sent the recording as one document, so a replay of a very long run needs memory in proportion to its size. A real five-hour recording of 137 MB (203,000 log lines, many of them very long) is better replayed after it is made publishable with the long lines cut (`-MaxLogTextLength`): see [Share a recording](#share-a-recording-publishable) for the measured start time and memory. `.jsonl.gz` is read directly.
+
 The page says **Replay of clus01 · recorded 11 Oct 2026, 08:00** (your cluster and date) in a striped bar under the header, with a **Replay** badge, *Replay (not live)* instead of *Live* and *Logs (replay)* as the log title, so it is never mistaken for a live run. The transport bar has play/pause (Space when nothing else has the focus), the speed buttons, a scrubber over the whole run with markers (Arc registration, Validate, Deploy, each main Deploy step, failures, a Sonar restart, the end; click one to jump, or use **Jump to…**) and the position as the time since the current phase began (**Deploy +1:42:10**) next to the recorded clock time. Scrubbing rebuilds the exact state at that moment (the last keyframe before it plus the changes after it). Timers, durations and *Last poll* run on the replay clock. Export is not offered in a replay (the recording is the export).
+
+## Share a recording (publishable)
+
+A recording made with `-Publishable` (or rewritten with `scripts/Protect-Recording.ps1`) has every identifier replaced by a stable pseudonym (the same value always gets the same token inside one recording), keeps the structure, timestamps, step names and durations, and replays the same. The finished file is read back with a set of identifier detectors; if anything is left, nothing is written.
+
+```powershell
+# while recording (a new file; the finished file is verified, or renamed .NOT-PUBLISHABLE):
+./Start-AzlSonar.ps1 -ConfigPath ./config/clus01.json -Record ./recordings/clus01.shareable.jsonl -Publishable
+
+# from a recording you already have (the source is never changed):
+./scripts/Protect-Recording.ps1 -Path ./recordings/clus01.jsonl -Destination ./recordings/clus01.publishable.jsonl.gz -MaxBytes 15MB
+
+# count what is left, per category (never the values):
+./scripts/Protect-Recording.ps1 -Path ./recordings/clus01.publishable.jsonl.gz -VerifyOnly
+```
+
+Token formats: `00000000-0000-0000-0000-000000000001` for GUIDs, `192.0.2.x`, `198.51.100.x`, `203.0.113.x` for IPv4, `2001:db8::N` for IPv6, `sub-0001`, `rg-01`, `cluster-01`, `node-01`, `host-01.dom-01.example.test`, `user-01`. See [Publishable recordings](docs/reference/publishable-recordings.md) for all of them, what the check can and cannot see, and what to review by hand before you publish. `examples/recording.publishable.example.jsonl` is a small recording made this way.
 
 ## Configuration reference
 
@@ -145,8 +167,11 @@ Unknown fields are ignored. Sonar validates the file at start and lists every pr
 | `subscriptionId` | yes | | Subscription GUID of the Azure Local instance. |
 | `resourceGroup` | yes | | Resource group of the instance (and its Arc machines and edge machines). |
 | `clusterName` | yes | | The `Microsoft.AzureStackHCI/clusters` resource name. |
-| `apiVersion` | no | `2025-09-15-preview` | api-version for `clusters/deploymentSettings`. |
-| `edgeApiVersion` | no | `2025-12-01-preview` | api-version for `edgeMachines` and their `jobs` (they do not exist in older versions). |
+| `apiVersion` | no | `2026-10-01` | api-version for `clusters/deploymentSettings` and the update resources. The newest GA version on Microsoft Learn (the template reference lists no property change since 2024-04-01). A preview version stays possible (`2025-09-15-preview`, for a subscription that is whitelisted for it). |
+| `apiVersionFallback` | no | `2025-10-01` | Tried once when `apiVersion` is not accepted (`InvalidApiVersionParameter`, `NoRegisteredProviderFound`); Sonar says so in the warnings. Empty = no fallback. |
+| `edgeApiVersion` | no | `2026-10-01` | api-version for `edgeMachines` and their `jobs` (GA from 2026-10-01; the earlier versions are previews, from `2025-12-01-preview`). |
+| `track` | no | `auto` | `auto` follows the deployment and an update when Azure reports one. `add-node` or `repair` shows that operation after deployment (guidance, the Arc machines and the node log; Azure reports no steps for them). `update` always reads the update resources. Add node and repair are unverified against a live run. |
+| `updateTrack` | no | `auto` | `off` never calls the update resources (`updateSummaries`, `updates`, `updateRuns`). |
 | `provisioningRoute` | no | `auto` | How the machines get ready before deployment: `simplified` (simplified machine provisioning, edge machines), `oem-image` (OEM image + Arc registration; edge machines are never read) or `auto` (simplified when edge machines for the configured nodes exist in the resource group, else oem-image). See [the two routes](#how-the-machines-get-ready-the-two-routes). |
 | `identityModel` | yes | | `LocalIdentity` or `ActiveDirectory`. Picks the account guidance and whether `TrustedHosts` is needed. |
 | `pollSeconds` | no | `20` | Azure poll interval, 5 to 3600 seconds. |
@@ -197,7 +222,11 @@ The header shows the current phase, worked out from what Azure reports, in this 
 | **Validation** | `reportedProperties.validationStatus` has steps | The validation step tree: each step's status, start, end, duration and error text, the running step with a live timer, progress counts. |
 | **Deployment** | `reportedProperties.deploymentStatus` has steps | The nested deployment step tree (steps within steps), with the same detail, and the live logs from the seed node. |
 | **Done** | The deployment succeeded | The finished trees with durations; the logs stay on the node. |
+| **Update** (unverified against a live run) | Azure reports an update installing (`updateSummaries` state *UpdateInProgress*) on a deployed cluster | The update's step tree from `updateRuns` (steps, times, expected time when Azure gives it, errors), the update version and the summary (solution and SBE version, failed health checks). Built from the Microsoft Learn REST reference only. |
+| **Add node**, **Repair** (unverified against a live run) | `track` is `add-node` or `repair` in the config and the deployment is done | The guidance card (`Add-Server` / `Repair-Server`, monitoring with `Start-MonitoringActionplanInstanceToComplete`, `-Rerun`, storage rebalance), the Arc machines and the live node log. |
 | **Failed** | The active phase reports an error (a failed machine counts during provisioning and Arc registration) | The failed step with its exception text expanded inline; select it to filter the logs to its time window. The phase chip names the phase that failed (`Failed: Provisioning`). |
+
+**When Azure lags behind the node.** The deployment step list can say *Deploy not started* while the seed node is already running (it did, on a live run). Sonar then labels it: the role and interface that the node log shows (for example `BareMetal:EnableWindowsFeaturesForDeployment`) is shown as the current step, marked *from node log*, and a note says where the information was read. After a failed attempt, until Azure rewrites the result, a newer running ARM deployment is shown as *re-run pending*. At the start of Deploy mode a note says which part runs: the limited Environment Checker, the full Environment Checker, then cloud deployment (Learn, 12.2609 latest). Both are inferred from the node log and the ARM deployment list and are unverified end to end.
 
 The Provisioning / Arc registration panel collapses once validation starts; open it again with its *Machines* toggle. The machine data stays in `/api/state` (`provisioning`) and in the export.
 
@@ -221,7 +250,7 @@ Also on the nodes, not tailed by default (add them to `logs.paths` if you need t
 
 ## Which account reads the logs
 
-Learn does not document the permissions on these folders; members of the node's local Administrators could read them in the lab. The page's **Log access** card shows the same guidance for your identity model, with sources.
+Learn does not document the permissions on these folders; members of the node's local Administrators could read them in a live test. The page's **Log access** card shows the same guidance for your identity model, with sources.
 
 | Phase | Local Identity | Active Directory |
 | --- | --- | --- |
@@ -239,7 +268,7 @@ Do not use the built-in `Administrator` for validation or deployment: deployment
 - **Never writes to Azure.** Every Azure call is a `GET` through `Invoke-AzRestMethod`. Arc run command and Arc SSH are not used because both write to Azure.
 - **Never writes to a node.** Each poll runs one read-only script that lists and reads log files with shared read access (the writer and log rotation are never blocked). Over SSH the script is streamed through stdin; no file is written on the node. Sonar keeps no state on the node.
 - **Never changes the workstation.** Sonar reads `TrustedHosts` and tells you what is missing; it never sets it. The only file it ever writes is the recording you ask for with `-Record` (or `recordPath`), and it only appends to it.
-- **Recordings.** A recording holds what the page was sent, masked again on the way to the file (see [Record and replay](#record-and-replay)): no credential, token, Key Vault name or node address. A replay (`-Replay`) reads that file only: no Azure sign-in, no call to Azure, no connection to a node.
+- **Recordings.** A recording holds what the page was sent, masked again on the way to the file (see [Record and replay](#record-and-replay)): no credential, token or Key Vault name. It still holds identifiers unless it was made with `-Publishable`. A replay (`-Replay`) reads that file only: no Azure sign-in, no call to Azure, no connection to a node.
 - **Secrets.** No secret is allowed in the config file. Key Vault secrets are read once at start and kept in memory as a `PSCredential`. `/api/config` and the export carry no secrets, no secret names and no node addresses. Log text is redacted before it is stored, served or exported: the log account's password, and common secret formats (`password=`, `secret=`, `token=`, `AccountKey=`, `Bearer ...`, SAS `sig=`, `-Password ...`).
 - **SSH host keys.** The SSH fallback accepts the node's host key on first use (Posh-SSH `-AcceptKey`). Use it on a management network you trust.
 - **Resource use.** Bounded memory (5000 lines, 5000 snapshots, 2000 tracked files), at most 10 live browser streams, and a slow or stuck browser tab is dropped instead of slowing the others.
@@ -254,7 +283,7 @@ Do not use the built-in `Administrator` for validation or deployment: deployment
 | The page shows **Arc registration** but you use simplified machine provisioning | With `provisioningRoute: auto`, no edge machine matched a configured node. Name the nodes after the edge machines (or their host names), or set `provisioningRoute` to `simplified`. The warnings say how many edge machines matched nothing. |
 | A machine stays **Not started** on the OEM image route | Nothing read on the node and no Arc machine with the node's name in the resource group: run `Invoke-AzStackHciArcInitialization` on the node, or set `nodes[].arcMachineName` if you registered it under another name. The *OS image update* / *Bootstrap* groups say *not read from the node yet* with the reason when Sonar cannot reach the node (same WinRM/SSH requirements as the log tailer). |
 | Logs unavailable: `... is not in the WinRM client TrustedHosts list` | Workgroup (Local Identity) nodes and IP addresses use NTLM. In an elevated session: `Set-Item WSMan:\localhost\Client\TrustedHosts -Value '<address>' -Concatenate -Force`. Check with `Get-Item WSMan:\localhost\Client\TrustedHosts`. |
-| Logs unavailable: `WinRM: Access is denied` | The account is not a local admin on the node, or it is a local account that is not the built-in Administrator and the node filters its token (`LocalAccountTokenFilterPolicy` must be 1; it was 1 on the lab nodes). Use the deployment local admin, not `Administrator`. |
+| Logs unavailable: `WinRM: Access is denied` | The account is not a local admin on the node, or it is a local account that is not the built-in Administrator and the node filters its token (`LocalAccountTokenFilterPolicy` must be 1; it was 1 on the test nodes). Use the deployment local admin, not `Administrator`. |
 | Logs unavailable: WinRM cannot connect (timeout, firewall, `5985`) | WinRM is blocked from this workstation. Install Posh-SSH (`Install-Module Posh-SSH -Scope CurrentUser`) and keep `logs.transport` at `auto`, or set it to `ssh`. SSH needs a credential (prompt, `-Credential` or Key Vault) and `sshd` running on the node. |
 | `SSH: the Posh-SSH module is not installed` | `Install-Module Posh-SSH -Scope CurrentUser`, then restart Sonar. |
 | `Not created yet (checked at every folder listing): C:\CloudDeployment\Logs` | Normal early in Deploy: the folder appears later. The other folders are tailed meanwhile. |
@@ -272,11 +301,13 @@ Do not use the built-in `Administrator` for validation or deployment: deployment
 
 <!-- Screenshots go here once the live run (plan task S-7) is complete: the step tree during Deploy, the live log pane with a step filter, the Log access card, and the dark theme. -->
 
-_Screenshots will be added after the live test on the NIC 2026 lab cluster (plan task S-7)._
+_Screenshots will be added after the live test on a test cluster (plan task S-7)._
 
 ## Further reading
 
 - [Getting started](docs/getting-started.md) and [How it works](docs/how-it-works.md)
 - [Design](docs/design.md): the API, data model and behaviour contract
 - [Research](docs/research.md): Microsoft Learn sources and what was verified live
-- Tests: `Invoke-Pester -Path tests` (Pester 5; no Azure or node calls). Lint: `Invoke-ScriptAnalyzer -Path . -Recurse`.
+- [Publishable recordings](docs/reference/publishable-recordings.md) and the [event feed](docs/reference/events.md) (the JSON Lines contract other tools can emit, and how to launch Sonar from a deployment pipeline)
+- Export bundle: `./scripts/Export-SonarBundle.ps1 -Recording <file> -OutDirectory <dir>` writes a timeline JSON and a self-contained HTML report from any recording.
+- Tests: `Invoke-Pester -Path tests` (Pester 5; no Azure or node calls). Lint: `Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1`. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [CHANGELOG](CHANGELOG.md).

@@ -31,6 +31,14 @@ Sonar has three parts (four while it records a run, see [Record and replay](#rec
 
 **Export** downloads one JSON bundle: the config (no secrets), the guidance, the latest state, the change-only state timeline (a snapshot only when something changed, at most 5000; the latest state is always included) and the log lines, with metadata that says how many snapshots and lines the caps dropped.
 
+## Beyond the deployment
+
+Besides Validate and Deploy, Sonar labels three more situations. They are built from Microsoft Learn only and are **unverified against a live run**:
+
+- **Azure lagging behind the node.** If the deployment step list still says *Deploy not started* while the seed node log shows the orchestrator running a role and interface, the page shows that as the current step (*from node log*) and says so; a newer running ARM deployment is shown as *re-run pending*. At the start of Deploy mode a note names the stage: the limited Environment Checker, the full one, then cloud deployment.
+- **Updates.** After deployment, `updateSummaries`, `updates` and `updateRuns` give an update its own phase, step tree and guidance card.
+- **Add node and repair.** Azure has no resource for them; set `track` to `add-node` or `repair` and Sonar shows the guidance card, the Arc machines and the node log.
+
 ## Record and replay
 
 **Recording** (`-Record <file>` or `recordPath`) adds a fourth part to a live run: a recorder on its own runspace that, every half second, writes what changed since its last look to an append-only JSON Lines file, one event per line with its UTC time:

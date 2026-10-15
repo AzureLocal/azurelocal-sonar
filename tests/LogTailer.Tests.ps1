@@ -818,7 +818,7 @@ Describe 'Invoke-AzlSonarTailerLoop (mocked New-PSSession / Invoke-Command)' {
         # Run the real remote script locally, exactly as the node would.
         Mock -ModuleName AzlSonar -CommandName Invoke-Command -RemoveParameterType Session -MockWith { & $ScriptBlock @ArgumentList }
 
-        $credential = [pscredential]::new('lab\reader', (ConvertTo-SecureString -String 'not-a-real-password' -AsPlainText -Force))
+        $credential = [pscredential]::new('corpeader', (ConvertTo-SecureString -String 'not-a-real-password' -AsPlainText -Force))
         $shared = InModuleScope AzlSonar -Parameters @{ Config = $config; Credential = $credential } {
             param($Config, $Credential)
             $shared = Initialize-AzlSonarSharedState
@@ -836,7 +836,7 @@ Describe 'Invoke-AzlSonarTailerLoop (mocked New-PSSession / Invoke-Command)' {
         @($shared.Files).Count | Should -Be 1
         $shared.Files[0].path | Should -BeLike '*Deploy.log'
         $shared.TailerJson | Should -Not -BeLike '*not-a-real-password*'
-        Should -Invoke -ModuleName AzlSonar -CommandName New-PSSession -Times 1 -Exactly -ParameterFilter { $null -ne $Credential -and $Credential.UserName -eq 'lab\reader' }
+        Should -Invoke -ModuleName AzlSonar -CommandName New-PSSession -Times 1 -Exactly -ParameterFilter { $null -ne $Credential -and $Credential.UserName -eq 'corpeader' }
         Should -Invoke -ModuleName AzlSonar -CommandName Remove-PSSession -Times 1 -Exactly
     }
 

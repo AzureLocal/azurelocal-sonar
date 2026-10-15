@@ -21,8 +21,9 @@ This is the contract every part of Sonar is built to (plan task S-4). Back end, 
   "subscriptionId": "00000000-0000-0000-0000-000000000000",
   "resourceGroup": "rg-example-azl",
   "clusterName": "clus01",
-  "apiVersion": "2025-09-15-preview",
-  "edgeApiVersion": "2025-12-01-preview",
+  "apiVersion": "2026-10-01",
+  "apiVersionFallback": "2025-10-01",
+  "edgeApiVersion": "2026-10-01",
   "provisioningRoute": "auto",
   "identityModel": "LocalIdentity",
   "pollSeconds": 20,
@@ -50,10 +51,10 @@ This is the contract every part of Sonar is built to (plan task S-4). Back end, 
 
 Uses the signed-in Az PowerShell context (`Invoke-AzRestMethod`). Every `pollSeconds`:
 
-1. `GET .../providers/Microsoft.AzureStackHCI/clusters/{cluster}/deploymentSettings/default?api-version={apiVersion}` → `properties.deploymentMode`, `properties.provisioningState`, `properties.reportedProperties.validationStatus` and `.deploymentStatus`. Each status object is `{ status, steps[] }`; a step is `{ name, description, fullStepIndex, startTimeUtc, endTimeUtc, status, steps[]?, exception[]? }` (steps nest; `exception` is an array of strings). Either status object can be `{}` (not started). Learn documents `Error`, `Success`, `InProgress`; the lab also shows `Not Started`. Normalisation is case-insensitive and tolerant: unknown values become `unknown` with the raw value kept in `rawStatus`.
+1. `GET .../providers/Microsoft.AzureStackHCI/clusters/{cluster}/deploymentSettings/default?api-version={apiVersion}` → `properties.deploymentMode`, `properties.provisioningState`, `properties.reportedProperties.validationStatus` and `.deploymentStatus`. Each status object is `{ status, steps[] }`; a step is `{ name, description, fullStepIndex, startTimeUtc, endTimeUtc, status, steps[]?, exception[]? }` (steps nest; `exception` is an array of strings). Either status object can be `{}` (not started). Learn documents `Error`, `Success`, `InProgress`; a live test also shows `Not Started`. Normalisation is case-insensitive and tolerant: unknown values become `unknown` with the raw value kept in `rawStatus`.
 2. Unless `provisioningRoute` is `oem-image`, best effort (ignore 404/400): `GET .../providers/Microsoft.AzureStackHCI/edgeMachines?api-version={edgeApiVersion}` (edge machines exist from 2025-12-01-preview) in the resource group, and for each `GET {edge machine id}/jobs/ProvisionOs?api-version={edgeApiVersion}` (404 before it is submitted; then `properties.operationDetails[name=ProvisionOs].status` stands in).
-3. The route and each node's Arc machine (see *Machine readiness*), then `GET {arc machine resource id}?api-version=2024-07-10` per node → `properties.status` (Connected/Disconnected), `properties.lastStatusChange`, `properties.agentVersion`, `systemData.createdAt`.
-4. OEM image route only, once a validation or deployment has steps, for each Arc machine that exists: `GET {arc machine resource id}/extensions?api-version=2024-07-10` → the four mandatory extensions (they install during Validate, not during Arc registration), into `extensions`.
+3. The route and each node's Arc machine (see *Machine readiness*), then `GET {arc machine resource id}?api-version=2026-07-15` per node → `properties.status` (Connected/Disconnected), `properties.lastStatusChange`, `properties.agentVersion`, `systemData.createdAt`.
+4. OEM image route only, once a validation or deployment has steps, for each Arc machine that exists: `GET {arc machine resource id}/extensions?api-version=2026-07-15` → the four mandatory extensions (they install during Validate, not during Arc registration), into `extensions`.
 
 **Node probe (OEM image route, Arc registration only).** A third worker (`Invoke-AzlSonarNodeProbeLoop`, not started when `provisioningRoute` is `simplified`) runs while `provisioning.route` is `oem-image` and `activePhase` is `arc-registration`. Every `pollSeconds` it opens (and keeps) one connection per unfinished node with the log tailer's transport and account (WinRM, then SSH via Posh-SSH; `logs.transport`) and runs a read-only script: `Get-ArcZeroDaySolutionUpdateStatus` and `Get-ArcBootstrapStatus` with `-ErrorAction SilentlyContinue` (and `-JsonResult` when the command offers it); a missing command is reported as not available (simplified-route nodes, other images). Objects are flattened on the node (enums as names, dates ISO 8601 UTC; Windows PowerShell 5.1). The result lands in `Shared.NodeProbe[node]` and the poller merges it into `provisioning.nodes[]`. A node is finished (no longer read) when its Arc machine is `Connected` and its bootstrap `Succeeded` (or the command is not on it). A failed attempt keeps the last data and records `unreachableSince` (first failure). Messages and errors are masked with `Protect-AzlSonarText` and the credential.
 
@@ -74,13 +75,24 @@ Uses the signed-in Az PowerShell context (`Invoke-AzRestMethod`). Every `pollSec
 
 | | Simplified (`provisioning`) | OEM image (`arc-registration`) |
 | --- | --- | --- |
-| `lifecycle` | `lifecycleDetails.lifecycleStatus.status` (`Creating`, `AwaitingConnection`, `Provisioning`, `ReadyForOs`, `InstallingOs`, `Provisioned`); `NotCreated` without an edge machine | `NotStarted`, `UpdatingOsImage` (update InProgress), `Bootstrapping` (bootstrap running or done but the Arc machine not Connected yet, or the update done and the registration not run again), `Registered` (Arc `Connected` and bootstrap `Succeeded`, or the bootstrap status cannot be read on that node), `Failed` (update or bootstrap Failed, with the node's `Errors[]` text, or the agent Expired), `Unknown` (Arc machine unreadable and nothing read on the node); `lifecycleMessage` adds *Rebooting / unreachable since <time>* while the node does not answer |
+| `lifecycle` | `lifecycleDetails.lifecycleStatus.status` (`Creating`, `AwaitingConnection`, `Provisioning`, `ReadyForOs`, `InstallingOs`, `Provisioned`); `NotCreated` without an edge machine | `NotStarted`, `UpdatingOsImage` (update InProgress), `Bootstrapping` (bootstrap running or done but the Arc machine not Connected yet, or the update done and the registration not run again), `Registered` (Arc `Connected` and bootstrap `Succeeded`, or the bootstrap status cannot be read on that node), `Failed` (update or bootstrap Failed, with the node's `Errors[]` text, or the agent Expired), `Unknown` (Arc machine unreadable and nothing read on the node); `lifecycleMessage` adds *Rebooting / unreachable since `<time>`* while the node does not answer |
 | `tree` | the lifecycle stages with their sub-stages (ids `lifecycle.N`, `lifecycle.N.M`), then one `ProvisionOs job` node (id `job`; status from the job `status`, e.g. `DeploymentSuccess`/`DeploymentFailed`; errors = `properties.error` as `code: message`) whose children are the job's `reportedProperties` validation and deployment steps (ids `job.N`) with their `exception[]` | three groups: `OS image update` (`update`, `update.N`: the `DetailedResponse[]` of `Get-ArcZeroDaySolutionUpdateStatus`), `Bootstrap` (`bootstrap`, `bootstrap.N`, `bootstrap.N.M`: `Get-ArcBootstrapStatus`), node step names kept, `StartTime` dropped on `NotStarted` entries (it is the time of the call), `Errors[]` (or `Message`) as errors; a group the node did not report is `NotAvailable`, `NoData` or `NotRead` with the reason; `Azure registration` (`arc`) with `Arc machine registered` (`arc.machine`) and `Arc agent Connected` (`arc.connected`) |
 | `status` | error when the lifecycle, `provisioningState` or `machineState` failed, the job failed or has an error, or any tree node is in error; success when `Provisioned` and the job succeeded; notstarted without an edge machine; else running | from `lifecycle`: Registered success, Failed error, NotStarted notstarted, Unknown unknown, else running |
 | `percent` | Sonar's estimate: Creating 0, AwaitingConnection 5, Provisioning 15, ReadyForOs 25, InstallingOs 25 + 70 × finished/reported job steps (max 95), Provisioned 100. `reportedPercent` is the job's `percentComplete` (recorded responses showed 50 both mid-run and after success, so it is not drawn) | finished leaf steps / leaf steps (bootstrap + Azure registration, plus the update once it started), at most 99 until Registered (100) |
 | `extensions` | from the edge machine's `reportedProperties.extensionProfile.extensions` (by the extension resource name), informational | empty: the extensions are in `extensions` (top level), read once a validation exists; each extension a step `ext.<name>` (`properties.provisioningState`, start `systemData.createdAt`, end `systemData.lastModifiedAt` or `instanceView.status.time`, error `instanceView.status.message`) |
 
 `provisioning.status` rolls the machines up: error if any, success when all, running when any running or done, else notstarted. Timestamps `0001-01-01T00:00:00Z` mean "not set" and the `MM/dd/yyyy HH:mm:ss` form some job steps use is read as UTC. The response shapes are the recorded live responses of the 10 Oct 2026 simplified provisioning run (`tests/fixtures`); the OEM image shapes follow the HybridCompute REST reference and are not yet checked live.
+
+### Lag, update track and deployment shape (hardening 2610)
+
+Added to the state, all read-only and best effort; see `docs/reference/events.schema.json` for the shape the page reads.
+
+- `lag { detected, kind (deploy-not-reported | rerun-pending), message, source (node log | ARM deployment), nodeStep, since }`. Inputs: the newest running ARM deployment (`GET {resource group}/providers/Microsoft.Resources/deployments/?api-version=2021-04-01&$filter=provisioningState eq 'Running'`, only while `provisioningState` is not `Succeeded`), `systemData.lastModifiedAt` of deploymentSettings and a log hint (`Get-AzlSonarLogHint`: the newest `[Role:Interface]` in the orchestrator logs, and which Environment Checker files wrote). On `deploy-not-reported` the role:interface becomes `current.stepName` with `current.source = "node log"`.
+- `environmentChecker { stage (none | validate | starting | limited | full | cloud-deployment), label, source }` for Deploy mode (Learn: a limited, then a full Environment Checker run, then cloud deployment).
+- `update { verified: false, status, phase (idle | available | preparing | installing | failed | attention), summary, active, run, tree, counts }` from `updateSummaries/default`, `updates` and `updates/{name}/updateRuns` (api-version `apiVersion`, default 2026-10-01); polled once the deployment is `done`, or with `track: update`; `updateTrack: off` never polls it. While an update installs, `phase` and `activePhase` are `update` and `current` follows its steps.
+- `track` (config `track`): `add-node` or `repair` set the phase after deployment; Azure reports no steps for them.
+- Config `clusterPattern`, `architecture` and `internalDns` describe the deployment shape (release 2609). They change no step logic: the public config carries `profile.notes` (what Learn says about the shape) and the poller adds a warning for a combination Learn does not support.
+- `apiVersionFallback` is tried once when `apiVersion` answers 400 `InvalidApiVersionParameter` or `NoRegisteredProviderFound`.
 
 ### State timeline (change-only, capped)
 
@@ -110,7 +122,7 @@ Times with `Z` or an offset are exact. Times without one are node-local and conv
 
 ## Phase guidance (`data/phase-guidance.json`)
 
-Per phase and identity model: which account reads the node logs, where the logs are, when they exist, and the source. Phases: `provisioning`, `arc-registration`, `validation`, `deployment`, `post-deployment`. Documented sources only; anything not confirmed in a lab is marked `"verified": false` (an `observed` note may say what was seen live short of confirming the entry).
+Per phase and identity model: which account reads the node logs, where the logs are, when they exist, and the source. Phases: `provisioning`, `arc-registration`, `validation`, `deployment`, `post-deployment`. Documented sources only; anything not confirmed in a live test is marked `"verified": false` (an `observed` note may say what was seen live short of confirming the entry).
 
 ## HTTP API (localhost only, `http://localhost:{port}/`)
 

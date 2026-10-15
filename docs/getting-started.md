@@ -54,6 +54,8 @@ Add `-Record` to keep the run in a local file (JSON Lines, masked, appended to a
 ./Start-AzlSonar.ps1 -ConfigPath ./config/my-cluster.json -Record ./recordings/my-cluster.jsonl   # recordings/ is git-ignored
 ```
 
+A normal recording masks secrets but **keeps identifiers** (GUIDs, IP addresses, host and cluster names). To share one, record with `-Publishable` (a new file) or rewrite a recording you have with `scripts/Protect-Recording.ps1`: every identifier becomes a stable pseudonym and the finished file is checked. See [Publishable recordings](reference/publishable-recordings.md); `scripts/Export-SonarBundle.ps1` turns any recording into a timeline JSON and a self-contained HTML report.
+
 Play it back later, anywhere, with no Azure sign-in and no access to the nodes:
 
 ```powershell
