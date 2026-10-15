@@ -21,6 +21,12 @@
 .PARAMETER Record
     Append the run to this recording file (JSON Lines; created if missing, appended to after a restart). Overrides
     recordPath in the config.
+.PARAMETER Publishable
+    With -Record: also replace every identifier (GUIDs, IP and MAC addresses, host and domain names, subscription,
+    resource group, cluster and node names, user names) with stable pseudonyms, so the recording can be shared. Needs a
+    new file. The finished file is verified with the identifier detectors; a failed check renames it .NOT-PUBLISHABLE.
+.PARAMETER ExtraTerm
+    With -Publishable: extra strings that must never appear (for example a company or site name).
 .PARAMETER Speed
     Replay: starting speed, recorded seconds per real second (1, 30, 60, 240 are on the page). Default 60.
 .PARAMETER StartAt
@@ -33,6 +39,8 @@
     ./Start-AzlSonar.ps1 -ConfigPath ./config/my-cluster.json
 .EXAMPLE
     ./Start-AzlSonar.ps1 -ConfigPath ./config/my-cluster.json -Record ./recordings/my-cluster.jsonl
+.EXAMPLE
+    ./Start-AzlSonar.ps1 -ConfigPath ./config/my-cluster.json -Record ./recordings/my-cluster.shareable.jsonl -Publishable
 .EXAMPLE
     ./Start-AzlSonar.ps1 -Replay ./recordings/my-cluster.jsonl -Speed 240 -StartAt deployment
 .EXAMPLE
@@ -58,6 +66,12 @@ param(
 
     [Parameter(ParameterSetName = 'Live')]
     [string]$Record,
+
+    [Parameter(ParameterSetName = 'Live')]
+    [switch]$Publishable,
+
+    [Parameter(ParameterSetName = 'Live')]
+    [string[]]$ExtraTerm,
 
     [Parameter(ParameterSetName = 'Replay')]
     [ValidateRange(0.1, 3600)]
@@ -89,6 +103,8 @@ else {
     $serverParameters.ConfigPath = $ConfigPath
     if ($PSBoundParameters.ContainsKey('Credential')) { $serverParameters.Credential = $Credential }
     if ($PSBoundParameters.ContainsKey('Record')) { $serverParameters.Record = $Record }
+    if ($Publishable) { $serverParameters.Publishable = $true }
+    if ($PSBoundParameters.ContainsKey('ExtraTerm')) { $serverParameters.ExtraTerm = $ExtraTerm }
 }
 
 Start-AzlSonarServer @serverParameters

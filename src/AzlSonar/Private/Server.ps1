@@ -748,6 +748,12 @@ function Start-AzlSonarServer {
         [Parameter(ParameterSetName = 'Live')]
         [string]$Record,
 
+        [Parameter(ParameterSetName = 'Live')]
+        [switch]$Publishable,
+
+        [Parameter(ParameterSetName = 'Live')]
+        [string[]]$ExtraTerm = @(),
+
         [Parameter(ParameterSetName = 'Replay')]
         [ValidateRange(0.1, 3600)]
         [double]$Speed = 60,
@@ -777,7 +783,11 @@ function Start-AzlSonarServer {
         $config = Read-AzlSonarConfig -Path $ConfigPath
         Assert-AzlSonarAzContext
         $recordPath = if ($PSBoundParameters.ContainsKey('Record') -and $Record) { $Record } else { [string](Get-AzlSonarMember $config 'recordPath' '') }
+        if ($Publishable -and -not $recordPath) { throw '-Publishable needs a recording: give -Record <file> or set recordPath in the config.' }
         if ($recordPath) { $recordPath = Resolve-AzlSonarRecordPath -Path $recordPath }
+        if ($Publishable -and (Test-Path -LiteralPath $recordPath) -and (Get-Item -LiteralPath $recordPath).Length -gt 0) {
+            throw "A publishable recording needs a new file (its pseudonyms are only stable inside one recording): $recordPath already holds data."
+        }
         $logCredential = Resolve-AzlSonarCredential -Config $config -Credential $Credential
 
         $shared = Initialize-AzlSonarSharedState
@@ -805,7 +815,7 @@ function Start-AzlSonarServer {
         if ($recordPath) {
             # First, so the recording starts with the initial state.
             $sessionJson = New-AzlSonarSessionJson -ConfigJson $server.ConfigJson -GuidanceJson $server.GuidanceJson -ServerId $shared.ServerId -Version $moduleVersion -Cluster $config.clusterName
-            $workerSpecs.Add(@{ Name = 'Recorder'; Command = 'Invoke-AzlSonarRecorderLoop'; Arguments = @{ Shared = $shared; Path = $recordPath; SessionJson = $sessionJson; Config = $config } })
+            $workerSpecs.Add(@{ Name = 'Recorder'; Command = 'Invoke-AzlSonarRecorderLoop'; Arguments = @{ Shared = $shared; Path = $recordPath; SessionJson = $sessionJson; Config = $config; Publishable = [bool]$Publishable; ExtraTerm = @($ExtraTerm) } })
         }
         $workerSpecs.Add(@{ Name = 'Poller'; Command = 'Invoke-AzlSonarPollerLoop'; Arguments = @{ Shared = $shared; Config = $config } })
         $workerSpecs.Add(@{ Name = 'Tailer'; Command = 'Invoke-AzlSonarTailerLoop'; Arguments = @{ Shared = $shared; Config = $config; Credential = $logCredential } })
@@ -814,7 +824,7 @@ function Start-AzlSonarServer {
             $workerSpecs.Add(@{ Name = 'NodeProbe'; Command = 'Invoke-AzlSonarNodeProbeLoop'; Arguments = @{ Shared = $shared; Config = $config; Credential = $logCredential } })
         }
         $startMessage = "AzL Sonar is listening on {0} for $($config.clusterName) (read-only). Press Ctrl+C to stop."
-        if ($recordPath) { $startMessage += " Recording to $recordPath." }
+        if ($recordPath) { $startMessage += " Recording to $recordPath$(if ($Publishable) { ' (publishable: identifiers replaced by pseudonyms)' } else { ' (secrets masked; identifiers are kept: use -Publishable to share it)' })." }
     }
     $shared = $server.Shared
     if (-not (Test-Path -LiteralPath (Join-Path $server.WebRoot 'index.html'))) {

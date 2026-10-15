@@ -166,6 +166,8 @@ function Wait-AzlSonarInterval {
     }
 }
 
+$script:AzlSonarSecretRegex = $null
+
 function Protect-AzlSonarText {
     <#
     .SYNOPSIS
@@ -186,12 +188,16 @@ function Protect-AzlSonarText {
     foreach ($s in $Secret) {
         if (-not [string]::IsNullOrEmpty($s) -and $s.Length -ge 4) { $out = $out.Replace($s, '***') }
     }
-    $patterns = @(
-        '(?i)(\b(?:password|passwd|pwd|secret|client_?secret|access_?token|refresh_?token|api_?key|accountkey|sharedaccesskey)\b\s*[=:]\s*)("[^"]*"|''[^'']*''|[^\s;,&]+)',
-        '(?i)(\bBearer\s+)[A-Za-z0-9\-\._~\+/]+=*',
-        '(?i)(\b(?:sig|se|skoid|sktid)=)[^&\s"]+',
-        '(?i)(-(?:Password|AsPlainText\s+-Force)\s+)("[^"]*"|''[^'']*''|\S+)'
-    )
-    foreach ($p in $patterns) { $out = [regex]::Replace($out, $p, '${1}***') }
+    if ($null -eq $script:AzlSonarSecretRegex) {
+        # Compiled once: this runs on every log line, and a publishable export runs it over hundreds of MB.
+        $options = [System.Text.RegularExpressions.RegexOptions]::Compiled -bor [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
+        $script:AzlSonarSecretRegex = @(
+            '(?i)(\b(?:password|passwd|pwd|secret|client_?secret|access_?token|refresh_?token|api_?key|accountkey|sharedaccesskey)\b\s*[=:]\s*)("[^"]*"|''[^'']*''|[^\s;,&]+)',
+            '(?i)(\bBearer\s+)[A-Za-z0-9\-\._~\+/]+=*',
+            '(?i)(\b(?:sig|se|skoid|sktid)=)[^&\s"]+',
+            '(?i)(-(?:Password|AsPlainText\s+-Force)\s+)("[^"]*"|''[^'']*''|\S+)'
+        ) | ForEach-Object { [regex]::new($_, $options) }
+    }
+    foreach ($p in $script:AzlSonarSecretRegex) { $out = $p.Replace($out, '${1}***') }
     return $out
 }

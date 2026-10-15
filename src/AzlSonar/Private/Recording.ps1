@@ -410,12 +410,22 @@ function Open-AzlSonarRecorder {
 
         [int]$MaxDeltas = $script:AzlSonarRecordingMaxDeltas,
 
-        [datetime]$Now = [datetime]::UtcNow
+        [datetime]$Now = [datetime]::UtcNow,
+
+        [switch]$Publishable,
+
+        [string[]]$ExtraTerm = @(),
+
+        [AllowNull()]
+        [object]$Config
     )
 
     $full = Resolve-AzlSonarRecordPath -Path $Path
     $needsBreak = $false
     $info = [System.IO.FileInfo]::new($full)
+    if ($Publishable -and $info.Exists -and $info.Length -gt 0) {
+        throw "A publishable recording needs a new file (its pseudonyms are only stable inside one recording): $full already holds data. Give a new file name."
+    }
     if ($info.Exists -and $info.Length -gt 0) {
         $probe = [System.IO.FileStream]::new($full, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         try {
@@ -444,6 +454,12 @@ function Open-AzlSonarRecorder {
         DeltaCount    = 0
         Events        = [long]0
         Keyframes     = [long]0
+        Publish       = $null
+        ExtraTerm     = $ExtraTerm
+    }
+    if ($Publishable) {
+        $recorder.Publish = New-AzlSonarPseudonymizer -ExtraTerm $ExtraTerm
+        Register-AzlSonarPublishableConfig -State $recorder.Publish -Config $Config
     }
     $sessionNode = (ConvertTo-AzlSonarProtectedJson -Json ('{' + $SessionJson + '}') -Secret $Secret)[0]
     $body = (ConvertTo-AzlSonarNodeJson $sessionNode).Substring(1)
@@ -476,6 +492,7 @@ function Write-AzlSonarRecordLine {
     $Recorder.LastT = $t
     $stamp = $t.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
     $line = '{"t":"' + $stamp + '","k":"' + $Kind + '"' + $(if ($Body) { ',' + $Body } else { '' }) + '}'
+    if ($null -ne $Recorder.Publish) { $line = Convert-AzlSonarPublishableLine -Line $line -State $Recorder.Publish }
     $Recorder.Writer.Write($line + "`n")
     $Recorder.Events = [long]$Recorder.Events + 1
 }
@@ -599,6 +616,16 @@ function Close-AzlSonarRecorder {
     finally {
         $Recorder.Writer.Dispose()
     }
+    if ($null -ne $Recorder.Publish) {
+        # Fail closed: read the finished file back with the detectors; a hit means it is not safe to publish.
+        $check = Test-AzlSonarPublishableRecording -Path $Recorder.Path -ExtraTerm $Recorder.ExtraTerm -State $Recorder.Publish
+        if (-not $check.Clean) {
+            $rejected = $Recorder.Path + '.NOT-PUBLISHABLE'
+            Move-Item -LiteralPath $Recorder.Path -Destination $rejected -Force
+            $detail = (@($check.ByCategory.GetEnumerator() | Where-Object { $_.Value -gt 0 } | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ')
+            Write-Warning "The publishable recording still holds $($check.Total) original identifier(s) ($detail). It was renamed to $rejected and must not be published. Run scripts/Protect-Recording.ps1 on it with -ExtraTerm for the missing names."
+        }
+    }
 }
 
 function Invoke-AzlSonarRecorderLoop {
@@ -619,11 +646,15 @@ function Invoke-AzlSonarRecorderLoop {
         [string]$SessionJson,
 
         [AllowNull()]
-        [object]$Config
+        [object]$Config,
+
+        [switch]$Publishable,
+
+        [string[]]$ExtraTerm = @()
     )
 
     $secret = Get-AzlSonarRecorderSecret -Shared $Shared -Config $Config
-    $recorder = Open-AzlSonarRecorder -Path $Path -SessionJson $SessionJson -Secret $secret
+    $recorder = Open-AzlSonarRecorder -Path $Path -SessionJson $SessionJson -Secret $secret -Publishable:$Publishable -ExtraTerm $ExtraTerm -Config $Config
     try {
         while (-not $Shared.Stop) {
             Invoke-AzlSonarRecorderStep -Recorder $recorder -Shared $Shared
@@ -653,13 +684,16 @@ function Read-AzlSonarRecording {
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory)]
-        [string]$Path
+        [string]$Path,
+
+        # Keep the parsed JSON of log and tailer events (the replay needs only their text; a long run has hundreds of thousands).
+        [switch]$KeepLogNodes
     )
 
     $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     if (-not [System.IO.File]::Exists($full)) { throw "Recording not found: $full" }
 
-    $stream = [System.IO.FileStream]::new($full, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $stream = [System.IO.FileStream]::new($full, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, 1048576)
     $source = $stream
     if ($full.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
         $source = [System.IO.Compression.GZipStream]::new($stream, [System.IO.Compression.CompressionMode]::Decompress)
@@ -730,7 +764,10 @@ function Read-AzlSonarRecording {
             }
             # continue inside a switch would only leave the switch: the flag decides here.
             if (-not $valid) { $invalid++; continue }
-            $events.Add([pscustomobject]@{ T = $t; Kind = $kind; Line = $line; Node = $node })
+            # A JsonObject is enumerable: assign it to a variable, never through $( ) or an if-expression.
+            $kept = $node
+            if ($kind -in 'log', 'tailer', 'end' -and -not $KeepLogNodes) { $kept = $null }
+            $events.Add([pscustomobject]@{ T = $t; Kind = $kind; Line = $line; Node = $kept })
         }
     }
     catch [System.IO.InvalidDataException] {

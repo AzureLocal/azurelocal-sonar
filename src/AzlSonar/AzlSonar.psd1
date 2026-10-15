@@ -1,6 +1,6 @@
 @{
     RootModule           = 'AzlSonar.psm1'
-    ModuleVersion        = '0.1.0'
+    ModuleVersion        = '0.2.0' # x-release-please-version
     GUID                 = '5d6ee105-e406-4e6b-8227-b2dcd7c9e3c6'
     Author               = 'AzureLocal'
     CompanyName          = 'AzureLocal'
@@ -13,7 +13,10 @@
         'Get-AzlSonarDeploymentState',
         'ConvertTo-AzlSonarStepTree',
         'Get-AzlSonarPhaseGuidance',
-        'Read-AzlSonarConfig'
+        'Read-AzlSonarConfig',
+    'Export-AzlSonarPublishableRecording',
+    'Test-AzlSonarPublishableRecording',
+    'Export-AzlSonarBundle'
     )
     CmdletsToExport      = @()
     VariablesToExport    = @()
