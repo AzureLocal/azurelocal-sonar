@@ -10,6 +10,7 @@ Beacon checks the environment before deployment. Sonar listens to the deployment
 - [Quick start](#quick-start)
 - [Record and replay](#record-and-replay)
 - [Configuration reference](#configuration-reference)
+- [Follow ZTP provisioning](#follow-ztp-provisioning)
 - [How the machines get ready: the two routes](#how-the-machines-get-ready-the-two-routes)
 - [What each phase shows](#what-each-phase-shows)
 - [Where the logs are](#where-the-logs-are)
@@ -194,8 +195,22 @@ Unknown fields are ignored. Sonar validates the file at start and lists every pr
 | `credential.passwordSecret` | for `keyvault` | | Secret that holds the password. |
 | `credential.password`, `.secret`, `.secretValue` | never | | Rejected: secrets never go in the config file. |
 | `recordPath` | no | (none) | Record every run to this file, as with `-Record` (which overrides it). Relative to the config file. See [Record and replay](#record-and-replay). |
+| `ztpEvents.path` | no | (none) | The event file of the [azurelocal-ztp](https://github.com/AzureLocal/azurelocal-ztp) provisioning scripts (JSON Lines: `timestamp`, `node`, `state`, `evidence`, `nextAction`, `level`, `stage`). Sonar follows it and shows each event in the log pane. Relative to the config file. See [Follow ZTP provisioning](#follow-ztp-provisioning). |
 
 Fixed limits (not configurable): the folders are listed (`Get-ChildItem`) on every 3rd log poll or after 60 s, whichever comes first, and the known active files are tailed in between; at most 300 active files and 2000 tracked files; 1 MiB per file per poll; a file already present at start is read from 16 KiB before its end; the back end keeps the last 5000 log lines and up to 5000 state snapshots; at most 10 browser tabs stream at once.
+
+## Follow ZTP provisioning
+
+Before a deployment exists, the machines are provisioned: [azurelocal-ztp](https://github.com/AzureLocal/azurelocal-ztp) mounts a virtual USB over the BMC, boots the nodes into the maintenance environment, collects the ownership vouchers and creates the edge machines. Its watch writes one JSON object per line (`Mounted`, `Booting`, `MaintenanceEnvironmentRunning`, `VoucherWritten`, `ReadyForPortal`, the failure states, and `StageStarted` / `StageCompleted` / `StageFailed`) to a local file. Point Sonar at that file and the events appear in the log pane, ordered by their own UTC time, next to the edge machine progress Sonar already reads from Azure (route `simplified`):
+
+```json
+{
+  "provisioningRoute": "simplified",
+  "ztpEvents": { "path": "./ztp-events.jsonl" }
+}
+```
+
+Sonar only reads the file (it is opened with read sharing while the scripts append) and never writes it. `Start-ZtpMonitor.ps1` in the ZTP repository writes this config for you and starts Sonar. Errors and warnings (`level`) are coloured by the log pane's usual rules; the recording and replay carry the events like any other log line.
 
 ## How the machines get ready: the two routes
 
