@@ -4,6 +4,26 @@ All notable changes to AzL Sonar are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/AzureLocal/azurelocal-sonar/compare/v0.2.0...v0.3.0) (2026-10-16)
+
+
+### Features
+
+* GA api-versions and 12.2609 guidance, Azure lag and Environment Checker stage, update track, deployment shape, collapsed log access ([223bf68](https://github.com/AzureLocal/azurelocal-sonar/commit/223bf6845683b2ecbc7e2b8549787c0f85cb14e6))
+* OEM-route Arc registration phase shows what registration does - OS image update (Get-ArcZeroDaySolutionUpdateStatus: Scan, Download, Install), bootstrap steps (Get-ArcBootstrapStatus incl. ArcConfiguration &gt; ArcRegistration), Arc machine registered and Connected; extensions move to Validate; read-only node probe over WinRM/SSH ([74871d4](https://github.com/AzureLocal/azurelocal-sonar/commit/74871d4e5434d46bad51baff8157475651692153))
+* provisioning route setting and provisioning / Arc registration phases for both routes (simplified and OEM image) - work in progress, committed on owner order ([00c8f78](https://github.com/AzureLocal/azurelocal-sonar/commit/00c8f7801f77f0b28183c236930a768b7a5c4fd7))
+* **recording:** publishable recordings (identifier pseudonyms, verified) and the export bundle ([948991d](https://github.com/AzureLocal/azurelocal-sonar/commit/948991d4df7b6bcf5c2a4e1e680e9e640c29f47d))
+* Sonar back end - ARM poller, seed-node log tailer, HttpListener/SSE server, Start-AzlSonar.ps1, example config (S-5) ([e88fea9](https://github.com/AzureLocal/azurelocal-sonar/commit/e88fea95f41f9df57c89978fa6d61d5f8fc16e80))
+* **web:** clearer confidence badge on the log-access card - 'Confirmed on Azure Local 2609 (Local Identity)' vs 'From Microsoft docs - not yet confirmed', with what was observed and what to do if it differs; README explains it ([f217022](https://github.com/AzureLocal/azurelocal-sonar/commit/f2170225d8f5fb4788ebe0748512257cf1912596))
+* **web:** Sonar page - live step tree, log stream, guidance card, export, demo mode (S-5) ([c6772a8](https://github.com/AzureLocal/azurelocal-sonar/commit/c6772a8c0d6359d34f321aedc2efed8f69b2d908))
+* **ztp:** follow the azurelocal-ztp provisioning event file (ztpEvents.path) in the log pane ([f15754b](https://github.com/AzureLocal/azurelocal-sonar/commit/f15754b608e728b5da2db7461dca575026fc13cc))
+
+
+### Bug Fixes
+
+* GPT review should-fixes - log event times with node UTC offset, page log sequencing and restart detection, SSE flow control and client cap, bounded discovery and state, file filter rebuild, step window re-render, zero-count summaries, rename rotation; docs: README, getting started, how it works ([930433f](https://github.com/AzureLocal/azurelocal-sonar/commit/930433f132c2555182e377485192909f7f22d3d0))
+* loopback-only requests and secret redaction (GPT review blockers); SSH log transport fallback via Posh-SSH stdin; deployment log paths verified live ([d1b889f](https://github.com/AzureLocal/azurelocal-sonar/commit/d1b889f8e3b7514b23090e1aee648b985aa8e027))
+
 ## [Unreleased]
 
 ## [0.2.0] - 2026-10-15
