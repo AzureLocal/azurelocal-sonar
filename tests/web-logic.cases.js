@@ -2,7 +2,7 @@
    Usage: node web-logic.cases.js <path to app.js>. Prints one JSON array: [{ name, ok, message }]. No network, no DOM. */
 'use strict';
 
-var path = process.argv[2];
+var path = require('path').resolve(process.argv[2]);
 var m = require(path);
 var cases = [];
 

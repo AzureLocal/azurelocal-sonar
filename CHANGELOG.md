@@ -26,6 +26,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ## [Unreleased]
 
+### Fixed
+
+- Resolve the web-logic runner's app path from the working directory so the relative path used by Linux CI loads the same module as Pester's absolute path.
+
 ## [0.2.0] - 2026-10-15
 
 Hardening release (owner order of 15 Oct 2026: the tools 100% built out). Everything below that reads Azure or the node is

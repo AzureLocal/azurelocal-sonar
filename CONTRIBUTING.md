@@ -30,6 +30,8 @@ cd docs; npm install; npm run docs:build                                        
 
 ## Commit messages
 
+The page-logic runner accepts an absolute path or a path relative to the current working directory. From the repository root, run `node tests/web-logic.cases.js src/AzlSonar/web/app.js`; it emits the same JSON cases consumed by Pester and CI.
+
 [Conventional Commits](https://www.conventionalcommits.org/): `<type>(<scope>): <description>`.
 
 | Type | When |
