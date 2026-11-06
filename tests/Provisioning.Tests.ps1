@@ -161,6 +161,20 @@ Describe 'Simplified machine provisioning (edge machines, recorded live shapes)'
         Should -Invoke -ModuleName AzlSonar -CommandName Invoke-AzRestMethod -ParameterFilter { $Method -ne 'GET' } -Times 0 -Exactly
     }
 
+    It 'a resubmitted job that succeeded: the earlier attempt''s error is not a failure' {
+        Add-ArmRoute 'edgeMachines/node-01/jobs/ProvisionOs\?' (New-SonarArmResponse 200 (Get-Fixture 'job-provisionos-retried-succeeded.json'))
+        Add-ArmRoute 'edgeMachines/node-02/jobs/ProvisionOs\?' (New-SonarArmResponse 200 (Get-Fixture 'job-provisionos-succeeded.json'))
+        Add-ArmRoute 'edgeMachines\?' (New-EdgeList 'edge-machine-provisioned.json', 'edge-machine-provisioned.json')
+
+        $state = Get-AzlSonarDeploymentState -Config (New-RouteConfig -Route 'simplified') -Now $script:Now
+        $n1 = $state.provisioning.nodes[0]
+        $n1.status | Should -Be 'success'
+        $n1.errors | Should -BeNullOrEmpty
+        $n1.job.error | Should -Match '5901' -Because 'the raw value stays available'
+        $state.provisioning.status | Should -Not -Be 'error'
+        $state.phase | Should -Not -Be 'failed'
+    }
+
     It 'an InstallExtensions failure: step and job error inline, node error, phase failed' {
         Add-ArmRoute 'edgeMachines/node-01/jobs/ProvisionOs\?' (New-SonarArmResponse 200 (Get-Fixture 'job-provisionos-succeeded.json'))
         Add-ArmRoute 'edgeMachines/node-02/jobs/ProvisionOs\?' (New-SonarArmResponse 200 (Get-Fixture 'job-provisionos-failed.json'))

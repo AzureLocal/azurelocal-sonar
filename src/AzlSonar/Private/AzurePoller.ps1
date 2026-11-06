@@ -549,6 +549,7 @@ function ConvertTo-AzlSonarSimplifiedNode {
         start                = $null
         end                  = $null
         errors               = @()
+        previousErrors       = @()
         tree                 = @()
     }
     if ($null -eq $Edge) { return $entry }
@@ -574,6 +575,9 @@ function ConvertTo-AzlSonarSimplifiedNode {
             }
         }
         $jobRawStatus = if ($job.status) { $job.status } elseif ($job.operationStatus) { $job.operationStatus } else { Get-AzlSonarMember $job.deployment 'raw.status' }
+        # Azure keeps properties.error from an earlier attempt after the job is resubmitted, while it runs and after it
+        # succeeds. The error is current only while the job itself reports failure.
+        $jobFailedNow = [string]$job.provisioningState -eq 'Failed' -or (ConvertTo-AzlSonarStepStatus $jobRawStatus) -eq 'error'
         $jobRaw = [pscustomobject]@{
             name          = 'ProvisionOs job'
             description   = 'edgeMachines/jobs/ProvisionOs'
@@ -581,7 +585,7 @@ function ConvertTo-AzlSonarSimplifiedNode {
             startTimeUtc  = $job.start
             endTimeUtc    = $job.end
             status        = $jobRawStatus
-            exception     = @($job.error | Where-Object { $_ })
+            exception     = @($(if ($jobFailedNow) { $job.error }) | Where-Object { $_ })
             steps         = $jobSteps.ToArray()
         }
         $jobNode = @(ConvertTo-AzlSonarStepTree -StatusObject @($jobRaw) -Now $Now)[0]
@@ -590,12 +594,15 @@ function ConvertTo-AzlSonarSimplifiedNode {
 
     $lifecycle = [string]$Edge.lifecycle
     $failures = [System.Collections.Generic.List[string]]::new()
+    $previousErrors = [System.Collections.Generic.List[string]]::new()
+    if ($null -eq $jobNode) { $jobFailedNow = [string]$job.provisioningState -eq 'Failed' }
     if ($lifecycle -match 'Fail') {
         $failures.Add(('Lifecycle {0}: {1}' -f $lifecycle, [string]$Edge.lifecycleMessage).TrimEnd(' ', ':'))
     }
     if ([string]$Edge.provisioningState -eq 'Failed') { $failures.Add('Edge machine provisioningState Failed.') }
     if ([string]$Edge.machineState -eq 'Failed') { $failures.Add('Edge machine machineState Failed: provision the machine again to recover.') }
-    if ($job.error) { $failures.Add("ProvisionOs: $($job.error)") }
+    if ($job.error -and $jobFailedNow) { $failures.Add("ProvisionOs: $($job.error)") }
+    elseif ($job.error) { $previousErrors.Add("ProvisionOs, earlier attempt (the job was resubmitted): $($job.error)") }
     if ([string]$job.provisioningState -eq 'Failed' -and -not $job.error) { $failures.Add('ProvisionOs job provisioningState Failed.') }
 
     $jobStatus = if ($null -ne $jobNode) { [string]$jobNode['status'] } else { $null }
@@ -627,6 +634,7 @@ function ConvertTo-AzlSonarSimplifiedNode {
     $entry.start = if ($starts.Count) { Format-AzlSonarDate $starts[0] } else { $null }
     $entry.end = if ($status -in 'success', 'error' -and $ends.Count) { Format-AzlSonarDate $ends[-1] } else { $null }
     $entry.errors = $failures.ToArray()
+    $entry.previousErrors = $previousErrors.ToArray()
     $entry.tree = $tree.ToArray()
     return $entry
 }
