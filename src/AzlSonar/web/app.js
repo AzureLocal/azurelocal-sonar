@@ -360,6 +360,8 @@
     if (p === 'unknown') return 'unknown';
     var active = str(state.activePhase).toLowerCase();
     if (p === 'failed' && active && active !== 'failed') return 'Failed: ' + phaseLabel(active);
+    // Every machine is done and no cluster deployment has started yet: say so instead of the phase name.
+    if ((p === 'provisioning' || p === 'arc-registration') && readyForValidate(state)) return 'Ready for Validate';
     return phaseLabel(p);
   }
 
@@ -1275,7 +1277,8 @@
     if (isObj(s.provisioning) && arr(s.provisioning.nodes).length) {
       var sum = provisioningSummary(app.provTree);
       if (readyForValidate(s)) {
-        return { key: 'success', label: 'Ready for Validate: ' + sum.ready + ' of ' + sum.total + ' machine' + (sum.total === 1 ? '' : 's') + ' registered' };
+        return { key: 'success', label: 'Ready for Validate: ' + sum.ready + ' of ' + sum.total + ' machine' + (sum.total === 1 ? '' : 's') +
+          (str(s.provisioning.route) === 'oem-image' ? ' registered' : ' provisioned and prepared') };
       }
       var pk = normStatus(s.provisioning.status);
       var what = phaseLabel(s.provisioning.phase || phase);
