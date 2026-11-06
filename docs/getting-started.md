@@ -66,7 +66,7 @@ The page is labelled `Replay of <cluster> · recorded <date>` and has a transpor
 
 ## Configuration
 
-One JSON file per cluster: subscription, resource group, cluster name, identity model (`LocalIdentity` or `ActiveDirectory`), how the machines get ready (`provisioningRoute`: `auto`, `simplified` or `oem-image`), the nodes (name, address, which one is the seed; the Arc resource name only to override what Sonar resolves), the log folders and limits, and where the log account comes from (`prompt`, `parameter` or `keyvault` with secret names). No secret ever goes in the file.
+One JSON file per cluster: subscription, resource group, cluster name, identity model (`LocalIdentity` or `ActiveDirectory`), how the machines get ready (`provisioningRoute`: `auto`, `simplified` or `oem-image`), the nodes (name, address, which one is the seed; the Arc resource name only to override what Sonar resolves), the log folders and limits, and where the log account comes from (`prompt`, `parameter` or `keyvault` with secret names). No secret ever goes in the file. For machines provisioned with simplified machine provisioning by azurelocal-ztp, see [Following a zero-touch provisioning run](./ztp.md): it adds `ztpEvents.path` and sets `provisioningRoute` to `simplified`.
 
 ```json
 {

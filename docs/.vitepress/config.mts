@@ -15,6 +15,7 @@ export default defineConfig({
     sidebar: [
       { text: 'Home', link: '/' },
       { text: 'Getting started', link: '/getting-started' },
+      { text: 'Following a ZTP run', link: '/ztp' },
       { text: 'How it works', link: '/how-it-works' },
       { text: 'Design', link: '/design' },
       { text: 'Research and live findings', link: '/research' },
