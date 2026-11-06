@@ -104,8 +104,115 @@ function Invoke-AzlSonarZtpEventLoop {
             $offset = [long]$chunk.Offset
             $lines = foreach ($raw in $chunk.Lines) { ConvertFrom-AzlSonarZtpEvent -Line $raw }
             if (@($lines).Count -gt 0) { Add-AzlSonarLogLine -Shared $Shared -Line @($lines) }
+            if ($Shared.Contains('ZtpPrepare')) { foreach ($raw in $chunk.Lines) { Add-AzlSonarZtpPrepareEvent -Store $Shared['ZtpPrepare'] -Line $raw } }
         }
         catch { Write-Verbose "ZTP event file poll failed: $($_.Exception.Message)" }
         Wait-AzlSonarInterval -Shared $Shared -Seconds $PollSeconds
+    }
+}
+
+function Add-AzlSonarZtpPrepareEvent {
+    <#
+    .SYNOPSIS
+        Records one ZTP event line in the per-node Prepare store when it belongs to the Prepare stage.
+    .DESCRIPTION
+        azurelocal-ztp's Prepare stage (Initialize-ZtpNode.ps1) writes one event per gate with stage 'Prepare':
+        PrepareStarted, PrepareDriversInstalled, PrepareRestarting, PrepareRestarted, then ReadyForValidate or
+        PrepareFailed. The store maps node name to the events of its latest attempt: PrepareStarted begins a new list,
+        so a rerun replaces the earlier attempt. Other stages and malformed lines are ignored.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$Store,
+
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Line
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Line)) { return }
+    try { $entry = ConvertFrom-Json -InputObject $Line -Depth 8 } catch { return }
+    if ($entry -isnot [pscustomobject]) { return }
+    if ([string](Get-AzlSonarMember $entry 'stage' '') -ne 'Prepare') { return }
+    $node = [string](Get-AzlSonarMember $entry 'node' '')
+    $state = [string](Get-AzlSonarMember $entry 'state' '')
+    if (-not $node -or $node -eq '*' -or -not $state) { return }
+    $record = [ordered]@{
+        state     = $state
+        timestamp = [string](Get-AzlSonarMember $entry 'timestamp' '')
+        evidence  = [string](Get-AzlSonarMember $entry 'evidence' '')
+        level     = [string](Get-AzlSonarMember $entry 'level' 'Info')
+    }
+    # Direct assignment: an if-expression would unroll the stored list.
+    $list = $null
+    if ($Store.Contains($node)) { $list = $Store[$node] }
+    if ($null -eq $list -or $state -eq 'PrepareStarted') { $list = [System.Collections.ArrayList]::new() }
+    $null = $list.Add($record)
+    $Store[$node] = $list
+}
+
+function ConvertTo-AzlSonarPrepareStage {
+    <#
+    .SYNOPSIS
+        The 'Prepare for Validate' step for one node, from its Prepare events: { node (step tree node), status, state, message }.
+    .DESCRIPTION
+        status is success after ReadyForValidate, error after PrepareFailed, running while events arrive, notstarted with
+        none. Each event becomes a child step; the last one runs until the next event or the end.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
+    param(
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$Events = @(),
+
+        [datetime]$Now = [datetime]::UtcNow
+    )
+
+    $labels = @{
+        PrepareStarted          = 'Azure reports Ready to cluster; signed in to the node'
+        PrepareDriversInstalled = 'OEM network drivers and network settings applied'
+        PrepareRestarting       = 'Restarting for the drivers'
+        PrepareRestarted        = 'Back with a new boot time'
+        ReadyForValidate        = 'All checks passed: ready for Validate'
+        PrepareFailed           = 'Prepare failed'
+    }
+    $list = @($Events | Where-Object { $null -ne $_ })
+    $last = if ($list.Count) { $list[-1] } else { $null }
+    $lastState = if ($null -ne $last) { [string]$last['state'] } else { '' }
+    $status = if ($null -eq $last) { 'NotStarted' } elseif ($lastState -eq 'ReadyForValidate') { 'Success' } elseif ($lastState -eq 'PrepareFailed') { 'Failed' } else { 'InProgress' }
+    $steps = for ($i = 0; $i -lt $list.Count; $i++) {
+        $e = $list[$i]
+        $state = [string]$e['state']
+        $stepStatus = if ($state -eq 'PrepareFailed') { 'Failed' } elseif ($i -eq $list.Count - 1 -and $status -eq 'InProgress') { 'InProgress' } else { 'Success' }
+        $end = if ($i + 1 -lt $list.Count) { $list[$i + 1]['timestamp'] } elseif ($stepStatus -ne 'InProgress') { $e['timestamp'] } else { $null }
+        $label = if ($labels.ContainsKey($state)) { $labels[$state] } else { $state }
+        [pscustomobject]@{
+            name          = $state
+            description   = $(if ($e['evidence'] -and $state -ne 'PrepareFailed') { "${label}: $($e['evidence'])" } else { $label })
+            fullStepIndex = "prepare.$i"
+            startTimeUtc  = $e['timestamp']
+            endTimeUtc    = $end
+            status        = $stepStatus
+            exception     = @($(if ($state -eq 'PrepareFailed') { [string]$e['evidence'] }) | Where-Object { $_ })
+        }
+    }
+    $raw = [pscustomobject]@{
+        name          = 'Prepare for Validate'
+        description   = 'azurelocal-ztp Prepare: OEM network drivers, static management address, one default gateway, DNS, time, C:\SBE'
+        fullStepIndex = 'prepare'
+        startTimeUtc  = $(if ($list.Count) { $list[0]['timestamp'] } else { $null })
+        endTimeUtc    = $(if ($status -in 'Success', 'Failed') { $last['timestamp'] } else { $null })
+        status        = $status
+        exception     = @($(if ($status -eq 'Failed') { [string]$last['evidence'] }) | Where-Object { $_ })
+        steps         = @($steps)
+    }
+    $node = @(ConvertTo-AzlSonarStepTree -StatusObject @($raw) -Now $Now)[0]
+    return [ordered]@{
+        node    = $node
+        status  = [string]$node['status']
+        state   = $lastState
+        message = $(if ($null -ne $last -and $last['evidence']) { [string]$last['evidence'] } elseif ($null -ne $last) { $lastState } else { 'Waiting for the Prepare stage' })
     }
 }

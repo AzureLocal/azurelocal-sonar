@@ -91,3 +91,43 @@ Describe 'Invoke-AzlSonarZtpEventLoop' {
         $count | Should -Be 0
     }
 }
+
+Describe 'Prepare stage events (Add-AzlSonarZtpPrepareEvent, ConvertTo-AzlSonarPrepareStage)' {
+    It 'keeps only Prepare events per node, and a new PrepareStarted replaces the earlier attempt' {
+        $out = InModuleScope AzlSonar {
+            $store = [hashtable]::Synchronized(@{})
+            foreach ($l in @(
+                    '{"timestamp":"2026-11-06T02:29:34Z","node":"node-01","state":"PrepareStarted","evidence":"signed in","level":"Info","stage":"Prepare"}',
+                    '{"timestamp":"2026-11-06T02:29:35Z","node":"node-01","state":"Booting","evidence":"x","level":"Info","stage":"Boot"}',
+                    '{"timestamp":"2026-11-06T02:34:13Z","node":"node-01","state":"PrepareDriversInstalled","evidence":"b57nd60a.inf 221.0.8.0","level":"Info","stage":"Prepare"}',
+                    '{"timestamp":"2026-11-06T02:34:17Z","node":"node-01","state":"PrepareFailed","evidence":"session dropped","level":"Error","stage":"Prepare"}',
+                    '{"timestamp":"2026-11-06T02:37:57Z","node":"node-01","state":"PrepareStarted","evidence":"rerun","level":"Info","stage":"Prepare"}',
+                    '{"timestamp":"2026-11-06T02:38:48Z","node":"node-01","state":"ReadyForValidate","evidence":"all checks passed","level":"Info","stage":"Prepare"}',
+                    '{"timestamp":"2026-11-06T02:38:49Z","node":"*","state":"StageCompleted","evidence":"stage Prepare","level":"Info","stage":"Prepare"}',
+                    'not json')) { Add-AzlSonarZtpPrepareEvent -Store $store -Line $l }
+            @($store.Keys), @($store['node-01'] | ForEach-Object { $_['state'] })
+        }
+        $out[0] | Should -Be @('node-01')
+        $out[1] | Should -Be @('PrepareStarted', 'ReadyForValidate')
+    }
+
+    It 'reports notstarted, running, success and error, with the gates as child steps' {
+        $r = InModuleScope AzlSonar {
+            $now = [datetime]'2026-11-06T02:40:00Z'
+            $ev = { param($s, $t, $e) [ordered]@{ state = $s; timestamp = $t; evidence = $e; level = 'Info' } }
+            $none = ConvertTo-AzlSonarPrepareStage -Events @() -Now $now
+            $running = ConvertTo-AzlSonarPrepareStage -Events @((& $ev 'PrepareStarted' '2026-11-06T02:29:34Z' 'signed in'), (& $ev 'PrepareRestarting' '2026-11-06T02:34:17Z' 'a driver asked for a restart')) -Now $now
+            $done = ConvertTo-AzlSonarPrepareStage -Events @((& $ev 'PrepareStarted' '2026-11-06T02:29:34Z' ''), (& $ev 'ReadyForValidate' '2026-11-06T02:36:50Z' 'all checks passed')) -Now $now
+            $failed = ConvertTo-AzlSonarPrepareStage -Events @((& $ev 'PrepareStarted' '2026-11-06T02:29:34Z' ''), (& $ev 'PrepareFailed' '2026-11-06T02:35:00Z' 'no sign-in')) -Now $now
+            [pscustomobject]@{ None = $none.status; Running = $running.status; RunningLast = $running.node['children'][-1]['status']; Done = $done.status; Failed = $failed.status; FailedMessage = $failed.message; Name = $done.node['name']; Children = @($done.node['children']).Count }
+        }
+        $r.None | Should -Be 'notstarted'
+        $r.Running | Should -Be 'running'
+        $r.RunningLast | Should -Be 'running'
+        $r.Done | Should -Be 'success'
+        $r.Failed | Should -Be 'error'
+        $r.FailedMessage | Should -Be 'no sign-in'
+        $r.Name | Should -Be 'Prepare for Validate'
+        $r.Children | Should -Be 2
+    }
+}

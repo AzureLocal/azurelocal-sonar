@@ -524,7 +524,9 @@ function ConvertTo-AzlSonarSimplifiedNode {
         [Parameter(Mandatory)][object]$Node,
         [AllowNull()][object]$Edge,
         [AllowNull()][object]$Arc,
-        [datetime]$Now = [datetime]::UtcNow
+        [datetime]$Now = [datetime]::UtcNow,
+        [switch]$PrepareTracked,
+        [AllowNull()][AllowEmptyCollection()][object[]]$PrepareEvents = @()
     )
 
     $entry = [ordered]@{
@@ -550,6 +552,7 @@ function ConvertTo-AzlSonarSimplifiedNode {
         end                  = $null
         errors               = @()
         previousErrors       = @()
+        prepare              = $null
         tree                 = @()
     }
     if ($null -eq $Edge) { return $entry }
@@ -610,6 +613,16 @@ function ConvertTo-AzlSonarSimplifiedNode {
     if ($failures.Count -gt 0 -or $jobStatus -eq 'error' -or (Get-AzlSonarTreeHasStatus -Tree $tree.ToArray() -Status 'error')) { $status = 'error' }
     elseif ($lifecycle -eq 'Provisioned' -and ($null -eq $jobNode -or $jobStatus -eq 'success')) { $status = 'success' }
 
+    # azurelocal-ztp's Prepare stage runs after Azure reports Provisioned: OEM drivers, static address, gateway, C:\SBE.
+    # When the run is followed, the machine isn't done until Prepare reports ReadyForValidate.
+    $prepare = $null
+    if ($PrepareTracked) {
+        $prepare = ConvertTo-AzlSonarPrepareStage -Events $PrepareEvents -Now $Now
+        $tree.Add($prepare.node)
+        if ($prepare.status -eq 'error') { $failures.Add("Prepare for Validate: $($prepare.message)"); $status = 'error' }
+        elseif ($status -eq 'success' -and $prepare.status -ne 'success') { $status = 'running' }
+    }
+
     $starts = @($tree | ForEach-Object { ConvertTo-AzlSonarUtcDate $_['start'] } | Where-Object { $null -ne $_ } | Sort-Object)
     $ends = @($tree | ForEach-Object { ConvertTo-AzlSonarUtcDate $_['end'] } | Where-Object { $null -ne $_ } | Sort-Object)
 
@@ -634,6 +647,10 @@ function ConvertTo-AzlSonarSimplifiedNode {
     $entry.start = if ($starts.Count) { Format-AzlSonarDate $starts[0] } else { $null }
     $entry.end = if ($status -in 'success', 'error' -and $ends.Count) { Format-AzlSonarDate $ends[-1] } else { $null }
     $entry.errors = $failures.ToArray()
+    if ($null -ne $prepare) {
+        $entry.prepare = [ordered]@{ status = $prepare.status; state = $prepare.state; message = $prepare.message }
+        if ($prepare.status -ne 'success' -and $null -ne $entry.percent -and $entry.percent -ge 100) { $entry.percent = 95 }
+    }
     $entry.previousErrors = $previousErrors.ToArray()
     $entry.tree = $tree.ToArray()
     return $entry
@@ -1130,6 +1147,10 @@ function Get-AzlSonarDeploymentState {
         [AllowNull()]
         [System.Collections.IDictionary]$NodeProbe,
 
+        # azurelocal-ztp Prepare events per node (Add-AzlSonarZtpPrepareEvent). Used when the config follows a ZTP event file.
+        [AllowNull()]
+        [System.Collections.IDictionary]$ZtpPrepare,
+
         [AllowNull()]
         [AllowEmptyCollection()]
         [string[]]$Secret = @(),
@@ -1194,13 +1215,16 @@ function Get-AzlSonarDeploymentState {
     $targets = @(Resolve-AzlSonarArcTarget -Config $Config -Route $route -EdgeMachines $edgeMachines)
     $nodes = @(Get-AzlSonarArcMachineStatus -Config $Config -Target $targets -Warnings $warnings)
 
+    # With a ZTP event file, a simplified-route machine is ready for Validate only after azurelocal-ztp's Prepare stage.
+    $prepareTracked = [bool][string](Get-AzlSonarMember $Config 'ztpEventsPath' '')
     $provisioningNodes = foreach ($node in $Config.nodes) {
         $arc = $null
         foreach ($n in $nodes) { if ($n.name -eq $node.name) { $arc = $n; break } }
         if ($route -eq 'simplified') {
             $edge = $null
             foreach ($machine in $edgeMachines) { if ($machine.node -eq $node.name) { $edge = $machine; break } }
-            ConvertTo-AzlSonarSimplifiedNode -Node $node -Edge $edge -Arc $arc -Now $Now
+            $events = if ($null -ne $ZtpPrepare -and $ZtpPrepare.Contains($node.name)) { @($ZtpPrepare[$node.name]) } else { @() }
+            ConvertTo-AzlSonarSimplifiedNode -Node $node -Edge $edge -Arc $arc -Now $Now -PrepareTracked:$prepareTracked -PrepareEvents $events
         }
         else {
             $probe = if ($null -ne $NodeProbe -and $NodeProbe.Contains($node.name)) { $NodeProbe[$node.name] } else { $null }
@@ -1210,7 +1234,8 @@ function Get-AzlSonarDeploymentState {
     $provisioningNodes = @($provisioningNodes)
     $provisioningStatus = Get-AzlSonarProvisioningRollup -Nodes $provisioningNodes
     $clusterStarted = $validationTree.Count -gt 0 -or $deploymentTree.Count -gt 0
-    $readyForValidate = $route -eq 'oem-image' -and $provisioningStatus -eq 'success' -and -not $clusterStarted
+    $allPrepared = $prepareTracked -and $provisioningNodes.Count -gt 0 -and @($provisioningNodes | Where-Object { $null -ne $_['prepare'] -and $_['prepare'].status -eq 'success' }).Count -eq $provisioningNodes.Count
+    $readyForValidate = ($route -eq 'oem-image' -or ($route -eq 'simplified' -and $allPrepared)) -and $provisioningStatus -eq 'success' -and -not $clusterStarted
 
     # OEM image route: the mandatory extensions install during cluster Validate, so they are read only from then on.
     $extensionsSection = [ordered]@{ shown = $false; status = 'notstarted'; nodes = @() }
@@ -1379,7 +1404,8 @@ function Invoke-AzlSonarPollerLoop {
             $probe = if ($Shared.Contains('NodeProbe')) { $Shared['NodeProbe'] } else { $null }
             $secret = if ($Shared.Contains('Redact')) { [string[]]@($Shared['Redact'] | Where-Object { $_ }) } else { [string[]]@() }
             $hint = try { Get-AzlSonarLogHint -Shared $Shared } catch { $null }
-            $state = Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint
+            $prepare = if ($Shared.Contains('ZtpPrepare')) { $Shared['ZtpPrepare'] } else { $null }
+            $state = Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpPrepare $prepare
             Publish-AzlSonarState -Shared $Shared -State $state
         }
         catch {
