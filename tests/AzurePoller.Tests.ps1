@@ -282,6 +282,69 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
         $node.status | Should -Be 'error'
     }
 
+    It 'provisioning with a ZTP event file: Provisioned machines wait for Prepare, and ready for Validate needs every ReadyForValidate' {
+        $configObject = New-SonarConfigObject
+        $configObject | Add-Member -NotePropertyName ztpEvents -NotePropertyValue ([pscustomobject]@{ path = 'C:\example\ztp-events.jsonl' }) -Force
+        $cfg = Read-AzlSonarConfig -Json (ConvertTo-SonarConfigJson $configObject)
+        $names = @($cfg.nodes | ForEach-Object { $_.name })
+        $edgeList = @{ value = @($names | ForEach-Object {
+                    @{ name = $_; id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.AzureStackHCI/edgeMachines/$_"
+                        properties = @{ provisioningState = 'Succeeded'; machineState = 'Purposed'; connectivityStatus = 'Connected'; arcMachineResourceId = "/subscriptions/x/resourceGroups/y/providers/Microsoft.HybridCompute/machines/$_"
+                            lifecycleDetails = @{ lifecycleStatus = @{ status = 'Provisioned' } } } } }) }
+        $job = @{ properties = @{ status = 'DeploymentSuccess'; provisioningState = 'Succeeded'; reportedProperties = @{ percentComplete = 100; deploymentStatus = @{ status = 'Succeeded'; steps = @(
+                            @{ name = 'BootIntoTargetOS'; fullStepIndex = '0'; status = 'Success'; startTimeUtc = '2026-10-10T17:00:00Z'; endTimeUtc = '2026-10-10T17:30:00Z' }) } } } }
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 404 @{ error = @{ code = 'ResourceNotFound'; message = 'nope' } })
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'jobs/ProvisionOs\?' (New-SonarArmResponse 200 $job)
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 200 $edgeList)
+        $ev = { param($s, $e) [ordered]@{ state = $s; timestamp = '2026-10-10T17:40:00Z'; evidence = $e; level = 'Info' } }
+
+        # Provisioned in Azure, Prepare not started: not done, not ready for Validate.
+        $store = [hashtable]::Synchronized(@{})
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpPrepare $store
+        $state.provisioning.nodes[0].status | Should -Be 'running'
+        $state.provisioning.nodes[0].prepare.status | Should -Be 'notstarted'
+        ($state.provisioning.nodes[0].tree | Where-Object { $_.name -eq 'Prepare for Validate' }) | Should -Not -BeNullOrEmpty
+        $state.provisioning.readyForValidate | Should -BeFalse
+
+        # One machine ready, the other still preparing: still not ready for Validate.
+        $store[$names[0]] = [System.Collections.ArrayList]@((& $ev 'PrepareStarted' ''), (& $ev 'ReadyForValidate' 'all checks passed'))
+        $store[$names[1]] = [System.Collections.ArrayList]@((& $ev 'PrepareStarted' ''), (& $ev 'PrepareRestarting' 'a driver asked for a restart'))
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpPrepare $store
+        $state.provisioning.nodes[0].status | Should -Be 'success'
+        $state.provisioning.nodes[1].status | Should -Be 'running'
+        $state.provisioning.readyForValidate | Should -BeFalse
+
+        # Both ready: ready for Validate.
+        $store[$names[1]] = [System.Collections.ArrayList]@((& $ev 'PrepareStarted' ''), (& $ev 'ReadyForValidate' 'all checks passed'))
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpPrepare $store
+        $state.provisioning.status | Should -Be 'success'
+        $state.provisioning.readyForValidate | Should -BeTrue
+
+        # A Prepare failure is a node error with the reason.
+        $store[$names[1]] = [System.Collections.ArrayList]@((& $ev 'PrepareStarted' ''), (& $ev 'PrepareFailed' 'no sign-in'))
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpPrepare $store
+        $state.provisioning.nodes[1].status | Should -Be 'error'
+        @($state.provisioning.nodes[1].errors) -join ' ' | Should -Match 'Prepare for Validate: no sign-in'
+        $state.provisioning.readyForValidate | Should -BeFalse
+    }
+
+    It 'provisioning without a ZTP event file: a Provisioned machine is done, as before' {
+        $configObject = New-SonarConfigObject
+        $cfg = Read-AzlSonarConfig -Json (ConvertTo-SonarConfigJson $configObject)
+        $name = @($cfg.nodes)[0].name
+        $edgeList = @{ value = @(@{ name = $name; id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.AzureStackHCI/edgeMachines/$name"
+                    properties = @{ provisioningState = 'Succeeded'; machineState = 'Purposed'; connectivityStatus = 'Connected'; arcMachineResourceId = "/subscriptions/x/resourceGroups/y/providers/Microsoft.HybridCompute/machines/$name"; lifecycleDetails = @{ lifecycleStatus = @{ status = 'Provisioned' } } } }) }
+        $job = @{ properties = @{ status = 'DeploymentSuccess'; provisioningState = 'Succeeded' } }
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 404 @{ error = @{ code = 'ResourceNotFound'; message = 'nope' } })
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'jobs/ProvisionOs\?' (New-SonarArmResponse 200 $job)
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 200 $edgeList)
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpPrepare ([hashtable]::Synchronized(@{}))
+        $state.provisioning.nodes[0].status | Should -Be 'success'
+        $state.provisioning.nodes[0].prepare | Should -BeNullOrEmpty
+    }
+
     It 'throws on an ARM error from deploymentSettings' {
         Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 403 @{ error = @{ code = 'AuthorizationFailed'; message = 'The client does not have authorization.' } })
         { Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now } | Should -Throw '*GET deploymentSettings for clus01 failed: The client does not have authorization.*'

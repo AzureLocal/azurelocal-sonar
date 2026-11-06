@@ -52,6 +52,7 @@ function Initialize-AzlSonarSharedState {
             TailerVersion = [long]0
             Redact        = @()   # exact secret values to mask in node text (never serialized)
             NodeProbe     = [hashtable]::Synchronized(@{})   # OEM image route: per-node bootstrap/update status (Invoke-AzlSonarNodeProbeLoop)
+            ZtpPrepare    = [hashtable]::Synchronized(@{})   # simplified route: per-node azurelocal-ztp Prepare events (Invoke-AzlSonarZtpEventLoop)
         })
 }
 
