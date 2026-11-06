@@ -1197,6 +1197,8 @@
     renderHeader();
     renderRecording();
     if (!prev || DEMO || app.replay) return;
+    // Sonar came back with different page files (an update): load them. The old script can't show what the new back end sends.
+    if (c.webVersion && prev.webVersion && c.webVersion !== prev.webVersion && typeof location !== 'undefined') { location.reload(); return; }
     // A new serverId (or, from older back ends, a new startedAt) means the back end restarted.
     var restarted;
     if (c.serverId) {

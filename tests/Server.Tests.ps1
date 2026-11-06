@@ -618,3 +618,24 @@ Describe 'Start-AzlSonarServer end to end (random port, mocked poller and tailer
         Should -Invoke -ModuleName AzlSonar -CommandName Resolve-AzlSonarCredential -Times 0 -Exactly
     }
 }
+
+Describe 'Get-AzlSonarWebVersion' {
+    It 'is a 12-digit fingerprint that changes when a page file changes, and empty for a missing folder' {
+        $r = InModuleScope AzlSonar -Parameters @{ Dir = (Join-Path $TestDrive 'web') } {
+            param($Dir)
+            $null = New-Item -ItemType Directory -Path $Dir -Force
+            Set-Content -LiteralPath (Join-Path $Dir 'index.html') -Value '<html></html>'
+            Set-Content -LiteralPath (Join-Path $Dir 'app.js') -Value 'var a = 1;'
+            $first = Get-AzlSonarWebVersion -WebRoot $Dir
+            $again = Get-AzlSonarWebVersion -WebRoot $Dir
+            Set-Content -LiteralPath (Join-Path $Dir 'app.js') -Value 'var a = 2;'
+            $changed = Get-AzlSonarWebVersion -WebRoot $Dir
+            $missing = Get-AzlSonarWebVersion -WebRoot (Join-Path $Dir 'nope')
+            [pscustomobject]@{ First = $first; Again = $again; Changed = $changed; Missing = $missing }
+        }
+        $r.First | Should -Match '^[0-9a-f]{12}$'
+        $r.Again | Should -Be $r.First
+        $r.Changed | Should -Not -Be $r.First
+        $r.Missing | Should -Be ''
+    }
+}
