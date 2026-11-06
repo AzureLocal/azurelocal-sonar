@@ -265,6 +265,7 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
     It 'GET /<File> is served as <Type>' -TestCases @(
         @{ File = 'app.js'; Type = 'text/javascript; charset=utf-8' }
         @{ File = 'app.css'; Type = 'text/css; charset=utf-8' }
+        @{ File = 'azurelocal-sonar-icon.svg'; Type = 'image/svg+xml' }
     ) {
         param($File, $Type)
         $r = Invoke-SonarRequest "/$File"
