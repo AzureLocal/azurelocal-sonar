@@ -228,6 +228,60 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
         $state.current.stepName | Should -Be 'InstallingOs'
     }
 
+    It 'provisioning: a job error left from an earlier attempt is not a failure while the resubmitted job <Status>' -TestCases @(
+        @{ Status = 'DeploymentInProgress'; State = 'InProgress'; Lifecycle = 'InstallingOs'; Expected = 'running' },
+        @{ Status = 'DeploymentSuccess'; State = 'Succeeded'; Lifecycle = 'Provisioned'; Expected = 'success' }
+    ) {
+        $configObject = New-SonarConfigObject
+        $configObject.nodes[0] | Add-Member -NotePropertyName arcMachineName -NotePropertyValue 'node01' -Force
+        $explicitConfig = Read-AzlSonarConfig -Json (ConvertTo-SonarConfigJson $configObject)
+        $edgeList = @{ value = @(@{
+                    name       = 'node01'
+                    id         = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.AzureStackHCI/edgeMachines/node01'
+                    properties = @{ provisioningState = 'Succeeded'; machineState = 'Transitioning'; connectivityStatus = 'Connected'; arcMachineResourceId = '/subscriptions/x/resourceGroups/y/providers/Microsoft.HybridCompute/machines/node01'
+                        reportedProperties = @{ lifecycle = $Lifecycle } }
+                }) }
+        $job = @{ properties = @{ status = $Status; provisioningState = $State
+                error = @{ code = 'Retryable'; message = 'ErrorCode: [5901]. The device could not read or update its Azure registration.' }
+                reportedProperties = @{ percentComplete = 50; deploymentStatus = @{ status = $State; steps = @(
+                            @{ name = 'CreatedTargetArcMachine'; fullStepIndex = '0'; status = 'Success'; startTimeUtc = '2026-10-10T17:00:00Z'; endTimeUtc = '2026-10-10T17:00:10Z' }
+                        ) } } } }
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 404 @{ error = @{ code = 'ResourceNotFound'; message = 'nope' } })
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'jobs/ProvisionOs\?' (New-SonarArmResponse 200 $job)
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 200 $edgeList)
+
+        $state = Get-AzlSonarDeploymentState -Config $explicitConfig -Now $script:Now
+        $node = $state.provisioning.nodes[0]
+        $node.job.error | Should -Match '5901'
+        @($node.errors).Count | Should -Be 0
+        @($node.previousErrors) -join ' ' | Should -Match 'earlier attempt.*5901'
+        $node.status | Should -Not -Be 'error'
+        $state.phase | Should -Not -Be 'failed'
+    }
+
+    It 'provisioning: a job error is a failure while the job reports failure' {
+        $configObject = New-SonarConfigObject
+        $configObject.nodes[0] | Add-Member -NotePropertyName arcMachineName -NotePropertyValue 'node01' -Force
+        $explicitConfig = Read-AzlSonarConfig -Json (ConvertTo-SonarConfigJson $configObject)
+        $edgeList = @{ value = @(@{
+                    name       = 'node01'
+                    id         = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.AzureStackHCI/edgeMachines/node01'
+                    properties = @{ provisioningState = 'Succeeded'; machineState = 'Transitioning'; connectivityStatus = 'Connected'; arcMachineResourceId = '/subscriptions/x/resourceGroups/y/providers/Microsoft.HybridCompute/machines/node01' }
+                }) }
+        $job = @{ properties = @{ status = 'DeploymentFailed'; provisioningState = 'Failed'
+                error = @{ code = 'Retryable'; message = 'ErrorCode: [5901]. The device could not read or update its Azure registration.' } } }
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 404 @{ error = @{ code = 'ResourceNotFound'; message = 'nope' } })
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
+        Add-ArmRoute 'jobs/ProvisionOs\?' (New-SonarArmResponse 200 $job)
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 200 $edgeList)
+
+        $state = Get-AzlSonarDeploymentState -Config $explicitConfig -Now $script:Now
+        $node = $state.provisioning.nodes[0]
+        @($node.errors) -join ' ' | Should -Match '5901'
+        $node.status | Should -Be 'error'
+    }
+
     It 'throws on an ARM error from deploymentSettings' {
         Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 403 @{ error = @{ code = 'AuthorizationFailed'; message = 'The client does not have authorization.' } })
         { Get-AzlSonarDeploymentState -Config $script:Config -Now $script:Now } | Should -Throw '*GET deploymentSettings for clus01 failed: The client does not have authorization.*'
