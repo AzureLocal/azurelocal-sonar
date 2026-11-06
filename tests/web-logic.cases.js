@@ -252,6 +252,8 @@ test('phase labels: Provisioning, Arc registration; a failed run names the phase
   eq(m.phaseChipText({ phase: 'failed', activePhase: 'provisioning' }), 'Failed: Provisioning');
   eq(m.phaseChipText({ phase: 'failed', activePhase: 'deployment' }), 'Failed: Deployment');
   eq(m.phaseChipText({ phase: 'done', activePhase: 'deployment' }), 'Done');
+eq(m.phaseChipText({ phase: 'provisioning', provisioning: { readyForValidate: true } }), 'Ready for Validate', 'every machine ready, no deployment yet');
+eq(m.phaseChipText({ phase: 'provisioning', provisioning: { readyForValidate: false } }), 'Provisioning', 'machines still provisioning or preparing');
 });
 
 test('provisioningTreeOf: one item per machine with the tree as children and the summary in .prov', function () {
