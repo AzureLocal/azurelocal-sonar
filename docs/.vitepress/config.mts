@@ -5,7 +5,11 @@ export default defineConfig({
   base: '/azurelocal-sonar/',
   title: 'AzL Sonar',
   description: 'Real-time monitor for Azure Local deployments: live steps, status and deployment logs.',
+  head: [
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/azurelocal-sonar/assets/images/azurelocal-sonar-icon.svg' }]
+  ],
   themeConfig: {
+    logo: '/assets/images/azurelocal-sonar-icon.svg',
     nav: [
       { text: 'Home', link: '/' },
       { text: 'Getting started', link: '/getting-started' },

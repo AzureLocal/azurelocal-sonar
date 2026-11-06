@@ -66,7 +66,7 @@ Describe 'JSON files parse' {
 Describe 'Web files (no CDN, no external resources)' {
     It '<Name> contains no http(s) URL' -ForEach $script:WebFiles {
         $text = Get-Content -LiteralPath $Path -Raw
-        # The SVG namespace in the inline data: favicon is an XML namespace identifier, never fetched; it is the only
+        # The SVG namespace (in azurelocal-sonar-icon.svg) is an XML namespace identifier, never fetched; it is the only
         # allowed match.
         $urls = @([regex]::Matches($text, 'https?://[^\s''"<>)]+') | ForEach-Object { $_.Value } |
                 Where-Object { $_ -ne 'http://www.w3.org/2000/svg' })
@@ -84,6 +84,27 @@ Describe 'Web files (no CDN, no external resources)' {
         $html = Get-Content -LiteralPath (Join-Path $script:SonarModuleRoot 'web/index.html') -Raw
         $html | Should -Match '<script[^>]+src="/?app\.js"'
         $html | Should -Match '<link[^>]+href="/?app\.css"'
+    }
+
+    It 'index.html uses the Azure Local family icon from the web folder for the favicon and the page logo' {
+        $html = Get-Content -LiteralPath (Join-Path $script:SonarModuleRoot 'web/index.html') -Raw
+        $html | Should -Match '<link rel="icon" type="image/svg\+xml" href="azurelocal-sonar-icon\.svg">'
+        $html | Should -Match '<img class="brand-mark" src="azurelocal-sonar-icon\.svg"'
+        $html | Should -Not -Match 'href="data:'
+        $icon = Join-Path $script:SonarModuleRoot 'web/azurelocal-sonar-icon.svg'
+        Test-Path -LiteralPath $icon -PathType Leaf | Should -BeTrue
+        $svg = [xml](Get-Content -LiteralPath $icon -Raw)
+        $svg.DocumentElement.LocalName | Should -Be 'svg'
+        $svg.DocumentElement.GetAttribute('aria-label') | Should -Be 'Azure Local Sonar'
+    }
+
+    It 'the docs site uses the same icon file as the page' {
+        $docsIcon = Join-Path $script:SonarRepoRoot 'docs/public/assets/images/azurelocal-sonar-icon.svg'
+        $webIcon = Join-Path $script:SonarModuleRoot 'web/azurelocal-sonar-icon.svg'
+        (Get-FileHash -LiteralPath $docsIcon).Hash | Should -Be (Get-FileHash -LiteralPath $webIcon).Hash
+        $config = Get-Content -LiteralPath (Join-Path $script:SonarRepoRoot 'docs/.vitepress/config.mts') -Raw
+        $config | Should -Match "logo: '/assets/images/azurelocal-sonar-icon\.svg'"
+        $config | Should -Match "rel: 'icon'.+href: '/azurelocal-sonar/assets/images/azurelocal-sonar-icon\.svg'"
     }
 }
 

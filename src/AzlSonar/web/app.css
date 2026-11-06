@@ -218,10 +218,8 @@ a { color: var(--accent); }
 }
 
 .brand { display: flex; align-items: center; gap: 8px; }
-.brand-mark { width: 26px; height: 26px; }
-.bm-bg { fill: var(--accent); }
-.bm-ring { fill: none; stroke: var(--accent-text); stroke-width: 1.6; opacity: .55; }
-.bm-dot { fill: var(--accent-text); }
+/* The Azure Local family icon (azurelocal-sonar-icon.svg), the same file the browser tab and the docs site use. */
+.brand-mark { display: block; width: 32px; height: 32px; flex: none; }
 .brand-name { font-weight: 700; letter-spacing: .01em; }
 .demo-badge {
   font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
