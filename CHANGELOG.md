@@ -4,6 +4,24 @@ All notable changes to AzL Sonar are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/AzureLocal/azurelocal-sonar/compare/v0.3.0...v0.4.0) (2026-11-06)
+
+
+### Features
+
+* **provisioning:** show azurelocal-ztp's Prepare stage after the OS is provisioned ([4601f85](https://github.com/AzureLocal/azurelocal-sonar/commit/4601f85a82a956236fdd26df86ce2adb01d82690))
+* **provisioning:** show azurelocal-ztp's Prepare stage after the OS is provisioned ([15b5056](https://github.com/AzureLocal/azurelocal-sonar/commit/15b5056f3e1878a8588c68705583b822bfd20d1c))
+
+
+### Bug Fixes
+
+* **provisioning:** don't report an earlier attempt's ProvisionOs error as a failure ([b3f0cbf](https://github.com/AzureLocal/azurelocal-sonar/commit/b3f0cbf998f8a076a99e3e3a6645a27570491369))
+* **provisioning:** don't report an earlier attempt's ProvisionOs error as a failure ([f2bfbfb](https://github.com/AzureLocal/azurelocal-sonar/commit/f2bfbfb7793ad605b4844eeb07545e5eca4af296))
+* **web:** an open page reloads itself when Sonar comes back with new page code ([f61d062](https://github.com/AzureLocal/azurelocal-sonar/commit/f61d062102f8933832bb1e6dc4a6a5778627d086))
+* **web:** an open page reloads itself when Sonar comes back with new page code ([21ad818](https://github.com/AzureLocal/azurelocal-sonar/commit/21ad8180b70bf984a231423f8e70847efcbd7ba5))
+* **web:** header says Ready for Validate when every machine is done ([f9b7dab](https://github.com/AzureLocal/azurelocal-sonar/commit/f9b7dabb48ec59dc86752922bc40cc11adc2ed5c))
+* **web:** header says Ready for Validate when every machine is done ([b9baad1](https://github.com/AzureLocal/azurelocal-sonar/commit/b9baad161e63afe811688db32a452bf26106a818))
+
 ## [0.3.0](https://github.com/AzureLocal/azurelocal-sonar/compare/v0.2.0...v0.3.0) (2026-10-16)
 
 
