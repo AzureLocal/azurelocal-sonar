@@ -803,6 +803,8 @@ function Start-AzlSonarServer {
 
         $publicConfig = ConvertTo-AzlSonarPublicConfig -Config $config -StartedAt ([datetime]::UtcNow) -ServerId $shared.ServerId
         if ($recordPath) { $publicConfig.recording = [ordered]@{ file = [System.IO.Path]::GetFileName($recordPath) } }
+        # A fingerprint of the page files: an open page reloads itself when Sonar comes back with different ones.
+        $publicConfig.webVersion = Get-AzlSonarWebVersion -WebRoot (Join-Path -Path $script:AzlSonarModuleRoot -ChildPath 'web')
         $server = @{
             Mode         = 'live'
             Shared       = $shared
@@ -893,4 +895,31 @@ function Start-AzlSonarServer {
         foreach ($worker in $workers) { Stop-AzlSonarWorker -Worker $worker }
         Write-Information -MessageData 'AzL Sonar stopped.' -InformationAction Continue
     }
+}
+
+function Get-AzlSonarWebVersion {
+    <#
+    .SYNOPSIS
+        A short fingerprint (first 12 hex digits of a SHA-256) of the files the page is made of, in name order.
+    .DESCRIPTION
+        Sent in /api/config as webVersion. After a restart the open page compares it with the one it loaded with and
+        reloads itself when it differs, so an update reaches a page that was left open. A missing folder gives ''.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$WebRoot)
+
+    if (-not (Test-Path -LiteralPath $WebRoot -PathType Container)) { return '' }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        foreach ($file in @(Get-ChildItem -LiteralPath $WebRoot -File -Recurse | Sort-Object FullName)) {
+            $name = [System.Text.Encoding]::UTF8.GetBytes($file.FullName.Substring($WebRoot.Length).Replace('\', '/'))
+            $null = $sha.TransformBlock($name, 0, $name.Length, $null, 0)
+            $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+            $null = $sha.TransformBlock($bytes, 0, $bytes.Length, $null, 0)
+        }
+        $null = $sha.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        return ([System.BitConverter]::ToString($sha.Hash) -replace '-', '').Substring(0, 12).ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
 }
