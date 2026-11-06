@@ -48,6 +48,25 @@ The line starts with the event's own UTC time, so the log pane orders it by even
 
 The event file covers the ZTP stages before Azure knows the machines: the boot from the virtual USB and the voucher (`Mounted`, `Booting`, `MaintenanceEnvironmentRunning`, `VoucherWritten`, `ReadyForPortal`, and the failure states), plus `StageStarted`, `StageCompleted` and `StageFailed` for every ZTP stage. Sonar doesn't interpret the states: they are log lines. Machine status comes from Azure only.
 
+### The Prepare stage: drivers and network after Provisioned
+
+azurelocal-ztp keeps working after Azure reports a machine **Provisioned**. Its Prepare stage installs the OEM network drivers from the Solution Builder Extension, sets the static management address and one default gateway, restarts the machine if a driver asks, and checks it. It writes one event per gate to the same event file, with `stage` `Prepare`:
+
+| `state` | Meaning |
+| --- | --- |
+| `PrepareStarted` | Azure reports ready to cluster; the run is signing in. A new one replaces any earlier attempt. |
+| `PrepareDriversInstalled` | The drivers and network settings are applied. The evidence lists them. |
+| `PrepareRestarting`, `PrepareRestarted` | The restart a driver asked for, and the new boot time. |
+| `ReadyForValidate` | Every check passed. |
+| `PrepareFailed` | A gate failed; the evidence holds the reason. |
+
+The ZTP event worker keeps each machine's latest Prepare attempt. Each machine gets a **Prepare for Validate** stage in its step tree, with these events as child steps. When the config has `ztpEvents.path`:
+
+- a machine that Azure reports Provisioned stays **running** until its Prepare stage reports `ReadyForValidate`;
+- `PrepareFailed` makes the machine an error, with the reason in its errors;
+- `provisioning.readyForValidate` is true only when every machine passed Prepare and no cluster deployment has started.
+
+Without `ztpEvents.path`, a Provisioned machine is done, as before.
 ## How Sonar maps machines
 
 On the simplified route, three names belong to one machine:
