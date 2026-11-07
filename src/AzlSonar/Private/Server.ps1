@@ -53,6 +53,8 @@ function Initialize-AzlSonarSharedState {
             Redact        = @()   # exact secret values to mask in node text (never serialized)
             NodeProbe     = [hashtable]::Synchronized(@{})   # OEM image route: per-node bootstrap/update status (Invoke-AzlSonarNodeProbeLoop)
             ZtpStages     = [hashtable]::Synchronized(@{})   # simplified route: per-node azurelocal-ztp Device and Network events (Invoke-AzlSonarZtpEventLoop)
+            ZtpInfo       = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the ZTP event file: events read and the newest event time (/api/details)
+            ConfigInfo    = [hashtable]::Synchronized(@{ ReadAt = $null; CheckedAt = $null; ChangedAt = $null; Note = $null })   # when the config source was read, checked and last changed (/api/details)
         })
 }
 
@@ -573,6 +575,14 @@ function Invoke-AzlSonarHttpRequest {
                 Send-AzlSonarHttpResponse -Response $response -Body $Server.GuidanceJson -NoCache
                 return
             }
+            '/api/about' {
+                Send-AzlSonarHttpResponse -Response $response -Body (ConvertTo-AzlSonarJson (Get-AzlSonarAbout -Version ([string]$Server.Version))) -NoCache
+                return
+            }
+            '/api/details' {
+                Send-AzlSonarHttpResponse -Response $response -Body (ConvertTo-AzlSonarJson (Get-AzlSonarDetail -Server $Server)) -NoCache
+                return
+            }
             '/api/logs' {
                 $since = [long]0
                 $sinceText = $request.QueryString['since']
@@ -683,6 +693,7 @@ function New-AzlSonarReplayServer {
         Shared       = $shared
         WebRoot      = Join-Path -Path $script:AzlSonarModuleRoot -ChildPath 'web'
         ConfigJson   = ConvertTo-AzlSonarNodeJson $config
+        Facts        = New-AzlSonarReplayDetailFact -ConfigJson $recording.ConfigJson -Cluster $recording.Cluster -ReadAt $recording.Start
         GuidanceJson = $guidanceJson
         ReplayJson   = Get-AzlSonarReplayJson -Recording $recording -Meta $meta
         ClusterName  = $recording.Cluster
@@ -812,6 +823,7 @@ function Start-AzlSonarServer {
         $initial = Get-AzlSonarInitialState -Config $config
         $shared.State = $initial
         $shared.StateJson = ConvertTo-AzlSonarJson $initial
+        $shared.ConfigInfo['ReadAt'] = Format-AzlSonarDate ([datetime]::UtcNow)
         $guidance = Get-AzlSonarPhaseGuidance -IdentityModel $config.identityModel
         if (-not $guidance.available) {
             Write-Warning 'data/phase-guidance.json not found: /api/guidance returns no entries.'
@@ -826,6 +838,7 @@ function Start-AzlSonarServer {
             Shared       = $shared
             WebRoot      = Join-Path -Path $script:AzlSonarModuleRoot -ChildPath 'web'
             ConfigJson   = ConvertTo-AzlSonarJson $publicConfig
+            Facts        = New-AzlSonarDetailFact -Config $config
             GuidanceJson = ConvertTo-AzlSonarJson $guidance
             ClusterName  = $config.clusterName
             Version      = $moduleVersion

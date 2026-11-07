@@ -677,4 +677,163 @@ test('guidanceSummary: a tailer that failed says so, and the credential in use w
   eq(m.guidanceSummary({ state: 'connected' }, null, NaN, true), 'Log access: Tailing the seed node \u00b7 no line yet');
 });
 
+// ---------------------------------------------------------------- redesign: modes, summary box, node cards
+
+function ztpState(nodes, extra) {
+  var s = { cluster: 'iic-azl-c01', phase: 'provisioning', activePhase: 'provisioning',
+    provisioning: { route: 'simplified', phase: 'provisioning', status: 'running', ztpComplete: false, nodes: nodes },
+    validation: { status: 'notstarted', tree: [] }, deployment: { status: 'notstarted', tree: [] },
+    nodes: nodes.map(function (n) { return { name: n.name, arcStatus: n.arcStatus }; }) };
+  if (extra) Object.keys(extra).forEach(function (k) { s[k] = extra[k]; });
+  return s;
+}
+function zNode(name, lifecycle, status, arc, extra) {
+  var n = { name: name, route: 'simplified', lifecycle: lifecycle, status: status, arcStatus: arc, percent: status === 'running' ? 40 : 100, start: '2026-11-07T17:02:00Z',
+    ztp: { complete: status === 'success', network: { status: status === 'success' ? 'success' : 'notstarted' }, restore: { status: 'notstarted' } }, tree: [] };
+  if (extra) Object.keys(extra).forEach(function (k) { n[k] = extra[k]; });
+  return n;
+}
+var THREE = [zNode('iic-azl-n01', 'Provisioned', 'success', 'Connected'), zNode('iic-azl-n02', 'Provisioned', 'success', 'Connected'),
+  zNode('iic-azl-n03', 'InstallingOs', 'running', 'Disconnected', { lifecycleMessage: 'Installing OS in progress.' })];
+
+test('modeStates: the five tiles for a ZTP run with one machine still installing', function () {
+  var tiles = m.modeStates(ztpState(THREE));
+  eq(tiles.map(function (t) { return t.id; }), ['prov', 'validate', 'deploy', 'update', 'health']);
+  eq(tiles.map(function (t) { return t.status; }), ['run', 'idle', 'idle', 'idle', 'idle']);
+  eq(tiles[0].name, 'Provisioning (ZTP)');
+  eq(tiles[0].line, '2 of 3 machines ready');
+  eq(tiles[0].hidden, false);
+});
+
+test('modeStates: a waiting tile has no state line and says when it starts; no tile says "not started"', function () {
+  var tiles = m.modeStates(ztpState(THREE));
+  tiles.filter(function (t) { return t.status === 'idle'; }).forEach(function (t) {
+    eq(t.line, '', t.id + ' has no state line');
+    eq(t.tip.length > 0, true, t.id + ' tooltip says when it starts');
+  });
+  eq(tiles[1].tip, 'Starts after ZTP and OS configuration are done');
+  eq(tiles[2].tip, 'Starts after validation passes');
+  eq(JSON.stringify(tiles).toLowerCase().indexOf('not started'), -1, 'no "not started" text anywhere');
+});
+
+test('modeStates: Provisioning is named after the route; the OEM image route says OS image', function () {
+  var s = ztpState([zNode('n1', 'Bootstrapping', 'running', 'NotFound')]);
+  s.provisioning.route = 'oem-image'; s.phase = 'arc-registration'; s.activePhase = 'arc-registration';
+  eq(m.modeStates(s)[0].name, 'Provisioning (OS image)');
+  eq(m.modeName('prov', 'simplified'), 'Provisioning (ZTP)');
+  eq(m.modeStates(s)[1].tip, 'Starts when every machine is registered');
+});
+
+test('modeStates: Provisioning is hidden when the run has no machines and is past it (a plain deployment)', function () {
+  var s = { phase: 'deployment', activePhase: 'deployment', validation: { status: 'Success', tree: [{ id: '1', name: 'v', status: 'success', children: [] }] },
+    deployment: { status: 'InProgress', tree: [{ id: '2', name: 'Deploy', status: 'running', children: [
+      { id: '2.1', name: 'a', status: 'success', children: [] }, { id: '2.2', name: 'b', status: 'running', children: [] }, { id: '2.3', name: 'c', status: 'notstarted', children: [] }] }] } };
+  var tiles = m.modeStates(s);
+  eq(tiles[0].hidden, true);
+  eq(tiles.map(function (t) { return t.status; }), ['ok', 'ok', 'run', 'idle', 'idle']);
+  eq(tiles[1].line, 'Passed');
+  eq(tiles[2].line, 'Step 2 of 3');
+});
+
+test('activeModeId: the active phase picks the selected mode; a failed run stays on the mode that failed; done is Health', function () {
+  eq(m.activeModeId({ phase: 'provisioning', activePhase: 'provisioning' }), 'prov');
+  eq(m.activeModeId({ phase: 'arc-registration', activePhase: 'arc-registration' }), 'prov');
+  eq(m.activeModeId({ phase: 'validation', activePhase: 'validation' }), 'validate');
+  eq(m.activeModeId({ phase: 'deployment', activePhase: 'deployment' }), 'deploy');
+  eq(m.activeModeId({ phase: 'update', activePhase: 'update' }), 'update');
+  eq(m.activeModeId({ phase: 'failed', activePhase: 'deployment' }), 'deploy');
+  eq(m.activeModeId({ phase: 'done', activePhase: 'deployment' }), 'health');
+  eq(m.activeModeId(null), 'prov');
+});
+
+test('summaryFor (provisioning): headline names the busy machine, cards carry the full machine name and plain words', function () {
+  var sm = m.summaryFor(ztpState(THREE), 'prov', { nodes: [{ name: 'iic-azl-n01', seed: true }] });
+  eq(sm.title, 'Provisioning (ZTP)');
+  eq(sm.chip, { kind: 'run', text: 'Running' });
+  eq(sm.headline, '2 of 3 machines ready: iic-azl-n03 is installing the OS');
+  eq(sm.cards.map(function (c) { return c.name; }), ['iic-azl-n01', 'iic-azl-n02', 'iic-azl-n03'], 'full machine names');
+  eq(sm.cards.map(function (c) { return c.state; }), ['ZTP complete', 'ZTP complete', 'Installing the OS']);
+  eq(sm.cards[2].tip.indexOf('Azure says: InstallingOs'), 0, 'the raw Azure value is in the tooltip');
+  eq(sm.cards[2].arc.text, 'Arc \u25cb not connected yet');
+  eq(sm.cards[0].arc.text, 'Arc \u25cf Connected');
+  eq(sm.cards[2].progress, 40, 'a running machine shows a progress bar');
+  eq(sm.cards[0].progress, null);
+  eq(sm.cards[2].waits, 'Waiting on Azure');
+  eq(sm.startedAt, Date.parse('2026-11-07T17:02:00Z'));
+});
+
+test('summaryFor (provisioning): ZTP complete says what comes next on every card', function () {
+  var nodes = [zNode('iic-azl-n01', 'Provisioned', 'success', 'Connected'), zNode('iic-azl-n02', 'Provisioned', 'success', 'Connected')];
+  var s = ztpState(nodes); s.provisioning.ztpComplete = true;
+  var sm = m.summaryFor(s, 'prov');
+  eq(sm.headline, 'ZTP is complete: all 2 machines are provisioned. Next: OS configuration');
+  eq(sm.cards.map(function (c) { return c.waits; }), ['Next: OS configuration', 'Next: OS configuration']);
+  eq(sm.cards.map(function (c) { return c.state; }), ['ZTP complete', 'ZTP complete']);
+  eq(sm.chip, { kind: 'ok', text: 'Done' });
+});
+
+test('summaryFor (provisioning): a failed machine says what blocks it', function () {
+  var nodes = [zNode('a', 'Provisioned', 'success', 'Connected'),
+    zNode('b', 'InstallingOs', 'error', 'Connected', { errors: ['ProvisionOs: InstallExtensionsFailed: unable to connect to the remote server'] })];
+  var sm = m.summaryFor(ztpState(nodes), 'prov');
+  eq(sm.headline, '1 of 2 machines ready: b is blocked (ProvisionOs: InstallExtensionsFailed: unable to connect to the remote server)');
+  eq(sm.chip, { kind: 'err', text: 'Failed' });
+  eq(sm.cards[1].state, 'Failed: installing the OS');
+  eq(sm.cards[1].kind, 'err');
+});
+
+test('summaryFor: Azure lifecycle values become plain words (the raw value is kept for the tooltip)', function () {
+  eq(m.lifecyclePlain('AwaitingConnection', 'running', false).text, 'Waiting to connect to Azure');
+  eq(m.lifecyclePlain('Provisioning', 'running', false).text, 'Registering with Azure');
+  eq(m.lifecyclePlain('ReadyForOs', 'running', false).text, 'Ready to install the OS');
+  eq(m.lifecyclePlain('Provisioned', 'running', false).text, 'Provisioned, finishing ZTP');
+  eq(m.lifecyclePlain('UpdatingOsImage', 'running', false).text, 'Updating the OS image');
+  eq(m.lifecyclePlain('SomethingNew', 'running', false).text, 'Status unknown');
+  eq(m.lifecyclePlain('ProvisioningFailed', 'error', false).text, 'Failed');
+  eq(m.arcInfo('Connected').kind, 'ok');
+  eq(m.arcInfo('Disconnected').text, 'Arc \u25cb not connected yet');
+  eq(m.arcInfo('Expired').kind, 'warn');
+});
+
+test('summaryFor (deployment): headline gives the step, the cards come from the state nodes', function () {
+  var s = { phase: 'deployment', activePhase: 'deployment', current: { phase: 'deployment', stepName: 'Create cluster' },
+    nodes: [{ name: 'iic-azl-n01', arcStatus: 'Connected' }, { name: 'iic-azl-n02', arcStatus: 'Connected' }],
+    validation: { status: 'Success', tree: [] },
+    deployment: { status: 'InProgress', tree: [{ id: '2', name: 'Deploy', status: 'running', start: '2026-11-07T18:00:00Z', children: [
+      { id: '2.1', name: 'a', status: 'success', children: [] }, { id: '2.2', name: 'Create cluster', status: 'running', children: [] }, { id: '2.3', name: 'c', status: 'notstarted', children: [] }] }] } };
+  var sm = m.summaryFor(s, 'deploy');
+  eq(sm.headline, 'Deployment is running: step 2 of 3 (Create cluster)');
+  eq(sm.cards.map(function (c) { return c.name + '|' + c.state; }), ['iic-azl-n01|Taking part', 'iic-azl-n02|Taking part']);
+  eq(sm.cards[0].waits, 'Now: Create cluster');
+  eq(sm.cards[0].progress, 33);
+  var waiting = m.summaryFor(s, 'update');
+  eq(waiting.chip, { kind: 'idle', text: 'Waiting' });
+  eq(waiting.headline, 'Available after the cluster is deployed; starts when Azure reports an update');
+});
+
+test('summaryFor (deployment): a failed step is named with its error', function () {
+  var s = { phase: 'failed', activePhase: 'deployment', nodes: [], validation: { status: 'Success', tree: [] },
+    deployment: { status: 'Failed', tree: [{ id: '2', name: 'Deploy', status: 'error', children: [{ id: '2.1', name: 'Create cluster', status: 'error', errors: ['The cluster could not be formed.'], children: [] }] }] } };
+  eq(m.summaryFor(s, 'deploy').headline, 'Deployment failed at Create cluster: The cluster could not be formed.');
+});
+
+test('lineScope: ZTP event lines say their machine and stage; node-log lines name neither', function () {
+  var z = { file: 'ztp-events', text: '2026-11-07T19:01:59.536Z [ztp] iic-azl-n03 DeviceAddressSet: static address' };
+  eq(m.lineScope(z), { node: 'iic-azl-n03', stage: 'device' });
+  eq(m.lineScope({ file: 'ztp-events', text: '2026-11-07T19:01:59.536Z [ztp] n1 ManagementAddressSet: x' }), { node: 'n1', stage: 'network' });
+  eq(m.lineScope({ file: 'ztp-events', text: '2026-11-07T19:01:59.536Z [ztp] n1 NetworkJobStatus: x' }).stage, 'network');
+  eq(m.lineScope({ file: 'ztp-events', text: '2026-11-07T19:01:59.536Z [ztp] n1 BiosRestored: x' }).stage, 'restore');
+  eq(m.lineScope({ file: 'ztp-events', text: '2026-11-07T19:01:59.536Z [ztp] n1 Booting: x' }), { node: 'n1', stage: '' });
+  eq(m.lineScope({ file: 'C:\\MASLogs\\a.log', text: 'plain line' }), { node: '', stage: '' });
+});
+
+test('lineInScope (node cards): a machine keeps its ZTP lines, and the node log when it is the seed', function () {
+  var n3 = { file: 'ztp-events', text: '2026-11-07T19:01:59.536Z [ztp] iic-azl-n03 Booting: x' };
+  var n1 = { file: 'ztp-events', text: '2026-11-07T19:01:59.536Z [ztp] iic-azl-n01 Booting: x' };
+  var log = { file: 'C:\\MASLogs\\a.log', text: 'from the seed node' };
+  eq([n3, n1, log].map(function (l) { return m.lineInScope(l, { node: 'iic-azl-n03' }, null, 'iic-azl-n01'); }), [true, false, false]);
+  eq([n3, n1, log].map(function (l) { return m.lineInScope(l, { node: 'IIC-AZL-N01' }, null, 'iic-azl-n01'); }), [false, true, true], 'case-insensitive; the seed also owns the node log');
+  eq([n3, n1, log].map(function (l) { return m.lineInScope(l, { node: '' }, null, 'iic-azl-n01'); }), [true, true, true], 'no machine selected: every line');
+});
+
 process.stdout.write(JSON.stringify(cases));

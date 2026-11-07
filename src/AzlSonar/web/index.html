@@ -13,57 +13,64 @@
 <body>
   <a class="skip-link" href="#log-panel">Skip to live logs</a>
 
-  <header class="topbar">
+  <header class="topbar" id="topbar">
     <div class="brand">
-      <img class="brand-mark" src="azurelocal-sonar-icon.svg" alt="" width="32" height="32">
+      <img class="brand-mark" src="azurelocal-sonar-icon.svg" alt="" width="28" height="28">
       <span class="brand-name">AzL Sonar</span>
       <span id="demo-badge" class="demo-badge" hidden>Demo data</span>
       <span id="replay-badge" class="replay-badge" hidden>Replay</span>
     </div>
-
-    <div class="cluster">
-      <span class="eyebrow">Cluster</span>
-      <h1 id="cluster-name">&mdash;</h1>
-      <span id="cluster-meta" class="cluster-meta"></span>
-    </div>
-
-    <dl class="stats">
-      <div class="stat">
-        <dt>Phase</dt>
-        <dd><span id="phase-chip" class="phase-chip" data-phase="unknown">&mdash;</span></dd>
-      </div>
-      <div class="stat">
-        <dt>Status</dt>
-        <dd><span id="overall-status" class="status-text" data-status="unknown">&mdash;</span></dd>
-      </div>
-      <div class="stat">
-        <dt>Elapsed</dt>
-        <dd><span id="elapsed" class="mono">&mdash;</span></dd>
-      </div>
-      <div class="stat">
-        <dt>Last poll</dt>
-        <dd><span id="last-poll" class="mono">&mdash;</span></dd>
-      </div>
+    <h1 id="cluster-name" class="cluster-name">&mdash;</h1>
+    <button id="details-btn" type="button" class="btn btn-sm" aria-expanded="false" aria-controls="details-pop">
+      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 7.2v4M8 4.6v.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <span>Details</span><span class="btn-caret" aria-hidden="true">&#9662;</span>
+    </button>
+    <dl class="tstats" aria-label="Run status">
+      <div class="tstat"><dt class="sr-only">Status</dt><dd><span id="top-chip" class="chip chip-idle" data-kind="idle">&mdash;</span></dd></div>
+      <div class="tstat"><dt class="tl">Elapsed</dt><dd><span id="elapsed" class="mono">&mdash;</span></dd></div>
+      <div class="tstat"><dt class="tl">Updated</dt><dd><span id="last-poll" class="mono">&mdash;</span></dd></div>
     </dl>
-
-    <ul id="node-chips" class="node-chips" aria-label="Nodes and Azure Arc status"></ul>
-
+    <div class="sp"></div>
     <div class="actions">
       <span id="rec-pill" class="rec-pill" hidden><span class="rec-dot" aria-hidden="true"></span>Recording</span>
       <span id="conn" class="conn" data-conn="connecting" title="Connection to the Sonar back end">
         <span class="conn-dot" aria-hidden="true"></span><span id="conn-label">Connecting</span>
       </span>
+      <button id="la-btn" type="button" class="btn" aria-haspopup="dialog" title="Log access: how Sonar reads the node logs, and where they are">
+        <span id="la-dot" class="dot dot-idle" aria-hidden="true"></span><span>Log access</span><span id="la-sr" class="sr-only"></span>
+      </button>
       <button id="export-btn" type="button" class="btn">
         <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 1.5v8.2M4.6 6.5 8 9.9l3.4-3.4M2.5 11v2.5h11V11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span>Export</span>
       </button>
+      <button id="help-btn" type="button" class="btn btn-icon btn-help" title="Help and about" aria-label="Help and about" aria-haspopup="dialog" aria-expanded="false" aria-controls="help-pop">?</button>
       <button id="theme-btn" type="button" class="btn btn-icon" aria-label="Switch to dark theme">
         <svg class="i-moon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M13.5 9.6A5.8 5.8 0 0 1 6.4 2.5a5.8 5.8 0 1 0 7.1 7.1Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
         <svg class="i-sun" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1v1.8M8 13.2V15M1 8h1.8M13.2 8H15M3 3l1.3 1.3M11.7 11.7 13 13M3 13l1.3-1.3M11.7 4.3 13 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
       </button>
     </div>
-  </header>
 
+    <section id="help-pop" class="pop" role="dialog" aria-label="About AzL Sonar" hidden>
+      <div class="brand pop-brand">
+        <img class="brand-mark" src="azurelocal-sonar-icon.svg" alt="" width="24" height="24">
+        <span class="brand-name">AzL Sonar</span>
+        <span id="help-version" class="chip chip-idle" data-kind="idle"></span>
+      </div>
+      <p id="help-summary" class="pop-text">Watches an Azure Local build from provisioning to deployment.</p>
+      <div id="help-links" class="help-links"><p class="muted small">Documentation links come from the Sonar back end and are not available here.</p></div>
+      <hr class="pop-rule">
+      <div class="legal">Released under the MIT License.<br>Copyright &copy; Hybrid Cloud Solutions &amp; AzureLocal</div>
+    </section>
+
+    <section id="details-pop" class="drop" role="region" aria-label="What Sonar collected and is using" hidden>
+      <div class="drop-head">
+        <h2>What Sonar collected and is using</h2>
+        <button id="details-close" type="button" class="btn btn-ghost btn-sm" aria-label="Close details">Close</button>
+      </div>
+      <p class="drop-sub">Each value shows where it came from and how old it is. Secrets are never shown, only whether one is set.</p>
+      <div id="details-body" class="drop-grid"><p class="muted">Loading&hellip;</p></div>
+    </section>
+  </header>
   <section id="replay-bar" class="replay-bar" aria-label="Replay controls" hidden>
     <div class="rp-head">
       <span class="rp-flag">Replay &middot; not live</span>
@@ -97,17 +104,10 @@
 
   <ul id="live-notes" class="live-notes" aria-label="Notes on this run" role="status" hidden></ul>
 
+  <section id="summary" class="panel sum" aria-labelledby="sum-title" aria-live="off"></section>
+
   <main id="main" class="layout">
     <div class="col-left">
-      <section id="prov-panel" class="panel panel-prov" aria-labelledby="prov-title" hidden>
-        <div class="panel-head">
-          <h2 id="prov-title">Provisioning</h2>
-          <span id="prov-route" class="pill pill-muted"></span>
-        </div>
-        <p class="hint" id="prov-hint">How each machine gets ready before validation: the lifecycle, the steps Azure reports and their errors.</p>
-        <div id="prov-host" class="panel-body scroll" aria-describedby="prov-hint"></div>
-      </section>
-
       <section id="steps-panel" class="panel panel-steps" aria-labelledby="steps-title">
         <div class="panel-head">
           <h2 id="steps-title">Steps</h2>

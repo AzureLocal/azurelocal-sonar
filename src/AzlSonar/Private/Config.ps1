@@ -259,18 +259,21 @@ function Read-AzlSonarConfig {
 
     $ErrorActionPreference = 'Stop'
     $source = 'JSON string'
+    $sourceKind = 'json'
     $baseDirectory = $null
     if ($PSCmdlet.ParameterSetName -eq 'Path') {
         if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
             throw "Sonar config file not found: $Path"
         }
+        $sourceKind = 'config'
         $source = (Resolve-Path -LiteralPath $Path).ProviderPath
         $baseDirectory = [System.IO.Path]::GetDirectoryName($source)
         $Json = Get-Content -LiteralPath $source -Raw
     }
     elseif ($PSCmdlet.ParameterSetName -eq 'InfrastructureFile') {
         $mappedConfig = Read-AzlSonarInfrastructureFile -Path $InfrastructureFile
-        $source = (Resolve-Path -LiteralPath $InfrastructureFile).ProviderPath
+        $sourceKind = 'infrastructure'
+        $source =(Resolve-Path -LiteralPath $InfrastructureFile).ProviderPath
         $baseDirectory = [System.IO.Path]::GetDirectoryName($source)
         $Json = ConvertTo-Json -InputObject $mappedConfig -Depth 32
     }
@@ -358,6 +361,8 @@ function Read-AzlSonarConfig {
     return [pscustomobject]@{
         subscriptionId = ([string]$raw.subscriptionId).ToLowerInvariant()
         resourceGroup  = [string]$raw.resourceGroup
+        # The Azure region (optional; shown on the page's Details only, never used to reach Azure).
+        location       = [string](Get-AzlSonarMember $raw 'location' '')
         clusterName    = [string]$raw.clusterName
         # GA versions, current on Microsoft Learn for 12.2609 (latest); a preview version stays configurable. The fallback is
         # tried once when the first is not accepted ('' = no fallback).
@@ -381,6 +386,8 @@ function Read-AzlSonarConfig {
         recordPath     = $recordPath
         ztpEventsPath  = $ztpEventsPath
         sourcePath     = $source
+        # Where the settings came from: the master infrastructure.yml, a config file, or a JSON string (tests).
+        sourceKind     = $sourceKind
     }
 }
 

@@ -523,6 +523,8 @@ function ConvertFrom-AzlSonarInfrastructureTree {
         provisioningRoute = $route
         identityModel     = $identityModel
     }
+    $location = Get-AzlSonarInfrastructureValue $Tree 'azure.location'
+    if ($location -and ([string]$location).Trim()) { $config['location'] = ([string]$location).Trim() }
     if ($null -ne $PollSeconds) { $config['pollSeconds'] = [int]$PollSeconds }
     $config['nodes'] = $nodes.ToArray()
     if ($ztpPath) { $config['ztpEvents'] = [ordered]@{ path = $ztpPath } }
@@ -629,7 +631,18 @@ function Invoke-AzlSonarInfrastructureWatchLoop {
         Wait-AzlSonarInterval -Shared $Shared -Seconds $CheckSeconds
         if ($Shared.Stop) { break }
         try {
+            $before = $state.LastWrite
             $notice = Invoke-AzlSonarInfrastructureCheck -Path $Path -State $state
+            if ($Shared.Contains('ConfigInfo')) {
+                # For the page's Details: when the file was last checked and re-read, and what the last change was.
+                $now = Format-AzlSonarDate ([datetime]::UtcNow)
+                $Shared['ConfigInfo']['CheckedAt'] = $now
+                if ($state.LastWrite -ne $before) {
+                    $Shared['ConfigInfo']['ReadAt'] = $now
+                    $Shared['ConfigInfo']['ChangedAt'] = $now
+                    $Shared['ConfigInfo']['Note'] = $(if ($notice) { ($notice -replace '^\[sonar\]\s*', '') } else { 'the file changed; the node set is the same' })
+                }
+            }
             if ($notice) { Add-AzlSonarLogLine -Shared $Shared -Line @(@{ file = 'sonar'; text = $notice }) }
         }
         catch { Write-Verbose "Infrastructure file check failed: $($_.Exception.Message)" }

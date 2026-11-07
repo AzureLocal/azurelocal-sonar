@@ -89,6 +89,7 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
                 Shared       = $shared
                 WebRoot      = Join-Path $script:AzlSonarModuleRoot 'web'
                 ConfigJson   = ConvertTo-AzlSonarJson (ConvertTo-AzlSonarPublicConfig -Config $Config -StartedAt ([datetime]'2026-10-10T18:00:00Z'))
+                Facts        = New-AzlSonarDetailFact -Config $Config -ReadAt ([datetime]'2026-10-10T18:00:00Z')
                 GuidanceJson = ConvertTo-AzlSonarJson (Get-AzlSonarPhaseGuidance -IdentityModel $Config.identityModel)
                 ClusterName  = $Config.clusterName
                 Version      = '0.2.0'
@@ -158,6 +159,37 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
         @($c.logs.paths).Count | Should -Be 5
     }
 
+    It 'GET /api/about returns the version from the manifest and the documentation links' {
+        $r = Invoke-SonarRequest '/api/about'
+        $r.Status | Should -Be 200
+        $r.Headers['Cache-Control'] | Should -Be 'no-store'
+        $a = $r.Body | ConvertFrom-Json
+        $a.version | Should -Be '0.2.0'
+        @($a.links).id | Should -Be @('docs', 'run', 'config', 'troubleshooting', 'github')
+        @($a.links | Where-Object { $_.id -ne 'github' }).url | ForEach-Object { $_ | Should -BeLike 'https://azurelocal.cloud/azurelocal-sonar/*' }
+        ($a.links | Where-Object id -eq 'github').url | Should -Be 'https://github.com/AzureLocal/azurelocal-sonar'
+    }
+
+    It 'GET /api/details reports what Sonar collected, with no secret and no full subscription id' {
+        $r = Invoke-SonarRequest '/api/details'
+        $r.Status | Should -Be 200
+        $r.Headers['Cache-Control'] | Should -Be 'no-store'
+        $r.Body | Should -Not -Match 'kv-sonar-test|sonar-user-secret|sonar-pass-secret|00000000-0000-0000-0000-000000000000|password'
+        $d = $r.Body | ConvertFrom-Json
+        $d.mode | Should -Be 'live'
+        $d.target.cluster.value | Should -Be 'clus01'
+        $d.target.resourceGroup.value | Should -Be 'rg-example-azl'
+        $d.target.subscription.value | Should -Be '00000000...'
+        @($d.nodes).name | Should -Be @('node01', 'node02')
+        @($d.nodes | Where-Object seed).name | Should -Be 'node01'
+        $d.sources.azure.pollSeconds | Should -Be 20
+        $d.sources.nodeLogs.state | Should -Be 'connected'
+        $d.config.version | Should -Be '0.2.0'
+    }
+
+    It 'POST /api/details is refused like every other write' {
+        (Invoke-SonarRequest '/api/details' -Method 'POST').Status | Should -Be 405
+    }
     It 'GET /api/state returns the latest state' {
         $r = Invoke-SonarRequest '/api/state'
         $r.Status | Should -Be 200

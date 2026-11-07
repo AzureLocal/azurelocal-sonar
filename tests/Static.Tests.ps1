@@ -86,6 +86,14 @@ Describe 'Web files (no CDN, no external resources)' {
         $html | Should -Match '<link[^>]+href="/?app\.css"'
     }
 
+    It 'index.html has the Help box with the license and copyright text exactly, and no link of its own' {
+        $html = Get-Content -LiteralPath (Join-Path $script:SonarModuleRoot 'web/index.html') -Raw
+        $html | Should -Match 'id="help-btn"'
+        $html | Should -Match 'Released under the MIT License.<br>s*Copyright &copy; Hybrid Cloud Solutions &amp; AzureLocal'
+        $html | Should -Match 'id="details-btn"'
+        $html | Should -Match 'id="la-btn"'
+    }
+
     It 'index.html uses the Azure Local family icon from the web folder for the favicon and the page logo' {
         $html = Get-Content -LiteralPath (Join-Path $script:SonarModuleRoot 'web/index.html') -Raw
         $html | Should -Match '<link rel="icon" type="image/svg\+xml" href="azurelocal-sonar-icon\.svg">'

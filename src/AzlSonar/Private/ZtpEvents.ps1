@@ -80,6 +80,35 @@ function Read-AzlSonarZtpEventChunk {
     return @{ Lines = @($text -split "`r?`n" | Where-Object { $_ }); Offset = $Offset + $lastNewline + 1 }
 }
 
+function Update-AzlSonarZtpInfo {
+    <#
+    .SYNOPSIS
+        Counts the event lines read and keeps the newest event time, for the page's Details (/api/details).
+    .DESCRIPTION
+        Only lines that are events (JSON with node and state) count. The time is the event's own timestamp when it has one,
+        else the time of reading.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Updates an in-memory counter only.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$Info,
+
+        [AllowEmptyCollection()]
+        [string[]]$Line = @()
+    )
+
+    foreach ($raw in $Line) {
+        if ($null -eq (ConvertFrom-AzlSonarZtpEvent -Line $raw)) { continue }
+        $Info['Count'] = [long]$Info['Count'] + 1
+        $entry = ConvertFrom-Json -InputObject $raw -Depth 8
+        $when = ConvertTo-AzlSonarUtcDate (Get-AzlSonarMember $entry 'timestamp' '')
+        if ($null -eq $when) { $when = [datetime]::UtcNow }
+        $current = ConvertTo-AzlSonarUtcDate $Info['LastEventAt']
+        if ($null -eq $current -or $when -gt $current) { $Info['LastEventAt'] = Format-AzlSonarDate $when }
+    }
+}
+
 function Invoke-AzlSonarZtpEventLoop {
     <#
     .SYNOPSIS
@@ -105,6 +134,7 @@ function Invoke-AzlSonarZtpEventLoop {
             $offset = [long]$chunk.Offset
             $lines = foreach ($raw in $chunk.Lines) { ConvertFrom-AzlSonarZtpEvent -Line $raw }
             if (@($lines).Count -gt 0) { Add-AzlSonarLogLine -Shared $Shared -Line @($lines) }
+            if ($Shared.Contains('ZtpInfo')) { Update-AzlSonarZtpInfo -Info $Shared['ZtpInfo'] -Line @($chunk.Lines) }
             if ($Shared.Contains('ZtpStages')) { foreach ($raw in $chunk.Lines) { Add-AzlSonarZtpStageEvent -Store $Shared['ZtpStages'] -Line $raw } }
         }
         catch { Write-Verbose "ZTP event file poll failed: $($_.Exception.Message)" }
