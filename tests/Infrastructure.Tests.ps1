@@ -189,6 +189,237 @@ Describe 'YAML reader subset' {
     }
 }
 
+Describe 'YAML reader: hardening' {
+    BeforeAll {
+        function ConvertFrom-TestYaml {
+            param([string]$Yaml)
+            InModuleScope AzlSonar -Parameters @{ Yaml = $Yaml } { param($Yaml) ConvertFrom-AzlSonarYaml -Text $Yaml }
+        }
+        function Get-TestYamlError {
+            param([string]$Yaml)
+            try { ConvertFrom-TestYaml -Yaml $Yaml | Out-Null; return '' } catch { return $_.Exception.Message }
+        }
+    }
+
+    Context 'keys' {
+        It 'reads a key that looks like a number or a boolean together with its inline value' {
+            (ConvertFrom-TestYaml '712: storage')['712'] | Should -Be 'storage'
+            (ConvertFrom-TestYaml 'true: x')['true'] | Should -Be 'x'
+            (ConvertFrom-TestYaml '1.5: x')['1.5'] | Should -Be 'x'
+            @((ConvertFrom-TestYaml "712: storage`n713: 5").Keys) | Should -Be @('712', '713')
+        }
+
+        It 'trims trailing spaces of an unquoted key' {
+            $t = ConvertFrom-TestYaml "scenario : x`n`"quoted k`" : y"
+            $t.Contains('scenario') | Should -BeTrue
+            $t['scenario'] | Should -Be 'x'
+            $t['quoted k'] | Should -Be 'y'
+        }
+
+        It 'refuses a duplicate key and names both lines' {
+            { ConvertFrom-TestYaml "a: 1`nb: 2`na: 3" } | Should -Throw "*YAML line 3: duplicate key 'a' (first on line 1).*"
+            { ConvertFrom-TestYaml "a:`n  x: 1`n  y: 2`n  `"x`": 3" } | Should -Throw "*YAML line 4: duplicate key 'x' (first on line 2).*"
+            { ConvertFrom-TestYaml "n:`n- k: 1`n  k: 2" } | Should -Throw "*YAML line 3: duplicate key 'k' (first on line 2).*"
+        }
+
+        It 'allows the same key in different maps' {
+            $t = ConvertFrom-TestYaml "a:`n  k: 1`nb:`n  k: 2"
+            $t.a.k | Should -Be 1
+            $t.b.k | Should -Be 2
+        }
+    }
+
+    Context 'comments and quotes' {
+        It 'keeps a doubled apostrophe inside a single-quoted scalar and still strips a real comment' {
+            (ConvertFrom-TestYaml "notes: 'it''s # not a comment'").notes | Should -Be "it's # not a comment"
+            (ConvertFrom-TestYaml "notes: 'a' # real comment").notes | Should -Be 'a'
+            (ConvertFrom-TestYaml "notes: ''  # empty").notes | Should -Be ''
+        }
+
+        It 'treats a # not preceded by a space as part of the value' {
+            (ConvertFrom-TestYaml 'url: https://example.com#frag').url | Should -Be 'https://example.com#frag'
+        }
+
+        It 'keeps a # inside quotes and strips the comment after a plain value that has apostrophes' {
+            (ConvertFrom-TestYaml 'notes: "GAP: # not a comment"').notes | Should -Be 'GAP: # not a comment'
+            (ConvertFrom-TestYaml "notes: node's BMC        # node's `"port`"").notes | Should -Be "node's BMC"
+        }
+
+        It 'reads colons in plain values' {
+            (ConvertFrom-TestYaml 'mac: 00:00:5E:00:53:11').mac | Should -Be '00:00:5E:00:53:11'
+            (ConvertFrom-TestYaml 'ref: keyvault://vault/name').ref | Should -Be 'keyvault://vault/name'
+        }
+    }
+
+    Context 'scalars' {
+        It 'keeps yes as text, big numbers as text and small integers as integers' {
+            $t = ConvertFrom-TestYaml "enabled: yes`nn: 4294967295`nm: -1`nz: 0`nname: 007`nd: 1.5"
+            $t.enabled | Should -BeOfType ([string])
+            $t.enabled | Should -Be 'yes'
+            $t.n | Should -BeOfType ([string])
+            $t.n | Should -Be '4294967295'
+            $t.m | Should -BeOfType ([int])
+            $t.m | Should -Be -1
+            $t.z | Should -Be 0
+            $t.name | Should -BeOfType ([string])
+            $t.name | Should -Be '007'
+            $t.d | Should -BeOfType ([double])
+        }
+
+        It 'reads schema_version quoted, unquoted and as a decimal: the major is 5 in every case' {
+            foreach ($v in '"5.3.0"', '5.3.0', '5.3', '"5.3"', '5') {
+                $path = New-ModifiedInfrastructure -Edit { param($t) $t -replace 'schema_version: "5.3.0"', "schema_version: $v" }
+                (Get-FixtureConfig -Path $path).clusterName | Should -Be 'example-clus01'
+            }
+            $path = New-ModifiedInfrastructure -Edit { param($t) $t -replace 'schema_version: "5.3.0"', 'schema_version: 4.2' }
+            { Get-FixtureConfig -Path $path } | Should -Throw "*_metadata.schema_version : is '4.2'*"
+        }
+    }
+
+    Context 'lists' {
+        It 'reads a list at the same indent as its key' {
+            $t = ConvertFrom-TestYaml "roles:`n- management`n- compute`nafter: 1"
+            @($t.roles) | Should -Be @('management', 'compute')
+            $t.after | Should -Be 1
+        }
+    }
+
+    Context 'files' {
+        It 'reads a CRLF file' {
+            $t = ConvertFrom-TestYaml "a:`r`n  b: 1`r`n  c: |`r`n    text`r`n    more`r`nd: [x, y]`r`n"
+            $t.a.b | Should -Be 1
+            $t.a.c | Should -Be "text`nmore`n"
+            @($t.d) | Should -Be @('x', 'y')
+        }
+
+        It 'reads a file whose first line is a comment, and an empty file' {
+            (ConvertFrom-TestYaml "# header comment`n`na: 1").a | Should -Be 1
+            (ConvertFrom-TestYaml '').Count | Should -Be 0
+            (ConvertFrom-TestYaml "# only a comment`n").Count | Should -Be 0
+        }
+
+        It 'ignores a byte order mark at the start of the text' {
+            $t = ConvertFrom-TestYaml ([string][char]0xFEFF + 'abc: 1')
+            $t['abc'] | Should -Be 1
+        }
+
+        It 'accepts a document start with a comment and rejects content after a document end' {
+            (ConvertFrom-TestYaml "--- # the file`na: 1").a | Should -Be 1
+            (ConvertFrom-TestYaml "a: 1`n...").a | Should -Be 1
+            { ConvertFrom-TestYaml "a: 1`n...`nb: 2" } | Should -Throw '*YAML line 3: more than one document*'
+            { ConvertFrom-TestYaml "a: 1`n...`n---`nb: 2" } | Should -Throw '*more than one document*'
+            { ConvertFrom-TestYaml "a: 1`n--- # next`nb: 2" } | Should -Throw '*YAML line 2: more than one document*'
+        }
+    }
+
+    Context 'block scalars' {
+        It 'keeps blank lines, relative indentation and # lines inside a literal block' {
+            $yaml = "a:`n  note: |`n    first line`n`n    # looks like a comment`n      indented`n    last`n  after: 1`nb: 2`n"
+            $t = ConvertFrom-TestYaml $yaml
+            $t.a.note | Should -Be "first line`n`n# looks like a comment`n  indented`nlast`n"
+            $t.a.after | Should -Be 1
+            $t.b | Should -Be 2
+        }
+
+        It 'applies the chomping indicators' {
+            (ConvertFrom-TestYaml "k: |-`n  a`n  b`nz: 1").k | Should -Be "a`nb"
+            (ConvertFrom-TestYaml "k: |`n  a`n`n`nz: 1").k | Should -Be "a`n"
+            (ConvertFrom-TestYaml "k: |+`n  a`n`nz: 1").k | Should -Be "a`n`n"
+            (ConvertFrom-TestYaml "k: |`n  a`n").k | Should -Be "a`n"
+            (ConvertFrom-TestYaml "k: |`nz: 1").k | Should -Be ''
+        }
+
+        It 'folds single newlines of a > block and keeps paragraph breaks' {
+            (ConvertFrom-TestYaml "k: >`n  one`n  two`n`n  three`nz: 1").k | Should -Be "one two`nthree`n"
+            (ConvertFrom-TestYaml "k: >-`n  one`n  two`nz: 1").k | Should -Be 'one two'
+        }
+
+        It 'reads a block scalar in a list item and returns to the list' {
+            $t = ConvertFrom-TestYaml "items:`n  - name: a`n    note: |`n      x`n`n      y`n  - name: b"
+            $t.items[0].note | Should -Be "x`n`ny`n"
+            $t.items[1].name | Should -Be 'b'
+        }
+
+        It 'refuses a header it does not support' {
+            { ConvertFrom-TestYaml "k: |2`n   a" } | Should -Throw '*YAML line 1: this block scalar header is not supported*'
+        }
+    }
+
+    Context 'errors name the line and never echo it' {
+        It 'puts the line number on anchor, alias and tag errors' {
+            { ConvertFrom-TestYaml "a: 1`nb: &x 2" } | Should -Throw '*YAML line 2:*anchors, aliases and tags*'
+            { ConvertFrom-TestYaml "a: 1`nl:`n  - *x" } | Should -Throw '*YAML line 3:*anchors, aliases and tags*'
+            { ConvertFrom-TestYaml 'a: !!str 1' } | Should -Throw '*YAML line 1:*'
+        }
+
+        It 'names the line of a flow error' {
+            { ConvertFrom-TestYaml "a: 1`nb: [x, y" } | Should -Throw '*YAML line 2:*'
+            { ConvertFrom-TestYaml "a: 1`nb: { k }" } | Should -Throw "*YAML line 2: expected ':' after a key in a flow map*"
+        }
+
+        It 'does not print the content of the failing line' {
+            foreach ($y in 'a: "topsecretvalue', 'a: [topsecretvalue, y', 'a: { topsecretvalue', "a: 'x' topsecretvalue", 'topsecretvalue', 'a: &topsecretvalue 1', "l:`n- - topsecretvalue") {
+                $m = Get-TestYamlError -Yaml $y
+                $m | Should -Match 'YAML line \d+:'
+                $m | Should -Not -Match 'topsecretvalue'
+            }
+        }
+
+        It 'says what is not supported when a quoted value continues on the next line' {
+            { ConvertFrom-TestYaml "a: 1`nb: `"long`n  more`"" } | Should -Throw '*YAML line 2: a double-quoted value that continues on the next line is not supported (put it on one line).*'
+            { ConvertFrom-TestYaml "b: 'long`n  more'" } | Should -Throw '*YAML line 1: a single-quoted value that continues on the next line is not supported*'
+            { ConvertFrom-TestYaml "l:`n  - `"long`n    more`"" } | Should -Throw '*YAML line 2: a double-quoted value that continues*'
+        }
+
+        It 'says what is not supported for a multi-line flow collection' {
+            { ConvertFrom-TestYaml "a: [x,`n  y]" } | Should -Throw '*YAML line 1: a [[] ... ] flow collection that continues on the next line is not supported (put it on one line*'
+            { ConvertFrom-TestYaml "a: 1`nb: {`n  k: v }" } | Should -Throw '*YAML line 2: a { ... } flow collection that continues on the next line is not supported*'
+        }
+
+        It 'says what is not supported for a nested list on one line' {
+            { ConvertFrom-TestYaml "l:`n  - - a`n    - b" } | Should -Throw "*YAML line 2: a nested list on one line ('- - item') is not supported (use a block list).*"
+        }
+
+        It 'rejects text after a closing quote or bracket' {
+            { ConvertFrom-TestYaml 'notes: "a"junk' } | Should -Throw '*YAML line 1: text after the closing quote*'
+            { ConvertFrom-TestYaml "a: 1`nnotes: 'a'junk" } | Should -Throw '*YAML line 2: text after the closing quote*'
+            { ConvertFrom-TestYaml 'notes: ["a"junk]' } | Should -Throw '*YAML line 1: text after the closing quote*'
+            { ConvertFrom-TestYaml 'notes: [a] junk' } | Should -Throw '*YAML line 1: text after the closing bracket*'
+        }
+
+        It 'rejects a duplicate key in a flow map' {
+            { ConvertFrom-TestYaml 'a: { k: 1, k: 2 }' } | Should -Throw "*YAML line 1: duplicate key 'k'*"
+        }
+    }
+
+    Context 'limits' {
+        It 'refuses input over the size limit' {
+            InModuleScope AzlSonar {
+                $old = $script:AzlSonarYamlMaxBytes
+                $script:AzlSonarYamlMaxBytes = 50
+                try {
+                    { ConvertFrom-AzlSonarYaml -Text ('a: ' + ('x' * 100)) } | Should -Throw '*YAML input is larger than the 2 MB limit*'
+                    ConvertFrom-AzlSonarYaml -Text 'a: x' | Should -Not -BeNullOrEmpty
+                }
+                finally { $script:AzlSonarYamlMaxBytes = $old }
+            }
+        }
+
+        It 'refuses nesting deeper than 40 levels with a clean error, for block and flow collections' {
+            $deep = (0..44 | ForEach-Object { (' ' * $_) + "k${_}:" }) -join "`n"
+            { ConvertFrom-TestYaml ($deep + ' 1') } | Should -Throw '*YAML line 41: nesting deeper than 40 levels is not supported*'
+            { ConvertFrom-TestYaml ('a: ' + ('[' * 60) + (']' * 60)) } | Should -Throw '*YAML line 1: nesting deeper than 40 levels is not supported*'
+            { ConvertFrom-TestYaml ('a: ' + ('{ k: ' * 60) + '1' + (' }' * 60)) } | Should -Throw '*nesting deeper than 40 levels*'
+            { ConvertFrom-TestYaml ("l:`n" + ((0..44 | ForEach-Object { (' ' * ($_ * 2)) + '- ' }) -join "`n") + 'x') } | Should -Throw '*nesting deeper than 40 levels*'
+        }
+
+        It 'reads 30 levels of nesting' {
+            $ok = (0..29 | ForEach-Object { (' ' * $_) + "k${_}:" }) -join "`n"
+            (ConvertFrom-TestYaml ($ok + ' 1')).k0 | Should -Not -BeNullOrEmpty
+        }
+    }
+}
+
 Describe 'Overrides and backward compatibility' {
     It '-ConfigPath still reads the example config exactly as before' {
         $config = Read-AzlSonarConfig -Path $script:SonarExampleConfig

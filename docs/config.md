@@ -75,6 +75,24 @@ Infrastructure file (...\infrastructure.yml) does not give Sonar what it needs:
  - nodes[1].network_adapters : node 'node02' has no port with roles management, ip_assignment static or dhcp_reservation and an ip_address (infrastructure.yml, schema 5)
 ```
 
+### What the YAML reader supports and refuses
+
+Sonar reads `infrastructure.yml` with its own small YAML reader (no YAML module, no toolkit). It reads the subset the schema uses:
+
+- Block maps and block lists (a list may sit at the same indent as its key), flow lists and maps written on one line (`[a, b]`, `{ k: v }`).
+- Plain, `'single'` and `"double"` quoted values on one line. A `#` starts a comment only after a space, so `https://example.com#frag` is a value. Keys are always text (`712: storage` is the key `712`).
+- Block scalars `|` and `>`, with `-` or `+`: blank lines, indentation and `#` lines inside the block are kept as text.
+- Whole numbers up to 9 digits (not `007`) are numbers, `1.5` is a number, `true` and `false` are booleans, `null` and `~` are empty. Everything else, including `yes`, is text.
+- A `---` document start (with or without a comment), a CRLF file and a byte order mark.
+
+It refuses these, with `YAML line N: ...` (the message names the line, never its text):
+
+- Duplicate keys in one map.
+- A quoted value, a `[ ... ]` or a `{ ... }` that continues on the next line (put it on one line, or use a block list or map), and text after a closing quote or bracket.
+- A nested list on one line (`- - a`), anchors, aliases and tags (`&`, `*`, `!`), block scalar headers with an indentation number (`|2`).
+- More than one document, or content after `...`; tab indentation.
+- Input over 2 MB, and nesting deeper than 40 levels.
+
 ## Update the configuration
 
 ### Add or remove a node
