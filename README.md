@@ -34,6 +34,8 @@ On the workstation or jump server that runs Sonar:
 | Az.KeyVault | Only when `credential.source` is `keyvault`. |
 | A browser on the same machine | The page is served on `http://localhost:<port>/` and answers this machine only. |
 
+The full cross-tool matrix of roles and network paths is in the toolkit's [access-and-connectivity page](https://github.com/AzureLocal/azurelocal-toolkit/blob/main/docs/access-and-connectivity.md).
+
 Without log access Sonar still runs: the step tree, phases and node status come from Azure; the log pane shows why the logs are unavailable and which account and location to use.
 
 ## Get Sonar
