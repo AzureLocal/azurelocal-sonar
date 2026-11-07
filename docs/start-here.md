@@ -8,6 +8,10 @@ Pick what you want to do. Each purpose has its own section in [Running Sonar](./
 | Watch machines come up from an OEM image or an ISO and register with Arc | [Watch the OEM image or ISO route](./run.md#watch-the-oem-image-or-iso-route) |
 | Follow OS configuration, then the Validate step in Azure | [Watch OS configuration and Validate](./run.md#watch-os-configuration-and-validate) |
 | Follow a deployment: step tree, live logs from the seed node | [Watch a deployment](./run.md#watch-a-deployment) |
+| Understand one ZTP stage: Boot, Bootstrap, Vouchers and the claim, Install OS, Device, Network, Restore, Handoff | [Running Sonar, stage by stage](./stages.md) |
+| Know which account and folders read the logs in each phase, and how Sonar reaches the node | [Log access](./log-access.md) |
+| Follow an update, an add node or a repair, or look at a deployed cluster | [Follow an update](./run.md#follow-an-update), [Add node or repair](./run.md#follow-add-node-or-repair), [Health](./run.md#look-at-a-deployed-cluster-health) |
+| Learn the page with no deployment (demo data or a replay) | [Demo and replay](./run.md#learn-the-page-without-a-deployment-demo-and-replay) |
 | Look at an existing cluster without touching it, and keep a record | [Read-only audit and recording](./run.md#read-only-audit-and-recording-of-an-existing-cluster) |
 | Run it from a pipeline or an unattended session | [Pipeline or unattended](./run.md#run-from-a-pipeline-or-an-unattended-session) |
 | Record a session and share it | [Record and share](./run.md#record-and-share-a-session) |

@@ -4,7 +4,7 @@
 
 A ZTP run takes bare machines to "ready for OS configuration". It boots each machine from a virtual USB over its BMC, reads the ownership voucher back, sets the management address in the maintenance environment, claims the machine in Azure as an edge machine, and waits for the OS install. Then it moves the management address to the management NIC and puts back the final BIOS values. OS configuration (drivers, `C:\SBE`, DHCP off, DNS, time, the deployment admin) follows. Validate comes after that. Sonar follows two sources at once during that time: the event file the ZTP scripts write, and the edge machines in Azure. Once the cluster exists, it follows Validate and Deploy as usual.
 
-The ZTP side, with what each ZTP stage checks, is in the ZTP docs: [Monitoring a run](https://azurelocal.cloud/azurelocal-ztp/monitoring). The full state contract is in [design.md](./design.md).
+Each ZTP stage on its own, with how to run Sonar for it and what done and failed look like, is on [Running Sonar, stage by stage](./stages.md). The ZTP side, with what each ZTP stage checks, is in the ZTP docs: [Monitoring a run](https://azurelocal.cloud/azurelocal-ztp/monitoring). The full state contract is in [design.md](./design.md).
 
 ## What Sonar reads
 
@@ -61,7 +61,7 @@ Three ZTP stages work on each machine, and their events become steps in that mac
 | Step | Succeeded | Failed | Running |
 | --- | --- | --- | --- |
 | Device | `DeviceAddressSet`, `DeviceAddressAlreadySet`, `DeviceAddressReported` (DHCP, DHCP reservation or preconfigured: reported, not changed), `DeviceConfigurationSkipped` (no maintenance address; Network sets the address later) | `DeviceConfigurationFailed` | `DeviceConfigurationSubmitted`, `DeviceConfigurationStatus` |
-| Network | `ManagementAddressSet`, `ManagementAddressAlreadySet`, `ManagementAddressReported` | `ManagementAddressFailed` | `NetworkJobSubmitted`, `NetworkJobStatus`, `ManagementAddressReleased` |
+| Network | `ManagementAddressSet`, `ManagementAddressAlreadySet`, `ManagementAddressReported`, `ManagementAddressDeferredToOsConfiguration` (ZTP verified the port; a static address the install reset to DHCP is set by OS configuration) | `ManagementAddressFailed` | `NetworkJobSubmitted`, `NetworkJobStatus`, `ManagementAddressReleased` |
 | Restore | `BiosRestored` | `BiosRestoreFailed` | `BiosRestoreStarted` |
 
 With no events, a step is **not started**. Only a failed state is an error. Sonar never reads one from the evidence text, so a Network job that waits with "Job is not yet triggered as other jobs are still running" shows as running.
