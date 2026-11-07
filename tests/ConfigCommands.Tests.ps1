@@ -69,6 +69,85 @@ Describe 'Config commands: create, add node, test, get' {
     }
 }
 
+Describe 'Set-AzlSonarConfig (change one key of a config file)' {
+    BeforeEach {
+        $script:SetPath = Join-Path $TestDrive "set-$([guid]::NewGuid().ToString('N')).json"
+        $null = New-AzlSonarConfig -Path $script:SetPath -SubscriptionId $script:Sub -ResourceGroup rg-x -ClusterName c1 6>$null
+        Add-AzlSonarNode -Path $script:SetPath -Name a -Address 192.0.2.1 -Seed
+    }
+
+    It 'sets a number, a word, a flag, a nested key and a list, and Sonar reads them back' {
+        Set-AzlSonarConfig -Path $script:SetPath -Key pollSeconds -Value 45 6>$null
+        Set-AzlSonarConfig -Path $script:SetPath -Key identityModel -Value activedirectory 6>$null
+        Set-AzlSonarConfig -Path $script:SetPath -Key accessToken -Value false 6>$null
+        Set-AzlSonarConfig -Path $script:SetPath -Key logs.transport -Value SSH 6>$null
+        Set-AzlSonarConfig -Path $script:SetPath -Key logs.paths -Value 'C:\MASLogs', 'C:\Other' 6>$null
+        Set-AzlSonarConfig -Path $script:SetPath -Key ztpEvents.path -Value 'D:\ztp\ztp-events.jsonl' 6>$null
+        $raw = Get-Content -LiteralPath $script:SetPath -Raw | ConvertFrom-Json
+        $raw.pollSeconds | Should -BeOfType [long]   # a JSON number, not the text "45"
+        $raw.pollSeconds | Should -Be 45
+        $raw.identityModel | Should -Be 'ActiveDirectory'   # the canonical spelling, not the one typed
+        $raw.accessToken | Should -BeFalse
+        $raw.logs.transport | Should -Be 'ssh'
+        @($raw.logs.paths) | Should -Be @('C:\MASLogs', 'C:\Other')
+        @(Test-AzlSonarConfig -Path $script:SetPath).Count | Should -Be 0
+        (Get-AzlSonarConfig -Path $script:SetPath).ztpEventsPath | Should -Be 'D:\ztp\ztp-events.jsonl'
+    }
+
+    It 'keeps a single list value a list' {
+        Set-AzlSonarConfig -Path $script:SetPath -Key logs.include -Value '*.log' 6>$null
+        (Get-Content -LiteralPath $script:SetPath -Raw) | Should -Match '"include":\s*\[\s*"\*\.log"\s*\]'
+    }
+
+    It 'removes a key, and the empty section with it' {
+        Set-AzlSonarConfig -Path $script:SetPath -Key logs.transport -Value ssh 6>$null
+        Set-AzlSonarConfig -Path $script:SetPath -Key logs.transport -Remove 6>$null
+        (Get-Content -LiteralPath $script:SetPath -Raw | ConvertFrom-Json).PSObject.Properties.Name | Should -Not -Contain 'logs'
+        # removing a key that is not there is fine
+        { Set-AzlSonarConfig -Path $script:SetPath -Key track -Remove 6>$null } | Should -Not -Throw
+    }
+
+    It 'writes nothing when the change would make the file invalid, and names the problem' {
+        $before = Get-Content -LiteralPath $script:SetPath -Raw
+        { Set-AzlSonarConfig -Path $script:SetPath -Key pollSeconds -Value 2 } | Should -Throw '*Not changed*pollSeconds must be a whole number from 5 to 3600*'
+        { Set-AzlSonarConfig -Path $script:SetPath -Key subscriptionId -Value 'my-subscription' } | Should -Throw '*subscriptionId must be a GUID*'
+        { Set-AzlSonarConfig -Path $script:SetPath -Key logs.transport -Value telnet } | Should -Throw '*must be one of: auto, winrm, ssh*'
+        { Set-AzlSonarConfig -Path $script:SetPath -Key pollSeconds -Value abc } | Should -Throw '*whole number*'
+        { Set-AzlSonarConfig -Path $script:SetPath -Key accessToken -Value maybe } | Should -Throw '*true or false*'
+        { Set-AzlSonarConfig -Path $script:SetPath -Key pollSeconds -Value 1, 2 } | Should -Throw '*takes one value*'
+        Get-Content -LiteralPath $script:SetPath -Raw | Should -Be $before
+    }
+
+    It 'refuses a secret, a node, an unknown key, both -Value and -Remove, and neither' {
+        { Set-AzlSonarConfig -Path $script:SetPath -Key credential.password -Value x } | Should -Throw '*never put secrets*'
+        { Set-AzlSonarConfig -Path $script:SetPath -Key nodes -Value x } | Should -Throw '*Add-AzlSonarNode*'
+        { Set-AzlSonarConfig -Path $script:SetPath -Key nodes[0].address -Value x } | Should -Throw '*Add-AzlSonarNode*'
+        { Set-AzlSonarConfig -Path $script:SetPath -Key colour -Value x } | Should -Throw "*'colour' is not a setting*"
+        { Set-AzlSonarConfig -Path $script:SetPath -Key pollSeconds -Value 30 -Remove } | Should -Throw '*not both*'
+        { Set-AzlSonarConfig -Path $script:SetPath -Key pollSeconds } | Should -Throw '*not both*'
+        { Set-AzlSonarConfig -Key pollSeconds -Value 30 } | Should -Throw '*Give -Path*'
+    }
+
+    It 'does not write with -WhatIf, and lists the keys it can set when called without -Key' {
+        $before = Get-Content -LiteralPath $script:SetPath -Raw
+        Set-AzlSonarConfig -Path $script:SetPath -Key pollSeconds -Value 60 -WhatIf
+        Get-Content -LiteralPath $script:SetPath -Raw | Should -Be $before
+        $keys = @(Set-AzlSonarConfig)
+        $keys.Key | Should -Contain 'logs.transport'
+        ($keys | Where-Object Key -eq 'identityModel').Allowed | Should -Be 'LocalIdentity, ActiveDirectory'
+        $keys.Key | Should -Not -Contain 'credential.password'
+    }
+
+    It 'offers only keys that docs/config.md and the commented example both explain' {
+        $doc = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../docs/config.md') -Raw
+        $example = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../examples/sonar.config.commented.jsonc') -Raw
+        foreach ($key in @(Set-AzlSonarConfig).Key) {
+            $doc | Should -Match ([regex]::Escape("``$key``")) -Because "docs/config.md must have a row for $key"
+            $example | Should -Match ([regex]::Escape(($key -split '\.')[-1])) -Because "examples/sonar.config.commented.jsonc must explain $key"
+        }
+    }
+}
+
 Describe 'Guided setup (New-AzlSonarConfig -Interactive)' {
     AfterEach {
         Remove-Variable -Name SonarTestAnswers -Scope Global -ErrorAction SilentlyContinue

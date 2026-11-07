@@ -54,6 +54,7 @@ New-AzlSonarConfig -Path ./config/clus01.json -SubscriptionId <subscription-id> 
 Add-AzlSonarNode -Path ./config/clus01.json -Name node01 -Address 192.0.2.11 -Seed
 Add-AzlSonarNode -Path ./config/clus01.json -Name node02 -Address 192.0.2.12
 
+Set-AzlSonarConfig  -Path ./config/clus01.json -Key pollSeconds -Value 30   # change any one key later (checked before it is written)
 Test-AzlSonarConfig -Path ./config/clus01.json     # says what is missing, naming the key
 Get-AzlSonarConfig  -Path ./config/clus01.json     # the configuration Sonar will run with
 ./Start-AzlSonar.ps1 -ConfigPath ./config/clus01.json

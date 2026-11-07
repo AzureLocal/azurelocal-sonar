@@ -347,7 +347,7 @@ There is **no dedicated health route**. To check that Sonar is up, request `GET 
 
 ## PowerShell commands
 
-The module exports **14 functions** (the manifest, `src/AzlSonar/AzlSonar.psd1`, `FunctionsToExport`; no cmdlets, aliases or variables), and the repository ships **3 scripts**. Import the module with:
+The module exports **15 functions** (the manifest, `src/AzlSonar/AzlSonar.psd1`, `FunctionsToExport`; no cmdlets, aliases or variables), and the repository ships **3 scripts**. Import the module with:
 
 ```powershell
 Import-Module ./src/AzlSonar/AzlSonar.psd1
@@ -454,6 +454,27 @@ Remove-AzlSonarNode -Path ./config/clus01.json -Name node02
 ```
 
 **What it changes:** rewrites the config file.
+
+#### Set-AzlSonarConfig
+
+Changes one setting in a config file, or removes it so the default applies again. It is the command for "update the config file" without an editor. The new value is checked by the rules Sonar applies at start: when the change would make the file invalid nothing is written and the problem is named (problems the file already had, such as no nodes yet, do not stop the change). Secrets are refused. Nodes are changed with `Add-AzlSonarNode` and `Remove-AzlSonarNode`. Rewrites the file as plain JSON, so comments in a hand-commented file are lost.
+
+| Parameter | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `-Path` | string | yes (to change) | The config file. |
+| `-Key` | string | no | The setting, as written in [Configuration](../config.md#key-reference): a dotted path such as `pollSeconds`, `logs.transport` or `ztpEvents.path`. Not case sensitive. Without `-Key`, the command lists the keys it can set, their kind and the allowed words. |
+| `-Value` | string[] | with `-Key`, unless `-Remove` | The new value. A number key takes a whole number, `accessToken` takes `true` or `false`, a list key (`logs.paths`, `logs.include`, `logs.exclude`) takes one or more values. |
+| `-Remove` | switch | no | Remove the key so the default applies. |
+| `-WhatIf`, `-Confirm` | switch | no | Show what would change, or ask first. |
+
+```powershell
+Set-AzlSonarConfig -Path ./config/clus01.json -Key pollSeconds -Value 30
+Set-AzlSonarConfig -Path ./config/clus01.json -Key logs.paths -Value 'C:\MASLogs', 'C:\CloudDeployment\Logs'
+Set-AzlSonarConfig -Path ./config/clus01.json -Key logs.transport -Remove
+Set-AzlSonarConfig        # the list of keys it can set
+```
+
+**What it changes:** rewrites the config file. A running Sonar keeps the old value until it is restarted.
 
 #### Get-AzlSonarConfig
 
@@ -701,7 +722,7 @@ The five default log folders are `C:\CloudContent\MASLogs`, `C:\MASLogs`, `C:\Cl
 
 | File | Written by | Notes |
 | --- | --- | --- |
-| A config file | `New-AzlSonarConfig`, `Add-AzlSonarNode`, `Remove-AzlSonarNode`, `ConvertTo-AzlSonarConfig` | Plain JSON. |
+| A config file | `New-AzlSonarConfig`, `Add-AzlSonarNode`, `Remove-AzlSonarNode`, `Set-AzlSonarConfig`, `ConvertTo-AzlSonarConfig` | Plain JSON. |
 | A recording | `-Record` / `recordPath` | JSON Lines, appended (created if missing; appended to after a restart). Secrets masked; identifiers kept unless `-Publishable`. A line cut off when Sonar stopped is skipped on replay. |
 | A publishable recording | `Export-AzlSonarPublishableRecording`, `-Publishable` | Pseudonymised, verified. A failed check renames it `.NOT-PUBLISHABLE`. |
 | A bundle | `Export-AzlSonarBundle` | `<name>-timeline.json` and `<name>-report.html`. |

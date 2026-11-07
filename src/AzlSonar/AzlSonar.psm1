@@ -19,6 +19,7 @@ Export-ModuleMember -Function @(
     'New-AzlSonarConfig',
     'Add-AzlSonarNode',
     'Remove-AzlSonarNode',
+    'Set-AzlSonarConfig',
     'ConvertTo-AzlSonarConfig',
     'Export-AzlSonarPublishableRecording',
     'Test-AzlSonarPublishableRecording',

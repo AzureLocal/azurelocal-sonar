@@ -1,5 +1,5 @@
 // AzL Sonar config, every key explained. Copy to ./config/<cluster>.json (git-ignored) and fill in.
-// Comments (// and /* */) are allowed: Sonar reads this file as is. Add-AzlSonarNode and Remove-AzlSonarNode rewrite
+// Comments (// and /* */) are allowed: Sonar reads this file as is. Add-AzlSonarNode, Remove-AzlSonarNode and Set-AzlSonarConfig rewrite
 // the file as plain JSON and drop the comments.
 // Do not put passwords here: password, secret and secretValue under "credential" are refused.
 // Easier: Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml builds all of this from the master file.
@@ -30,8 +30,14 @@
   "architecture": "hyperconverged",
   // Optional, default "auto". auto, deployment, update, add-node or repair: which operation is followed after the deployment.
   "track": "auto",
+  // Optional, default "auto". auto follows an update when Azure reports one; off never reads the update resources.
+  "updateTrack": "auto",
+  // Optional, default false. true says the deployment uses Internal DNS (preview, release 2609; Local Identity with Azure
+  // Key Vault only): the page adds a note about it. It changes nothing Sonar reads.
+  "internalDns": false,
   // Optional. API versions; the defaults are the current GA versions. Change only if Azure rejects them.
   "apiVersion": "2026-10-01",
+  "apiVersionFallback": "2025-10-01",
   "edgeApiVersion": "2026-10-01",
   // REQUIRED, at least one node. In the infrastructure file: nodes[].name and the management address of the port with
   // role management and ip_assignment static (or dhcp_reservation).

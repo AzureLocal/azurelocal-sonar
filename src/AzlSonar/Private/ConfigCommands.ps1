@@ -174,6 +174,150 @@ function Remove-AzlSonarNode {
     if ($PSCmdlet.ShouldProcess($Path, "Remove node $Name")) { Write-AzlSonarConfigFile -Path $Path -Config $config }
 }
 
+# Keys Set-AzlSonarConfig can change: the dotted key, its kind (text, number, flag, list) and the allowed words when it
+# has a short fixed list. nodes are changed with Add-AzlSonarNode and Remove-AzlSonarNode.
+$script:AzlSonarSettableKeys = [ordered]@{
+    'subscriptionId'            = @{ Kind = 'text' }
+    'resourceGroup'             = @{ Kind = 'text' }
+    'clusterName'               = @{ Kind = 'text' }
+    'location'                  = @{ Kind = 'text' }
+    'identityModel'             = @{ Kind = 'text'; Words = @('LocalIdentity', 'ActiveDirectory') }
+    'provisioningRoute'         = @{ Kind = 'text'; Words = @('auto', 'simplified', 'oem-image') }
+    'accessToken'               = @{ Kind = 'flag' }
+    'maxEventStreams'           = @{ Kind = 'number' }
+    'pollSeconds'               = @{ Kind = 'number' }
+    'recordPath'                = @{ Kind = 'text' }
+    'clusterPattern'            = @{ Kind = 'text'; Words = @('Standard', 'RackAware') }
+    'architecture'              = @{ Kind = 'text'; Words = @('hyperconverged', 'disaggregated') }
+    'internalDns'               = @{ Kind = 'flag' }
+    'track'                     = @{ Kind = 'text'; Words = @('auto', 'deployment', 'update', 'add-node', 'repair') }
+    'updateTrack'               = @{ Kind = 'text'; Words = @('auto', 'off') }
+    'apiVersion'                = @{ Kind = 'text' }
+    'apiVersionFallback'        = @{ Kind = 'text' }
+    'edgeApiVersion'            = @{ Kind = 'text' }
+    'ztpEvents.path'            = @{ Kind = 'text' }
+    'credential.source'         = @{ Kind = 'text'; Words = @('prompt', 'parameter', 'keyvault') }
+    'credential.vault'          = @{ Kind = 'text' }
+    'credential.usernameSecret' = @{ Kind = 'text' }
+    'credential.passwordSecret' = @{ Kind = 'text' }
+    'logs.paths'                = @{ Kind = 'list' }
+    'logs.include'              = @{ Kind = 'list' }
+    'logs.exclude'              = @{ Kind = 'list' }
+    'logs.recurseDepth'         = @{ Kind = 'number' }
+    'logs.activeWindowMinutes'  = @{ Kind = 'number' }
+    'logs.maxLinesPerPoll'      = @{ Kind = 'number' }
+    'logs.pollSeconds'          = @{ Kind = 'number' }
+    'logs.transport'            = @{ Kind = 'text'; Words = @('auto', 'winrm', 'ssh') }
+}
+
+function Set-AzlSonarConfig {
+    <#
+    .SYNOPSIS
+        Changes one setting in a Sonar config file (JSON), or removes it so the default applies again.
+    .DESCRIPTION
+        The command for "update the config file" without opening an editor. -Key is the key as written in
+        docs/config.md (a dotted path such as logs.transport or ztpEvents.path). The new value is checked by the same
+        rules Sonar applies at start: when the change would make the file invalid, nothing is written and the problem is
+        named. Problems the file already had (for example no nodes yet) do not stop the change.
+        Nodes are changed with Add-AzlSonarNode and Remove-AzlSonarNode. A secret is never accepted (credential.password
+        and the like are refused): the log account comes from the prompt, -Credential or Key Vault names.
+        List settings (logs.paths, logs.include, logs.exclude) take several values: -Value 'C:\MASLogs', 'C:\Other'.
+        Without -Key, lists the keys this command can set.
+    .NOTES
+        The file is rewritten as plain JSON: comments in a hand-commented file are not kept.
+    .PARAMETER Path
+        The config file.
+    .PARAMETER Key
+        The setting, for example pollSeconds, identityModel, logs.transport.
+    .PARAMETER Value
+        The new value. A number key takes a whole number, accessToken takes true or false, a list key takes one or more values.
+    .PARAMETER Remove
+        Remove the key so Sonar's default applies. Required keys cannot be removed (Sonar then reports them missing).
+    .EXAMPLE
+        Set-AzlSonarConfig -Path ./config/clus01.json -Key pollSeconds -Value 30
+    .EXAMPLE
+        Set-AzlSonarConfig -Path ./config/clus01.json -Key logs.paths -Value 'C:\MASLogs', 'C:\CloudDeployment\Logs'
+    .EXAMPLE
+        Set-AzlSonarConfig -Path ./config/clus01.json -Key logs.transport -Remove
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([pscustomobject])]
+    param(
+        [string]$Path,
+        [string]$Key,
+        [string[]]$Value,
+        [switch]$Remove
+    )
+
+    $ErrorActionPreference = 'Stop'
+    if (-not $Key) {
+        return @($script:AzlSonarSettableKeys.GetEnumerator() | ForEach-Object {
+                [pscustomobject]@{ Key = $_.Key; Kind = $_.Value['Kind']; Allowed = $(if ($_.Value['Words']) { $_.Value['Words'] -join ', ' } else { '' }) }
+            })
+    }
+    if (-not $Path) { throw 'Give -Path, the config file to change.' }
+    if ($Key -match '^credential\.(password|secret|secretValue)$') { throw "$Key is not allowed: never put secrets in the config. Use the prompt, -Credential or Key Vault names (credential.vault, credential.usernameSecret, credential.passwordSecret)." }
+    if ($Key -eq 'nodes' -or $Key -like 'nodes[[]*') { throw 'Change nodes with Add-AzlSonarNode and Remove-AzlSonarNode.' }
+    $matchedKey = @($script:AzlSonarSettableKeys.Keys | Where-Object { $_ -ieq $Key })
+    if ($matchedKey.Count -eq 0) { throw "'$Key' is not a setting this command changes. Run Set-AzlSonarConfig with no -Key to list them, or see docs/config.md." }
+    $Key = $matchedKey[0]
+    $kind = $script:AzlSonarSettableKeys[$Key]['Kind']
+    $words = $script:AzlSonarSettableKeys[$Key]['Words']
+    if ($Remove -eq [bool]$PSBoundParameters.ContainsKey('Value')) { throw 'Give -Value to set the key, or -Remove to remove it, not both and not neither.' }
+
+    $config = Read-AzlSonarRawConfigFile -Path $Path
+    $before = @(Test-AzlSonarConfig -Config $config)
+
+    $typed = $null
+    if (-not $Remove) {
+        $values = @($Value)
+        if ($kind -ne 'list' -and $values.Count -ne 1) { throw "$Key takes one value." }
+        switch ($kind) {
+            'number' { $number = 0; if (-not [int]::TryParse($values[0], [ref]$number)) { throw "$Key must be a whole number." }; $typed = $number }
+            'flag' { if ($values[0] -notin 'true', 'false') { throw "$Key must be true or false." }; $typed = ($values[0] -eq 'true') }
+            'list' { $typed = @($values) }
+            default {
+                if ($words) {
+                    $word = @($words | Where-Object { $_ -ieq $values[0] })
+                    if ($word.Count -eq 0) { throw "$Key must be one of: $($words -join ', ')." }
+                    $typed = $word[0]
+                }
+                else { $typed = $values[0] }
+            }
+        }
+    }
+
+    $segments = $Key -split '\.'
+    $holder = $config
+    for ($i = 0; $i -lt $segments.Count - 1; $i++) {
+        $child = Get-AzlSonarMember $holder $segments[$i]
+        if ($null -eq $child -or $child -isnot [pscustomobject]) {
+            if ($Remove) { $holder = $null; break }
+            $child = [pscustomobject]@{}
+            $holder | Add-Member -NotePropertyName $segments[$i] -NotePropertyValue $child -Force
+        }
+        $holder = $child
+    }
+    $leaf = $segments[-1]
+    if ($Remove) {
+        if ($null -ne $holder -and $holder.PSObject.Properties[$leaf]) { $holder.PSObject.Properties.Remove($leaf) }
+        if ($segments.Count -gt 1) {
+            $parent = Get-AzlSonarMember $config $segments[0]
+            if ($null -ne $parent -and @($parent.PSObject.Properties).Count -eq 0) { $config.PSObject.Properties.Remove($segments[0]) }
+        }
+    }
+    else { $holder | Add-Member -NotePropertyName $leaf -NotePropertyValue $typed -Force }
+
+    $new = @(Test-AzlSonarConfig -Config $config | Where-Object { $_ -notin $before })
+    if ($new.Count -gt 0) { throw "Not changed. $Key would make the file invalid:`n - $($new -join "`n - ")" }
+
+    $what = if ($Remove) { "Remove $Key" } else { "Set $Key to $(@($Value) -join ', ')" }
+    if ($PSCmdlet.ShouldProcess($Path, $what)) {
+        Write-AzlSonarConfigFile -Path $Path -Config $config
+        Write-Information -MessageData "${what}: $Path. A running Sonar keeps the old value until it is restarted." -InformationAction Continue
+    }
+}
+
 function Get-AzlSonarConfig {
     <#
     .SYNOPSIS

@@ -34,7 +34,7 @@ Sonar needs to know which cluster to watch. There are three ways, and all three 
    ```
 
    To keep a config file you can commit or edit: `ConvertTo-AzlSonarConfig -InfrastructureFile ./infrastructure.yml -OutFile ./config/clus01.json`.
-2. **Commands that fill in a config file.** `New-AzlSonarConfig -Path ./config/clus01.json -Interactive` asks for each value (and offers your subscriptions when you are signed in to Azure); `Add-AzlSonarNode`, `Remove-AzlSonarNode`, `Test-AzlSonarConfig` and `Get-AzlSonarConfig` edit and check the file. No password is asked for or stored.
+2. **Commands that fill in a config file.** `New-AzlSonarConfig -Path ./config/clus01.json -Interactive` asks for each value (and offers your subscriptions when you are signed in to Azure); `Add-AzlSonarNode`, `Remove-AzlSonarNode`, `Set-AzlSonarConfig` (any one key, checked before it is written), `Test-AzlSonarConfig` and `Get-AzlSonarConfig` edit and check the file. No password is asked for or stored.
 3. **A config file by hand (the older option).** Copy [`examples/sonar.config.commented.jsonc`](examples/sonar.config.commented.jsonc) (every key explained) and start with `-ConfigPath`.
 
 `./Start-AzlSonar.ps1` with no arguments prints these three ways with the exact commands and offers to run the guided setup.

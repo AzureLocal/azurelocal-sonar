@@ -12,39 +12,46 @@ Unknown keys are ignored. Sonar validates at start and lists every problem at on
 
 ## Key reference
 
-Types are JSON types. "Dashboard" says what the key changes on the page.
+Types are JSON types. "Dashboard" says what the key changes on the page. "Master file" is the `infrastructure.yml` key that fills it when you use `-InfrastructureFile` (a dash means there is no such key: Sonar's default applies, or you give it another way). Every key below can be changed with [`Set-AzlSonarConfig`](./appendix/a-sonar-api.md#set-azlsonarconfig) (the node keys with `Add-AzlSonarNode` and `Remove-AzlSonarNode`); [Update the configuration](#update-the-configuration) shows how.
 
-| Key | Type | Required | Default | Example | What it changes in the dashboard |
-| --- | --- | --- | --- | --- | --- |
-| `subscriptionId` | string (GUID) | yes | | `00000000-0000-0000-0000-000000000000` | Which subscription every Azure read goes to. Wrong: no data, Azure 403/404 warnings. |
-| `resourceGroup` | string | yes | | `rg-example-azl` | The resource group of the cluster, its Arc machines and edge machines. |
-| `clusterName` | string | yes | | `clus01` | The cluster name in the top bar and the `deploymentSettings` that gives the step tree. |
-| `identityModel` | `LocalIdentity` or `ActiveDirectory` | yes | | `ActiveDirectory` | The account guidance in the Log access window and whether `TrustedHosts` is checked. |
-| `provisioningRoute` | `auto`, `simplified`, `oem-image` | no | `auto` | `simplified` | The first mode: **Provisioning (ZTP)** (edge machines) or **Provisioning (OS image)** (node probe). `oem-image` never reads edge machines; `simplified` never starts the node probe. |
-| `accessToken` | `true` or `false` | no | `true` | `false` | `false` turns the per-start access token off: any account on the machine can read the page. Single-user machines only. `-NoAccessToken` does the same. |
-| `maxEventStreams` | integer 1 to 50 | no | `4` | `4` | Live browser streams served at once; more get 429 and the page polls instead. |
-| `pollSeconds` | integer 5 to 3600 | no | `20` | `30` | How often Azure is read; how fresh the page is. `-PollSeconds` overrides it. |
-| `nodes` | list | yes (one or more) | | see below | The machine cards, the steps per machine and the log filters. |
-| `nodes[].name` | string, unique | yes | | `node01` | The machine's name on the page. |
-| `nodes[].address` | string | yes | | `192.0.2.11` | Host name or IP address Sonar connects to for logs (seed) and Arc status (OEM route). |
-| `nodes[].arcMachineName` | string | no | resolved | `node01` | The Arc machine to follow. Default: simplified route, the Arc machine the edge machine names; OEM route, the node name. |
-| `nodes[].seed` | boolean | no | first node | `true` | The node whose logs are tailed. At most one; none marked means the first node (with a warning). |
-| `ztpEvents.path` | string | no | none | `D:\Data\azl-ztp\evidence\ztp-events.jsonl` | The ZTP event file. Without it there are no `[ztp]` log lines and no per-machine ZTP steps. Relative paths are relative to the config file. |
-| `recordPath` | string | no | none | `./recordings/clus01.jsonl` | Record every run (as `-Record`, which overrides it). |
-| `credential.source` | `prompt`, `parameter`, `keyvault` | no | `prompt` | `keyvault` | Who supplies the log account: asked at start; `-Credential`; or Key Vault. |
-| `credential.vault`, `.usernameSecret`, `.passwordSecret` | string | with `keyvault` | | `kv-example`, `log-user`, `log-pass` | Names only, never values. |
-| `logs.paths` | list of strings | no | five standard folders | `C:\MASLogs` | Folders tailed on the seed node. |
-| `logs.include` / `logs.exclude` | list of patterns | no | `*.log`, `*.txt`, `*.xml` / `*.etl` | `*.log` | Which files are followed. |
-| `logs.recurseDepth` | integer 0 to 10 | no | `3` | `3` | Folder levels below each path. |
-| `logs.activeWindowMinutes` | integer 1 to 10080 | no | `30` | `30` | Only files written this recently are followed. |
-| `logs.maxLinesPerPoll` | integer 1 to 10000 | no | `500` | `500` | Lines per log poll; the rest come next poll. |
-| `logs.pollSeconds` | integer 1 to 3600 | no | `pollSeconds` | `10` | How often logs are read. |
-| `logs.transport` | `auto`, `winrm`, `ssh` | no | `auto` | `ssh` | How the seed node is reached. |
-| `clusterPattern` | `Standard`, `RackAware` | no | `Standard` | `RackAware` | What the page says about the shape of the deployment. |
-| `architecture` | `hyperconverged`, `disaggregated` | no | `hyperconverged` | `disaggregated` | Same. |
-| `track` | `auto`, `deployment`, `update`, `add-node`, `repair` | no | `auto` | `update` | Which operation is followed after the deployment. |
-| `updateTrack` | `auto`, `off` | no | `auto` | `off` | `off` never reads the update resources. |
-| `apiVersion`, `apiVersionFallback`, `edgeApiVersion` | string `yyyy-mm-dd` | no | `2026-10-01`, `2025-10-01`, `2026-10-01` | | Change only if Azure rejects the default; Sonar warns when it falls back. |
+| Key | Type | Required | Default | Example | Master file | What it changes in the dashboard |
+| --- | --- | --- | --- | --- | --- | --- |
+| `subscriptionId` | string (GUID) | yes | | `00000000-0000-0000-0000-000000000000` | `azure.subscription_id` | Which subscription every Azure read goes to. Wrong: no data, Azure 403/404 warnings. Details shows only its first 8 characters. |
+| `resourceGroup` | string | yes | | `rg-example-azl` | `azure.resource_group` | The resource group of the cluster, its Arc machines and edge machines. |
+| `location` | string | no | none | `eastus` | `azure.location` | The region shown in **Details**. Sonar does not use it to reach Azure. |
+| `clusterName` | string | yes | | `clus01` | `cluster.name` | The cluster name in the top bar and the `deploymentSettings` that gives the step tree. |
+| `identityModel` | `LocalIdentity` or `ActiveDirectory` | yes | | `ActiveDirectory` | `scenario.identity` | The account guidance in the Log access window, the **This deployment** note there, and whether `TrustedHosts` is checked. |
+| `provisioningRoute` | `auto`, `simplified`, `oem-image` | no | `auto` | `simplified` | `scenario.os_install` (`simplified`, `iso`) | The first mode: **Provisioning (ZTP)** (edge machines) or **Provisioning (OS image)** (node probe). `oem-image` never reads edge machines; `simplified` never starts the node probe. |
+| `accessToken` | `true` or `false` | no | `true` | `false` | - | `false` turns the per-start access token off: any account on the machine can read the page. Single-user machines only. `-NoAccessToken` does the same. |
+| `maxEventStreams` | integer 1 to 50 | no | `4` | `4` | - | Live browser streams served at once; more get 429 and the page polls instead. |
+| `pollSeconds` | integer 5 to 3600 | no | `20` | `30` | - (use `-PollSeconds`) | How often Azure is read; how fresh the page is. `-PollSeconds` overrides it. |
+| `nodes` | list | yes (one or more) | | see below | `nodes[]` | The machine cards, the steps per machine and the log filters. |
+| `nodes[].name` | string, unique | yes | | `node01` | `nodes[].name` | The machine's name on the page. |
+| `nodes[].address` | string | yes | | `192.0.2.11` | the management port's `ip_address` | Host name or IP address Sonar connects to for logs (seed) and Arc status (OEM route). |
+| `nodes[].arcMachineName` | string | no | resolved | `node01` | `nodes[].arc_machine_name` | The Arc machine to follow. Default: simplified route, the Arc machine the edge machine names; OEM route, the node name. |
+| `nodes[].seed` | boolean | no | first node | `true` | the first node | The node whose logs are tailed. At most one; none marked means the first node (with a warning). |
+| `ztpEvents.path` | string | no | none | `D:\Data\azl-ztp\evidence\ztp-events.jsonl` | `provisioning.simplified.evidence_path` + `ztp-events.jsonl` | The ZTP event file. Without it there are no `[ztp]` log lines and no per-machine ZTP steps. Relative paths are relative to the config file. |
+| `recordPath` | string | no | none | `./recordings/clus01.jsonl` | - (use `-Record`) | Record every run (as `-Record`, which overrides it). |
+| `credential.source` | `prompt`, `parameter`, `keyvault` | no | `prompt` | `keyvault` | - (always `prompt`) | Who supplies the log account: asked at start; `-Credential`; or Key Vault. |
+| `credential.vault` | string | with `keyvault` | | `kv-example` | - | Name of the Key Vault that holds the log account (a name, never a value). Needs Az.KeyVault. |
+| `credential.usernameSecret` | string | with `keyvault` | | `log-user` | - | Name of the secret that holds the user name. |
+| `credential.passwordSecret` | string | with `keyvault` | | `log-pass` | - | Name of the secret that holds the password. |
+| `logs.paths` | list of strings | no | five standard folders | `C:\MASLogs` | - | Folders tailed on the seed node. |
+| `logs.include` | list of patterns | no | `*.log`, `*.txt`, `*.xml` | `*.log` | - | Which files are followed. |
+| `logs.exclude` | list of patterns | no | `*.etl` | `*.etl` | - | Which files are skipped. May be empty. |
+| `logs.recurseDepth` | integer 0 to 10 | no | `3` | `3` | - | Folder levels below each path. |
+| `logs.activeWindowMinutes` | integer 1 to 10080 | no | `30` | `30` | - | Only files written this recently are followed. |
+| `logs.maxLinesPerPoll` | integer 1 to 10000 | no | `500` | `500` | - | Lines per log poll; the rest come next poll. |
+| `logs.pollSeconds` | integer 1 to 3600 | no | `pollSeconds` | `10` | - | How often logs are read. |
+| `logs.transport` | `auto`, `winrm`, `ssh` | no | `auto` | `ssh` | - | How the seed node is reached. |
+| `clusterPattern` | `Standard`, `RackAware` | no | `Standard` | `RackAware` | - | The **This deployment** note in the Log access window (what Azure Local needs for that shape). |
+| `architecture` | `hyperconverged`, `disaggregated` | no | `hyperconverged` | `disaggregated` | - | Same: a note for a SAN (disaggregated) deployment. |
+| `internalDns` | `true` or `false` | no | `false` | `true` | - | Same: a note for Internal DNS (preview, release 2609; Local Identity only; ignored, with a warning, for Active Directory). |
+| `track` | `auto`, `deployment`, `update`, `add-node`, `repair` | no | `auto` | `update` | - | Which operation is followed after the deployment. |
+| `updateTrack` | `auto`, `off` | no | `auto` | `off` | - | `off` never reads the update resources. |
+| `apiVersion` | string `yyyy-mm-dd` | no | `2026-10-01` | | - | The ARM version for the cluster and `deploymentSettings`. Change only if Azure rejects the default. |
+| `apiVersionFallback` | string `yyyy-mm-dd` | no | `2025-10-01` | | - | Tried once when Azure rejects `apiVersion`; Sonar warns when it falls back. |
+| `edgeApiVersion` | string `yyyy-mm-dd` | no | `2026-10-01` | | - | The ARM version for edge machines and their `ProvisionOs` job. |
 
 `credential.password`, `.secret` and `.secretValue` are refused: secrets never go in the file.
 
@@ -97,6 +104,24 @@ It refuses these, with `YAML line N: ...` (the message names the line, never its
 - Input over 2 MB, and nesting deeper than 40 levels.
 
 ## Update the configuration
+
+### Change any one key (without an editor)
+
+`Set-AzlSonarConfig` changes one key of a config file, checks the result with the same rules Sonar applies at start, and refuses (writing nothing, naming the problem) a value that would make the file invalid:
+
+```powershell
+Import-Module ./src/AzlSonar/AzlSonar.psd1
+Set-AzlSonarConfig                                                     # lists every key it can set, its kind and allowed words
+Set-AzlSonarConfig -Path ./config/clus01.json -Key pollSeconds -Value 30
+Set-AzlSonarConfig -Path ./config/clus01.json -Key identityModel -Value ActiveDirectory
+Set-AzlSonarConfig -Path ./config/clus01.json -Key logs.paths -Value 'C:\MASLogs', 'C:\CloudDeployment\Logs'   # a list takes several values
+Set-AzlSonarConfig -Path ./config/clus01.json -Key logs.transport -Remove                                      # back to the default
+Set-AzlSonarConfig -Path ./config/clus01.json -Key pollSeconds -Value 60 -WhatIf                               # show, do not write
+```
+
+The key is the one in the [key reference](#key-reference), not case sensitive. Number keys take a whole number, `accessToken` and `internalDns` take `true` or `false`. Keys with a fixed list of words take only those words. It refuses secrets (`credential.password` and the like) and `nodes` (use `Add-AzlSonarNode` and `Remove-AzlSonarNode`). Like those, it rewrites the file as plain JSON, so comments in a hand-commented file are lost: to keep comments, edit the file with an editor and run `Test-AzlSonarConfig` afterwards. A running Sonar keeps the old value until it is restarted ([below](#what-happens-to-a-running-sonar)).
+
+With the master file there is nothing to set: change `infrastructure.yml` (the table [above](#from-the-master-infrastructureyml) says which key feeds which setting).
 
 ### Add or remove a node
 
