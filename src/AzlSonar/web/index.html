@@ -104,6 +104,8 @@
 
   <ul id="live-notes" class="live-notes" aria-label="Notes on this run" role="status" hidden></ul>
 
+  <nav id="modes" class="modes" aria-label="Modes"></nav>
+
   <section id="summary" class="panel sum" aria-labelledby="sum-title" aria-live="off"></section>
 
   <main id="main" class="layout">
@@ -116,25 +118,8 @@
             <button id="collapse-all" type="button" class="btn btn-ghost btn-sm">Collapse all</button>
           </div>
         </div>
-        <p class="hint" id="tree-hint">Arrow keys move, Enter expands or collapses, Space filters the logs to a step.</p>
+        <p class="hint" id="tree-hint">Arrow keys move, Enter expands or collapses, Space selects a step: an Azure step shows its details, a node step filters the logs.</p>
         <div id="tree-host" class="panel-body scroll" aria-describedby="tree-hint"></div>
-      </section>
-
-      <section id="guidance-panel" class="panel panel-guidance" aria-labelledby="guidance-title">
-        <div class="panel-head">
-          <h2 id="guidance-title">Log access</h2>
-          <span id="guidance-model" class="pill pill-muted"></span>
-        </div>
-        <div class="guidance-line">
-          <p id="guidance-summary" class="guidance-summary">Log access: waiting for data</p>
-          <button id="guidance-toggle" type="button" class="btn btn-ghost btn-sm" aria-expanded="false" aria-controls="guidance-detail">Show details</button>
-        </div>
-        <div id="guidance-detail" class="guidance-detail" hidden>
-          <div id="guidance-tabs" class="seg seg-sm" role="group" aria-label="Show guidance for phase"></div>
-          <div id="guidance-body" class="panel-body guidance-body">
-            <p class="muted">Loading guidance&hellip;</p>
-          </div>
-        </div>
       </section>
     </div>
 
@@ -154,7 +139,7 @@
         <div>
           <strong>Live logs are unavailable.</strong>
           <span id="tailer-reason"></span>
-          <span class="muted">The back end retries every 60 s. See <a href="#guidance-panel">Log access</a> for the account and location for this phase.</span>
+          <span class="muted">The back end retries every 60 s. Open <button id="tailer-alert-link" type="button" class="link-btn">Log access</button> for the account and location for this phase.</span>
         </div>
       </div>
 
@@ -190,6 +175,20 @@
       </div>
     </section>
   </main>
+
+  <div id="la-modal" class="scrim" hidden>
+    <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="la-title">
+      <div class="mh">
+        <h2 id="la-title">Log access</h2>
+        <span id="la-id" class="chip chip-idle" data-kind="idle" hidden></span>
+        <span class="sp"></span>
+        <button id="la-close" type="button" class="btn btn-sm">Close <span aria-hidden="true">&#10005;</span></button>
+      </div>
+      <p id="la-msg" class="note" role="status">Log access: waiting for data</p>
+      <div id="la-tabs" class="ptabs" role="tablist" aria-label="Phase"></div>
+      <div id="la-body" class="la-body" role="tabpanel"><p class="muted">Loading guidance&hellip;</p></div>
+    </div>
+  </div>
 
   <div id="announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 </body>

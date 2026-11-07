@@ -10,7 +10,6 @@
   var POLL_MS = 5000;              // fallback polling interval
   var SSE_MAX_BACKOFF_MS = 30000;
   var THEME_KEY = 'azlsonar.theme';
-  var GUIDANCE_KEY = 'azlsonar.guidanceOpen';
   var PHASES = ['provisioning', 'arc-registration', 'validation', 'deployment', 'done', 'failed', 'update', 'add-node', 'repair'];
   var PHASE_LABEL = {
     provisioning: 'Provisioning', 'arc-registration': 'Arc registration', validation: 'Validation',
@@ -47,7 +46,8 @@
     store: null,                // log store (createLogStore), set below
     logGen: 0,                  // bumped on a back-end restart so late /api/logs answers are ignored
     counts: { all: 0, warning: 0, error: 0 },
-    filter: { level: 'all', q: '', file: '', stepKey: null, node: '', stage: '' },
+    filter: { level: 'all', q: '', file: '', stepKey: null, node: '', nodeBy: '', stage: '' },   // nodeBy: 'card' or 'step' (what chose the machine)
+    ui: { mode: null, pickedAt: null, lastMode: null },   // mode the user clicked, and the active mode it was clicked in
     summary: null,              // the summary box model last rendered (summaryFor)
     about: null,                // /api/about: version and documentation links
     details: null,              // /api/details: what Sonar collected and is using
@@ -780,6 +780,82 @@
     return out;
   }
 
+  // ------------------------------------------------------------------ steps of a mode: what a click does (pure; also run by tests under Node)
+  //
+  // Every step belongs to Azure or to a node. Azure steps (the machine lifecycle and the ProvisionOs job, the Azure
+  // registration, validation and the extensions) run in Azure: there is no log line for them, so a click shows their
+  // details under the step and never filters the logs. Node steps (the ZTP Device, Network and Restore stages, the OEM
+  // OS image update and bootstrap, deployment and update) leave lines: a click filters the logs to that machine and to
+  // the step's time window, or, for a ZTP stage, to the ZTP event lines tagged with that stage. A machine row selects
+  // the machine, like its card.
+
+  var MODE_SECTIONS = { prov: ['provisioning'], validate: ['validation', 'extensions'], deploy: ['deployment'], update: ['update'], health: [] };
+
+  // chain: the items from the top of the section down to the clicked step ({ id, name, ... }).
+  // Returns { side: 'machine' | 'azure' | 'node', node, stage, window }.
+  function stepRule(section, chain) {
+    var list = arr(chain).filter(isObj), top = list[0];
+    if (!top) return { side: 'azure', node: '', stage: '', window: false };
+    if (section === 'provisioning') {
+      var machine = str(top.name);
+      if (list.length === 1) return { side: 'machine', node: machine, stage: '', window: false };
+      var group = str(list[1].id), z = /^ztp\.(device|network|restore)(?:\.|$)/.exec(group);
+      if (z) return { side: 'node', node: machine, stage: z[1], window: false };
+      if (/^(update|bootstrap)(?:\.|$)/.test(group)) return { side: 'node', node: machine, stage: '', window: true };
+      return { side: 'azure', node: machine, stage: '', window: false };
+    }
+    if (section === 'validation' || section === 'extensions') return { side: 'azure', node: '', stage: '', window: false };
+    return { side: 'node', node: '', stage: '', window: true };
+  }
+
+  // Short description under a step name. The ZTP steps use the plain text below (the back end's own text is a technical
+  // one); other steps keep what Azure or the back end says, and the machine stages of Azure get a plain fallback.
+  var ZTP_STEP_DESC = {
+    'ztp.device': 'Finds the machine by its management MAC and sets the static address on that port, before the claim.',
+    'ztp.network': 'Checks the management port after the install. A static address the install reset is left for OS configuration.',
+    'ztp.restore': 'Puts the BIOS settings changed for the install (for example the FC card) back, restarts, waits for Arc.'
+  };
+  var STEP_DESC = {
+    provisionmachine: 'Azure accepts the ownership voucher, creates the edge machine and its role assignments, and the machine registers.',
+    registermachine: 'The machine connects out to Azure and registers; this can take a while after the claim.',
+    arcenablemaintenanceenvironment: 'Arc-enables the maintenance environment so Azure can reach the machine.',
+    installos: 'Azure downloads the OS, installs it, restarts the machine and adds the Arc extensions.',
+    'provisionos job': 'The Azure job that provisions the operating system: each of its steps is shown below.'
+  };
+  function stepDescription(n) {
+    if (!isObj(n)) return '';
+    var id = str(n.id).toLowerCase();
+    if (ZTP_STEP_DESC[id]) return ZTP_STEP_DESC[id];
+    var own = str(n.description).trim(), name = str(n.name).trim();
+    if (own && own !== name && !isObj(n.prov)) return own;
+    if (isObj(n.prov)) return '';
+    return STEP_DESC[name.toLowerCase()] || '';
+  }
+
+  // What the Steps box says when the selected mode has no steps to show.
+  function stepsEmptyText(modeId, status, when, hasMachines) {
+    if (modeId === 'health') return 'There are no steps here. Sonar does not run health checks; the cards above show each machine’s Azure Arc status.';
+    if (modeId === 'prov' && !hasMachines) return 'No machines reported yet.';
+    if (status === 'idle') return 'The steps appear here when this mode begins.' + (when ? ' ' + when + '.' : '');
+    return 'No steps reported yet.';
+  }
+
+  // The log pane when no line is shown, and why: { kind, title, text, actions: ['node' | 'clear' | 'clearAll'] }.
+  //   f: the filter { level, q, file, stepKey, node, stage }; scoped: lines inside the machine / step scope;
+  //   total: lines held; tailer: the tailer state ('' when unknown).
+  function emptyLogView(f, scoped, total, tailer) {
+    var stepScope = !!(f && (f.stepKey || f.stage)), nodeScope = !!(f && f.node);
+    if (!total) {
+      var down = /^(unavailable|error|disconnected)$/.test(str(tailer).toLowerCase());
+      return { kind: 'waiting', title: down ? 'No log lines: the log tailer cannot reach the seed node.' : 'Waiting for log lines…', text: '', actions: [] };
+    }
+    if ((stepScope || nodeScope) && !scoped) {
+      if (stepScope) return { kind: 'step', title: 'No log lines for this step yet.', text: 'This step has produced no lines on this node yet. Nothing is wrong with the filter itself.', actions: nodeScope ? ['node', 'clear'] : ['clear'] };
+      return { kind: 'node', title: 'No log lines for ' + str(f.node) + ' yet.', text: 'Sonar reads the seed node’s log folders and the ZTP event file; a machine with neither has nothing to show here yet.', actions: ['clear'] };
+    }
+    return { kind: 'filters', title: 'No lines match the current filters.', text: 'Try a wider level, another file, or clear the search.', actions: ['clearAll'] };
+  }
+
   // ------------------------------------------------------------------ replay (pure; also run by tests under Node)
   //
   // A recording is a list of events { t, k, ... } (JSON Lines written by the back end, see Recording.ps1):
@@ -1283,7 +1359,8 @@
       createLogStore: createLogStore, logStoreReset: logStoreReset, logStoreIngest: logStoreIngest,
       logStoreStreamOpened: logStoreStreamOpened, logStoreStreamClosed: logStoreStreamClosed,
       stepWindowOf: stepWindowOf, windowSignature: windowSignature, lineInWindow: lineInWindow, stepFilterChange: stepFilterChange,
-      lineScope: lineScope, lineInScope: lineInScope,
+      lineScope: lineScope, lineInScope: lineInScope, stepRule: stepRule, stepDescription: stepDescription, stepsEmptyText: stepsEmptyText,
+      emptyLogView: emptyLogView, MODE_SECTIONS: MODE_SECTIONS,
       fileOptionList: fileOptionList, keptFileSelection: keptFileSelection, normLevel: normLevel, parseTime: parseTime,
       normStatus: normStatus, phaseLabel: phaseLabel, phaseChipText: phaseChipText, provisioningTreeOf: provisioningTreeOf,
       provisioningSummary: provisioningSummary, provisioningCollapse: provisioningCollapse, arcSourceText: arcSourceText,
@@ -1554,6 +1631,14 @@
     chip.title = app.state ? ov.label : 'Waiting for data';
 
     tickHeader();
+    var mid = currentModeId();
+    if (app.ui.lastMode !== null && app.ui.lastMode !== mid) {
+      // the run moved on to another mode: a step filter of the old one means nothing here
+      dropStepFilter();
+      app.selectedKey = null;
+    }
+    app.ui.lastMode = mid;
+    renderModes();
     renderSummary();
     renderLogAccessButton();
 
@@ -1671,8 +1756,6 @@
 
   // ------------------------------------------------------------------ mode, summary box and node cards
 
-  function currentModeId() { return activeModeId(app.state); }
-
   function chipEl(kind, text, title) {
     return el('span', { class: 'chip chip-' + kind, 'data-kind': kind, title: title || null, text: text });
   }
@@ -1734,7 +1817,10 @@
   function selectNode(name) {
     var same = app.filter.node && app.filter.node.toLowerCase() === name.toLowerCase();
     app.filter.node = same ? '' : name;
+    app.filter.nodeBy = same ? '' : 'card';
+    if (same || app.selectedKey) { dropStepFilter(); app.selectedKey = null; }
     renderSummary();
+    renderTree(false);
     renderChips();
     rerenderLogs();
     announce(same ? 'Machine filter removed.' : 'Showing only ' + name + '.');
@@ -1904,33 +1990,47 @@
   }
 
   function renderTree(autoScroll) {
-    var host = $('tree-host');
-    var provHost = host;
+    var host = $('tree-host'), s = app.state || {};
+    var mode = currentModeId(), wanted = MODE_SECTIONS[mode] || [];
+    var route = provRouteOf(s);
+    $('steps-title').textContent = 'Steps \u00b7 ' + modeName(mode, route);
     var active = document.activeElement;
-    var hadFocus = host.contains(active);
-    var focusedKey = hadFocus && active.getAttribute ? active.getAttribute('data-key') : null;
-    var s = app.state || {};
+    var focusedKey = host.contains(active) && active.getAttribute ? active.getAttribute('data-key') : null;
 
-    ['provisioning', 'validation', 'extensions', 'deployment', 'update'].forEach(function (section) {
+    // the sections of other modes go away; the section of the mode is built, or rebuilt when something it shows changed
+    Array.prototype.forEach.call(host.querySelectorAll('.tree-section'), function (w) {
+      if (wanted.indexOf(w.getAttribute('data-section')) < 0) { w.remove(); app.treeSig[w.getAttribute('data-section')] = null; }
+    });
+    var shown = 0;
+    wanted.forEach(function (section) {
       var sec = section === 'provisioning' ? (isObj(s.provisioning) ? s.provisioning : {}) : (isObj(s[section]) ? s[section] : {});
       var tree = section === 'provisioning' ? app.provTree : section === 'extensions' ? app.extTree : arr(sec.tree);
-      var target = section === 'provisioning' ? provHost : host;
-      var sig = JSON.stringify([tree, sec.status, sec.phase, app.sectionCollapsed[section], app.selectedKey, app.currentKey,
-        Array.from(app.expanded.entries())], function (k, v) { return k === '__key' ? undefined : v; });
-      var wrap = target.querySelector('.tree-section[data-section="' + section + '"]');
+      var only = section === 'provisioning' ? str(app.filter.node).toLowerCase() : '';
+      if (only) tree = tree.filter(function (n) { return str(n.name).toLowerCase() === only; });
+      var wrap = host.querySelector('.tree-section[data-section="' + section + '"]');
+      if (!tree.length) { if (wrap) wrap.remove(); app.treeSig[section] = null; return; }
+      shown++;
+      var sig = JSON.stringify([tree, sec.status, app.selectedKey, app.currentKey, only, Array.from(app.expanded.entries())],
+        function (k, v) { return k === '__key' ? undefined : v; });
       if (wrap && app.treeSig[section] === sig) return;
       app.treeSig[section] = sig;
-      if ((section === 'provisioning' || section === 'extensions') && !tree.length) { if (wrap) wrap.remove(); return; }
-      var fresh = buildSection(section, sec, tree);
-      if (wrap) target.replaceChild(fresh, wrap); else target.appendChild(fresh);
+      var fresh = buildSection(section, tree);
+      if (wrap) host.replaceChild(fresh, wrap); else host.appendChild(fresh);
     });
 
-    // keep validation, then the extensions installed during Validate, above deployment
-    var order = ['validation', 'extensions', 'deployment', 'update'].map(function (k) { return host.querySelector('[data-section="' + k + '"]'); })
-      .filter(Boolean);
-    for (var oi = 1; oi < order.length; oi++) {
-      if (order[oi - 1].nextSibling !== order[oi]) host.insertBefore(order[oi], order[oi - 1].nextSibling);
+    // validation, then the extensions installed during Validate
+    var order = wanted.map(function (k) { return host.querySelector('[data-section="' + k + '"]'); }).filter(Boolean);
+    for (var oi = 0; oi < order.length; oi++) {
+      if (host.children[oi] !== order[oi]) host.insertBefore(order[oi], host.children[oi] || null);
     }
+
+    var empty = host.querySelector('.tree-empty');
+    if (!shown) {
+      var sm = app.summary;
+      var text = stepsEmptyText(mode, sm ? sm.status : 'idle', sm ? sm.when : '', app.provTree.length > 0);
+      if (!empty) { empty = el('p', { class: 'empty tree-empty', id: 'tree-empty' }); host.appendChild(empty); }
+      empty.textContent = text;
+    } else if (empty) empty.remove();
 
     if (focusedKey) {
       var f = treeItem(focusedKey);
@@ -1951,125 +2051,28 @@
     return String(s).replace(/["\\]/g, '\\$&');
   }
 
-  function buildSection(section, sec, tree) {
-    var isProv = section === 'provisioning' || section === 'extensions';
+  function buildSection(section, tree) {
+    var wrap = el('div', { class: 'tree-section', 'data-section': section });
     var title = section === 'provisioning' ? 'Machines' : section === 'extensions' ? 'Extensions (installed during Validate)' :
       section === 'validation' ? 'Validation' : section === 'update' ? 'Update (unverified against a live run)' : 'Deployment';
-    var what = section === 'extensions' ? 'Extensions' : phaseLabel(sec.phase);
-    var st = isProv ? normStatus(sec.status) : sectionStatus(sec);
-    var collapsed = !!app.sectionCollapsed[section];
-    var wrap = el('div', { class: 'tree-section', 'data-section': section });
-
-    var toggle = el('button', { type: 'button', class: 'section-toggle', 'aria-expanded': String(!collapsed),
-      'aria-controls': 'tree-' + section });
-    toggle.innerHTML = ICON.caret;
-    toggle.appendChild(el('h3', { text: title }));
-    toggle.addEventListener('click', function () {
-      app.sectionCollapsed[section] = !app.sectionCollapsed[section];
-      renderTree(false);
-      var b = $('tree-host').querySelector('[data-section="' + section + '"] .section-toggle');
-      if (b) b.focus();
-    });
-
-    var stEl = el('span', { class: 'status-text section-status', 'data-status': st });
-    stEl.innerHTML = icon(st);
-    stEl.appendChild(document.createTextNode(st === 'unknown' ? (str(sec.status) || 'Unknown') : STATUS_LABEL[st]));
-
-    var head = el('div', { class: 'section-head' }, [toggle, stEl]);
-    wrap.appendChild(head);
-
-    if (isProv) {
-      var sum = provisioningSummary(tree);
-      var pmeta = el('div', { class: 'section-meta' });
-      var pbar = el('div', { class: 'progress', role: 'progressbar', 'aria-label': what + ' progress',
-        'aria-valuemin': '0', 'aria-valuemax': String(sum.total), 'aria-valuenow': String(sum.ready),
-        'aria-valuetext': sum.ready + ' of ' + sum.total + ' machines ready' + (sum.failed ? ', ' + sum.failed + ' failed' : '') });
-      [['success', sum.ready], ['error', sum.failed], ['running', sum.running]].forEach(function (x) {
-        if (x[1]) pbar.appendChild(el('span', { class: 'p-' + x[0], style: 'width:' + (100 * x[1] / sum.total) + '%' }));
-      });
-      pmeta.appendChild(pbar);
-      var readyWord = section === 'provisioning' && str(sec.route) === 'oem-image' ? ' machines registered' : ' machines ready';
-      pmeta.appendChild(el('span', { class: 'progress-label', text: sum.ready + ' / ' + sum.total + readyWord +
-        (sum.failed ? ' \u00b7 ' + sum.failed + ' failed' : '') + (sum.running ? ' \u00b7 ' + sum.running + ' in progress' : '') }));
-      head.appendChild(pmeta);
-      if (collapsed) return wrap;
-      var pul = el('ul', { class: 'tree', role: 'tree', id: 'tree-' + section, 'aria-label': what + ' by machine' });
-      var ptab = app.focusKey[section] && app.stepIndex.has(app.focusKey[section]) ? app.focusKey[section] : null;
-      tree.forEach(function (n) { if (isObj(n)) pul.appendChild(buildItem(n, 1, ptab)); });
-      var pfirst = pul.querySelector('[role="treeitem"][tabindex="0"]');
-      if (!pfirst || !isVisibleItem(pfirst)) {
-        if (pfirst) pfirst.setAttribute('tabindex', '-1');
-        var pf = pul.querySelector('[role="treeitem"]');
-        if (pf) pf.setAttribute('tabindex', '0');
-      }
-      pul.addEventListener('keydown', onTreeKey);
-      wrap.appendChild(pul);
-      return wrap;
-    }
-
-    var agg = aggregate(tree);
-    if (!agg.total && isObj(sec.counts)) {
-      // no tree yet but the back end sent counts
-      Object.keys(sec.counts).forEach(function (k) {
-        var nk = normStatus(k);
-        var v = Number(sec.counts[k]) || 0;
-        agg[nk] = (agg[nk] || 0) + v;
-        agg.total += v;
-      });
-    }
-
-    if (agg.total) {
-      var meta = el('div', { class: 'section-meta' });
-      var done = agg.success + agg.skipped;
-      var bar = el('div', { class: 'progress', role: 'progressbar', 'aria-label': title + ' progress',
-        'aria-valuemin': '0', 'aria-valuemax': String(agg.total), 'aria-valuenow': String(done),
-        'aria-valuetext': done + ' of ' + agg.total + ' steps done' + (agg.error ? ', ' + agg.error + ' failed' : '') });
-      ['success', 'skipped', 'error', 'running'].forEach(function (k) {
-        if (agg[k]) bar.appendChild(el('span', { class: 'p-' + k, style: 'width:' + (100 * agg[k] / agg.total) + '%' }));
-      });
-      meta.appendChild(bar);
-      meta.appendChild(el('span', { class: 'progress-label', text: done + ' / ' + agg.total + ' steps done' }));
-      var counts = el('div', { class: 'counts', 'aria-label': title + ' step counts' });
-      ['success', 'running', 'error', 'skipped', 'notstarted', 'unknown'].forEach(function (k) {
-        if (!agg[k]) return;
-        var c = el('span', { class: 'count', title: STATUS_LABEL[k] });
-        c.innerHTML = icon(k);
-        c.appendChild(el('b', { text: String(agg[k]) }));
-        c.appendChild(el('span', { class: 'sr-only', text: ' ' + STATUS_LABEL[k] }));
-        counts.appendChild(c);
-      });
-      meta.appendChild(counts);
-      head.appendChild(meta);
-    }
-
-    if (collapsed) return wrap;
-
-    if (!tree.length) {
-      wrap.appendChild(el('p', { class: 'empty', id: 'tree-' + section,
-        text: st === 'notstarted' ? title + ' has not started yet.' : 'No steps reported.' }));
-      return wrap;
-    }
-
+    if (section === 'extensions') wrap.appendChild(el('h3', { class: 'sub-h', text: title }));
     var ul = el('ul', { class: 'tree', role: 'tree', id: 'tree-' + section, 'aria-label': title + ' steps' });
     var tabKey = app.focusKey[section] && app.stepIndex.has(app.focusKey[section]) ? app.focusKey[section] :
       (app.currentKey && app.stepIndex.get(app.currentKey) && app.stepIndex.get(app.currentKey).section === section ? app.currentKey : null);
-    tree.forEach(function (n) {
-      if (!isObj(n)) return;
-      ul.appendChild(buildItem(n, 1, tabKey));
-    });
-    // ensure exactly one tabbable item, and that it is visible
+    tree.forEach(function (n) { if (isObj(n)) ul.appendChild(buildItem(n, 1, tabKey, section, [n])); });
+    // exactly one tabbable item, and it is visible
     var tabbable = ul.querySelector('[role="treeitem"][tabindex="0"]');
     if (!tabbable || !isVisibleItem(tabbable)) {
       if (tabbable) tabbable.setAttribute('tabindex', '-1');
-      var f = ul.querySelector('[role="treeitem"]');
-      if (f) f.setAttribute('tabindex', '0');
+      var first = ul.querySelector('[role="treeitem"]');
+      if (first) first.setAttribute('tabindex', '0');
     }
     ul.addEventListener('keydown', onTreeKey);
     wrap.appendChild(ul);
     return wrap;
   }
 
-  function buildItem(n, level, tabKey) {
+  function buildItem(n, level, tabKey, section, chain) {
     var k = n.__key;
     var st = normStatus(n.status);
     var kids = arr(n.children).filter(isObj);
@@ -2077,14 +2080,16 @@
     var open = hasKids && isExpanded(n);
     var dur = nodeDuration(n);
     var name = str(n.name) || str(n.description) || '(unnamed step)';
-    var label = name + ', ' + (st === 'unknown' ? str(n.status) || 'unknown status' : STATUS_LABEL[st]) +
+    var rule = stepRule(section, chain);
+    var selected = app.selectedKey === k;
+    var label = name + (rule.side === 'azure' ? ', runs in Azure' : '') + ', ' + (st === 'unknown' ? str(n.status) || 'unknown status' : STATUS_LABEL[st]) +
       (dur !== null ? ', ' + fmtDuration(dur) : '') + (arr(n.errors).length ? ', ' + arr(n.errors).length + ' error message(s)' : '');
 
-    var li = el('li', { role: 'treeitem', 'data-key': k, 'aria-level': String(level), 'aria-label': label,
-      'aria-selected': String(app.selectedKey === k), tabindex: tabKey === k ? '0' : '-1' });
+    var li = el('li', { role: 'treeitem', 'data-key': k, 'data-side': rule.side, 'aria-level': String(level), 'aria-label': label,
+      'aria-selected': String(selected), tabindex: tabKey === k ? '0' : '-1' });
     if (hasKids) li.setAttribute('aria-expanded', String(open));
 
-    var row = el('div', { class: 'row', 'data-status': st, 'data-current': String(app.currentKey === k) });
+    var row = el('div', { class: 'row' + (rule.side === 'machine' ? ' row-machine' : ''), 'data-status': st, 'data-current': String(app.currentKey === k) });
     if (hasKids) {
       var cb = el('button', { type: 'button', class: 'caret-btn', tabindex: '-1', 'aria-hidden': 'true' });
       cb.innerHTML = ICON.caret;
@@ -2098,17 +2103,15 @@
     row.appendChild(ic);
 
     var nameEl = el('span', { class: 'step-name' });
-    var inSec = (app.stepIndex.get(k) || {}).section;
-    var inProv = inSec === 'provisioning' || inSec === 'extensions';   // machine-section ids are Sonar's own, not fullStepIndex
-    if (!inProv && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
-    nameEl.appendChild(document.createTextNode(name));
-    if (n.description && n.description !== name && !isObj(n.prov)) nameEl.appendChild(el('span', { class: 'desc', text: str(n.description) }));
+    if (rule.side !== 'machine' && section !== 'provisioning' && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
+    nameEl.appendChild(el('span', { class: 'sn', text: name }));
+    if (rule.side === 'azure') nameEl.appendChild(el('span', { class: 'az', title: 'This step runs in Azure: Sonar reads its status from Azure, there are no node log lines for it.', text: 'Azure' }));
+    var desc = stepDescription(n);
+    if (desc) nameEl.appendChild(el('span', { class: 'desc', text: desc }));
     row.appendChild(nameEl);
 
     var durEl = el('span', { class: 'dur' });
-    if (st === 'running' && !isNaN(parseTime(n.start))) {
-      durEl.setAttribute('data-start', String(parseTime(n.start)));
-    }
+    if (st === 'running' && !isNaN(parseTime(n.start))) durEl.setAttribute('data-start', String(parseTime(n.start)));
     durEl.textContent = dur !== null ? fmtDuration(dur) : '';
     var tt = [];
     if (!isNaN(parseTime(n.start))) tt.push('Start ' + fmtDateTime(parseTime(n.start)));
@@ -2120,8 +2123,9 @@
     li.appendChild(row);
     if (isObj(n.prov)) li.appendChild(buildProvMeta(n, st));
 
+    if (selected && rule.side === 'azure') li.appendChild(buildAzureDetail(n, st, name));
     var errs = arr(n.errors).map(str).filter(Boolean);
-    if (errs.length) {
+    if (errs.length && !(selected && rule.side === 'azure')) {
       var box = el('div', { class: 'step-errors', role: 'note', 'aria-label': 'Errors for ' + name });
       errs.forEach(function (m) { box.appendChild(el('p', { text: m })); });
       li.appendChild(box);
@@ -2130,31 +2134,37 @@
     if (hasKids) {
       var g = el('ul', { role: 'group' });
       if (!open) g.hidden = true;
-      kids.forEach(function (c) { g.appendChild(buildItem(c, level + 1, tabKey)); });
+      kids.forEach(function (c) { g.appendChild(buildItem(c, level + 1, tabKey, section, chain.concat([c]))); });
       li.appendChild(g);
     }
     return li;
   }
 
-  // Under a machine row: lifecycle chip, progress, Arc machine and (OEM route) the extension count.
+  // Under a clicked Azure step: what Azure says about it (status, start and end, its message, any error).
+  function buildAzureDetail(n, st, name) {
+    var a = parseTime(n.start), b = parseTime(n.end), d = nodeDuration(n);
+    var box = el('div', { class: 'detail', role: 'group', 'aria-label': 'Azure details of ' + name });
+    function p(k, v) { return el('p', null, [el('span', { class: 'k', text: k + ' ' }), v]); }
+    box.appendChild(el('p', null, [el('b', { text: name }), ' runs in Azure, so there are no node log lines for it; the logs keep their filter.']));
+    box.appendChild(p('Status:', STATUS_LABEL[st] === 'In progress' && !isNaN(a) ? 'In progress, since ' + fmtClock(a) : (st === 'unknown' ? str(n.status) || 'Unknown' : STATUS_LABEL[st])));
+    if (!isNaN(a)) box.appendChild(p('Started:', fmtClock(a) + (d !== null ? ' \u00b7 ' + fmtDuration(d) + (st === 'running' ? ' so far' : '') : '')));
+    if (!isNaN(b)) box.appendChild(p('Ended:', fmtClock(b)));
+    box.appendChild(p('Azure says:', str(n.description) && str(n.description) !== name ? str(n.description) : (stepDescription(n) || 'nothing more than the status')));
+    var errs = arr(n.errors).map(str).filter(Boolean);
+    if (errs.length) {
+      var e = el('div', { class: 'detail-errors', role: 'note' });
+      errs.forEach(function (m) { e.appendChild(el('p', { text: m })); });
+      box.appendChild(el('p', null, [el('span', { class: 'k', text: 'Errors:' })]));
+      box.appendChild(e);
+    } else box.appendChild(p('Errors:', 'none'));
+    return box;
+  }
+
+  // Under a machine row: the OEM route's step counters, the probe note and the extension count. The lifecycle, the Arc
+  // machine and the progress are on the machine's card above.
   function buildProvMeta(n, st) {
     var p = n.prov;
     var meta = el('div', { class: 'prov-meta' });
-    meta.appendChild(el('span', { class: 'lc-chip', 'data-status': st, title: 'Lifecycle' + (n.description ? ': ' + n.description : '') , text: p.lifecycleLabel || p.lifecycle }));
-    if (p.percent !== null) {
-      var pct = el('span', { class: 'prov-pct', 'data-status': st,
-        title: 'Sonar\'s estimate from the lifecycle and the finished steps' + (p.reportedPercent !== null ? '; the job reports percentComplete ' + p.reportedPercent : '') });
-      var bar = el('span', { class: 'progress', role: 'progressbar', 'aria-label': n.name + ' progress', 'aria-valuemin': '0',
-        'aria-valuemax': '100', 'aria-valuenow': String(p.percent) });
-      bar.appendChild(el('span', { class: 'p-fill', style: 'width:' + p.percent + '%' }));
-      pct.appendChild(bar);
-      pct.appendChild(document.createTextNode(p.percent + '%'));
-      meta.appendChild(pct);
-    }
-    if (p.arcMachineName) {
-      meta.appendChild(el('span', { class: 'prov-arc', title: arcSourceText(p.arcSource) || 'Arc machine',
-        text: 'Arc ' + p.arcMachineName + (p.arcStatus ? ' (' + p.arcStatus + ')' : '') }));
-    }
     if (p.extensionsTotal) meta.appendChild(el('span', { text: 'Extensions ' + p.extensionsReady + '/' + p.extensionsTotal }));
     [['OS image update', p.update, 'Get-ArcZeroDaySolutionUpdateStatus on the node: finished steps of Scan, Download, Install'],
       ['Bootstrap', p.bootstrap, 'Get-ArcBootstrapStatus on the node: finished steps']].forEach(function (x) {
@@ -2166,8 +2176,8 @@
     });
     var note = probeNote(p.probe, fmtDateTime);
     if (note) meta.appendChild(el('span', { class: 'prov-probe', title: str(p.probe.reason), text: note }));
-    if (n.description) meta.appendChild(el('span', { class: 'prov-msg', text: n.description }));
-    return meta;
+    if (st === 'error' && n.description) meta.appendChild(el('span', { class: 'prov-msg', text: n.description }));
+    return meta.childNodes.length ? meta : document.createDocumentFragment();
   }
 
   function isVisibleItem(item) {
@@ -2256,36 +2266,63 @@
     if (focus) focusItem(item);
   }
 
+  // The chain of items from the top of the step's section down to the step (for stepRule).
+  function stepRuleOf(k) {
+    var info = app.stepIndex.get(k);
+    if (!info) return stepRule('', []);
+    var chain = [], cur = info;
+    while (cur) {
+      chain.unshift(cur.node);
+      cur = app.stepIndex.has(cur.parentKey) ? app.stepIndex.get(cur.parentKey) : null;
+    }
+    return stepRule(info.section, chain);
+  }
+
+  // What a click on a step does: an Azure step shows its details under it and leaves the logs alone; a node step filters
+  // the logs to its machine and to its time window (or its ZTP stage); a machine row selects the machine like its card.
+  // A second click on the same step clears it.
   function selectStep(k) {
     var info = app.stepIndex.get(k);
     if (!info) return;
-    if (app.selectedKey === k && app.filter.stepKey === k) {
-      clearStepFilter();
-      return;
-    }
+    var rule = stepRuleOf(k), name = str(info.node.name);
+    if (rule.side === 'machine') { selectNode(rule.node); return; }
+    if (app.selectedKey === k) { clearStepFilter(); return; }
     app.selectedKey = k;
     app.focusKey[info.section] = k;
-    var a = parseTime(info.node.start);
-    if (isNaN(a)) {
-      app.filter.stepKey = null;
-      announce('Step "' + str(info.node.name) + '" has no start time, so the logs cannot be filtered to it.');
-      setError('step', 'Step "' + str(info.node.name) + '" has no start time yet; the log filter needs one.');
+    if (rule.side === 'azure') {
+      dropStepFilter();
+      announce('Azure step ' + name + ': its details are shown under it. The logs keep their filter.');
+    } else if (!rule.stage && isNaN(parseTime(info.node.start))) {
+      dropStepFilter();
+      announce('Step "' + name + '" has no start time yet, so the logs cannot be filtered to it.');
+      setError('step', 'Step "' + name + '" has no start time yet; the log filter needs one.');
       setTimeout(function () { setError('step', null); }, 6000);
     } else {
-      app.filter.stepKey = k;
-      announce('Logs filtered to step ' + str(info.node.name) + '.');
+      app.filter.stepKey = rule.stage ? null : k;
+      app.filter.stage = rule.stage;
+      if (rule.node && str(app.filter.node).toLowerCase() !== rule.node.toLowerCase()) { app.filter.node = rule.node; app.filter.nodeBy = 'step'; }
+      announce('Logs filtered to step ' + name + (rule.node ? ' on ' + rule.node : '') + '.');
     }
     renderTree(false);
+    renderSummary();
     var item = treeItem(k);
     if (item) focusItem(item);
     renderChips();
     rerenderLogs();
   }
 
-  function clearStepFilter() {
+  // Removes the step part of the log filter (the window, the ZTP stage, and the machine when the step chose it).
+  function dropStepFilter() {
     app.filter.stepKey = null;
+    app.filter.stage = '';
+    if (app.filter.nodeBy === 'step') { app.filter.node = ''; app.filter.nodeBy = ''; }
+  }
+
+  function clearStepFilter() {
+    dropStepFilter();
     app.selectedKey = null;
     renderTree(false);
+    renderSummary();
     renderChips();
     rerenderLogs();
     announce('Step filter removed.');
@@ -2297,6 +2334,74 @@
     var info = app.stepIndex.get(k);
     if (!info) return null;
     return stepWindowOf(info.node);
+  }
+
+  // ------------------------------------------------------------------ mode bar
+
+  var MODE_OF_SECTION = { provisioning: 'prov', validation: 'validate', extensions: 'validate', deployment: 'deploy', update: 'update' };
+
+  // The mode shown: the one the user clicked while the run is still in the same mode, else the active one.
+  function currentModeId() {
+    var active = activeModeId(app.state);
+    if (app.ui.mode && app.ui.pickedAt === active) {
+      var t = modeStates(app.state).filter(function (x) { return x.id === app.ui.mode; })[0];
+      if (t && !t.hidden) return app.ui.mode;
+    }
+    var tiles = modeStates(app.state);
+    var a = tiles.filter(function (x) { return x.id === active; })[0];
+    return a && !a.hidden ? active : (tiles.filter(function (x) { return !x.hidden; })[0] || { id: active }).id;
+  }
+
+  var MODE_GLYPH = { ok: '✓', run: '●', idle: '○', err: '✕' };
+  var MODE_WORD = { ok: 'done', run: 'running', idle: 'waiting', err: 'failed' };
+
+  function renderModes() {
+    var host = $('modes');
+    if (!host) return;
+    var tiles = modeStates(app.state).filter(function (t) { return !t.hidden; }), cur = currentModeId();
+    var sig = JSON.stringify([tiles, cur]);
+    if (host.getAttribute('data-sig') === sig) return;
+    host.setAttribute('data-sig', sig);
+    var focused = document.activeElement && host.contains(document.activeElement) ? document.activeElement.getAttribute('data-m') : null;
+    host.style.setProperty('--n', String(tiles.length));
+    host.textContent = '';
+    tiles.forEach(function (t) {
+      var b = el('button', { type: 'button', class: 'mode' + (t.id === cur ? ' sel' : '') + (t.status === 'idle' ? ' off' : ''), 'data-m': t.id,
+        'aria-pressed': String(t.id === cur), title: t.tip || null }, [
+        el('span', { class: 'mi mi-' + t.status + (t.status === 'run' ? ' pulse' : ''), 'aria-hidden': 'true', text: MODE_GLYPH[t.status] }),
+        el('span', { class: 'mt' }, [
+          el('span', { class: 'mn', text: t.name }),
+          t.line ? el('span', { class: 'ms', text: t.line }) : null
+        ]),
+        el('span', { class: 'sr-only', text: ', ' + MODE_WORD[t.status] + (t.tip ? '. ' + t.tip : '') })
+      ]);
+      b.addEventListener('click', function () { setMode(t.id); });
+      host.appendChild(b);
+    });
+    if (focused) { var fb = host.querySelector('[data-m="' + focused + '"]'); if (fb) fb.focus(); }
+  }
+
+  // Clicking a tile switches the summary box and the Steps box to that mode and clears the step and machine filters.
+  function setMode(id) {
+    if (id === currentModeId()) return;
+    app.ui.mode = id;
+    app.ui.pickedAt = activeModeId(app.state);
+    app.ui.lastMode = id;
+    clearScope();
+    renderModeView();
+    announce(modeName(id, provRouteOf(app.state)) + ' selected.');
+  }
+
+  function clearScope() {
+    app.filter.node = ''; app.filter.nodeBy = ''; app.filter.stepKey = null; app.filter.stage = ''; app.selectedKey = null;
+  }
+
+  function renderModeView() {
+    renderModes();
+    renderSummary();
+    renderTree(false);
+    renderChips();
+    rerenderLogs();
   }
 
   function tickTimers() {
@@ -2370,22 +2475,48 @@
     return 'Log access: ' + parts.join(' \u00b7 ');
   }
 
-  function guidanceOpen() {
-    try { return localStorage.getItem(GUIDANCE_KEY) === '1'; } catch (e) { return false; }
+  // The Log access window: the one-line status, then per phase the account, the folders, when, how, this deployment,
+  // how sure Sonar is, and where it comes from. Opened by the Log access button in the top bar.
+
+  var LA_PHASES = ['provisioning', 'arc-registration', 'validation', 'deployment', 'post-deployment', 'update', 'add-node', 'repair'];
+  var laReturnFocus = null;
+
+  function laIsOpen() { var m = $('la-modal'); return !!m && !m.hidden; }
+
+  function openLogAccess() {
+    app.guidancePhase = null;
+    laReturnFocus = document.activeElement;
+    closePops(false);
+    $('la-modal').hidden = false;
+    document.body.classList.add('modal-open');
+    renderLogAccessWindow();
+    $('la-close').focus();
   }
 
-  function setGuidanceOpen(open, remember) {
-    $('guidance-detail').hidden = !open;
-    var b = $('guidance-toggle');
-    b.setAttribute('aria-expanded', String(open));
-    b.textContent = open ? 'Hide details' : 'Show details';
-    if (remember) { try { localStorage.setItem(GUIDANCE_KEY, open ? '1' : '0'); } catch (e) { /* storage blocked: the panel still opens */ } }
+  function closeLogAccess() {
+    $('la-modal').hidden = true;
+    document.body.classList.remove('modal-open');
+    if (laReturnFocus && laReturnFocus.focus) laReturnFocus.focus();
+    laReturnFocus = null;
+  }
+
+  // The phase that matches a mode (the tab the window opens on), and the phase that is happening now.
+  function phaseOfMode(modeId) {
+    var route = provRouteOf(app.state);
+    return { prov: route === 'oem-image' ? 'arc-registration' : 'provisioning', validate: 'validation', deploy: 'deployment', update: 'update', health: 'post-deployment' }[modeId] || 'provisioning';
+  }
+  function currentGuidancePhase() {
+    var s = app.state, act = s ? str(s.activePhase).toLowerCase() : '';
+    if (act === 'add-node' || act === 'repair') return act;
+    return phaseOfMode(activeModeId(s));
   }
 
   function renderGuidanceSummary() {
+    var m = $('la-msg');
+    if (!m) return;
     var last = app.store && app.store.lines.length ? parseTime(app.store.lines[app.store.lines.length - 1].received || app.store.lines[app.store.lines.length - 1].time) : NaN;
-    var view = app.guidancePhase || (app.state ? normPhase(app.state.activePhase || app.state.phase) : '');
-    $('guidance-summary').textContent = guidanceSummary(app.tailer, app.guidance ? phaseGuidance(view) : null, last, !!app.config);
+    var view = app.guidancePhase || phaseOfMode(currentModeId());
+    m.textContent = guidanceSummary(app.tailer, app.guidance ? phaseGuidance(view) : null, last, !!app.config);
   }
 
   function listOf(v) {
@@ -2402,53 +2533,45 @@
     return undefined;
   }
 
-  function renderGuidance() {
-    renderGuidanceSummary();
-    var body = $('guidance-body'), tabs = $('guidance-tabs');
-    var cur = app.state ? normPhase(app.state.phase) : 'provisioning';
-    var model = guidanceModel();
-    var m = $('guidance-model');
-    m.textContent = model ? str(model) : '';
-    m.hidden = !model;
-
+  // The tabs the window shows: the phases that have guidance, only the machine-readiness phase of the route Sonar follows.
+  function laShownPhases() {
     var available = guidancePhases();
-    // only the machine-readiness phase of the route Sonar follows (provisioning or arc-registration)
-    var route = app.state && isObj(app.state.provisioning) ? str(app.state.provisioning.route) : '';
+    var route = provRouteOf(app.state);
     var hide = route === 'simplified' ? 'arc-registration' : route === 'oem-image' ? 'provisioning' : '';
-    available = available.filter(function (p) { return p !== hide; });
-    var shown = ['provisioning', 'arc-registration', 'validation', 'deployment'].filter(function (p) { return available.indexOf(p) >= 0; });
-    available.forEach(function (p) { if (shown.indexOf(p) < 0) shown.push(p); });
-    // the phase that matches "now"; a failed run shows the phase that failed; after the run ends, prefer a
-    // post-deployment entry, else deployment
-    var defaultView = cur;
-    var activeNow = app.state ? str(app.state.activePhase).toLowerCase() : '';
-    if (cur === 'failed' && activeNow && shown.indexOf(activeNow) >= 0) defaultView = activeNow;
-    else if (shown.indexOf(cur) < 0 && (cur === 'done' || cur === 'failed')) {
-      defaultView = shown.filter(function (p) { return gkey(p) === 'postdeployment' || gkey(p) === 'after'; })[0] || 'deployment';
-    }
+    var shown = LA_PHASES.filter(function (p) { return available.indexOf(p) >= 0 && p !== hide; });
+    available.forEach(function (p) { if (shown.indexOf(p) < 0 && p !== hide) shown.push(p); });
+    return shown;
+  }
+
+  function renderGuidance() { renderGuidanceSummary(); if (laIsOpen()) renderLogAccessWindow(); }
+
+  function renderLogAccessWindow() {
+    var body = $('la-body'), tabs = $('la-tabs');
+    if (!body) return;
+    renderGuidanceSummary();
+    var model = guidanceModel(), id = $('la-id');
+    id.textContent = model ? str(model) : '';
+    id.hidden = !model;
+
+    var shown = laShownPhases(), now = currentGuidancePhase();
+    var wanted = phaseOfMode(currentModeId());
+    var fallback = shown.indexOf(wanted) >= 0 ? wanted : (shown.indexOf(now) >= 0 ? now : shown[0]);
     if (app.guidancePhase && shown.indexOf(app.guidancePhase) < 0) app.guidancePhase = null;
-    var view = app.guidancePhase || defaultView;
+    var view = app.guidancePhase || fallback;
 
     tabs.textContent = '';
-    tabs.hidden = shown.length < 2;
+    tabs.hidden = !shown.length;
     shown.forEach(function (p) {
-      var b = el('button', { type: 'button', 'aria-pressed': String(p === view) }, [phaseLabel(p)]);
-      if (p === defaultView) {
-        b.appendChild(el('span', { class: 'cur-dot', title: 'Current phase', 'aria-hidden': 'true' }));
-        b.appendChild(el('span', { class: 'sr-only', text: ' (current phase)' }));
-      }
-      b.addEventListener('click', function () {
-        app.guidancePhase = p === defaultView ? null : p;
-        renderGuidance();
-        var nb = tabs.querySelector('[aria-pressed="true"]');
-        if (nb) nb.focus();
-      });
+      var b = el('button', { type: 'button', class: 'ptab', role: 'tab', id: 'la-tab-' + p, 'data-p': p, 'aria-selected': String(p === view),
+        'aria-controls': 'la-body', tabindex: p === view ? '0' : '-1' }, [phaseLabel(p) + (p === now ? ' (current phase)' : '')]);
+      b.addEventListener('click', function () { app.guidancePhase = p; renderLogAccessWindow(); var nb = $('la-tab-' + p); if (nb) nb.focus(); });
       tabs.appendChild(b);
     });
+    body.setAttribute('aria-labelledby', 'la-tab-' + view);
 
     body.textContent = '';
     if (!app.guidance) {
-      body.appendChild(el('p', { class: 'muted', text: app.errors.has('guidance') ? 'Guidance is unavailable.' : 'Loading guidance\u2026' }));
+      body.appendChild(el('p', { class: 'muted', text: app.errors.has('guidance') ? 'Guidance is unavailable.' : 'Loading guidance…' }));
       return;
     }
     var g = phaseGuidance(view);
@@ -2456,7 +2579,7 @@
       body.appendChild(el('p', { class: 'muted', text: 'No guidance recorded for the ' + phaseLabel(view) + ' phase.' }));
       return;
     }
-    var dl = el('dl');
+    var dl = el('dl', { class: 'gk' });
     function row(label, valueNode) { dl.appendChild(el('dt', { text: label })); dl.appendChild(el('dd', null, [valueNode])); }
 
     var account = pick(g, ['account', 'accounts', 'user', 'who', 'readBy']);
@@ -2497,6 +2620,34 @@
     body.appendChild(dl);
     var notes = pick(g, ['notes', 'note', 'details']);
     if (notes !== undefined) body.appendChild(el('p', { class: 'notes', text: listOf(notes).join(' ') }));
+  }
+
+  // Close button, scrim click, Escape, a Tab that stays inside the window, and the arrow keys between the phase tabs.
+  function wireLogAccess() {
+    $('la-close').addEventListener('click', closeLogAccess);
+    $('la-modal').addEventListener('click', function (e) { if (e.target === $('la-modal')) closeLogAccess(); });
+    document.addEventListener('keydown', function (e) {
+      if (!laIsOpen()) return;
+      if (e.key === 'Escape') { e.preventDefault(); closeLogAccess(); return; }
+      if (e.key !== 'Tab') return;
+      var f = Array.prototype.filter.call($('la-modal').querySelectorAll('button, a[href], [tabindex="0"]'), function (x) { return !x.disabled && x.offsetParent !== null; });
+      if (!f.length) return;
+      var first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
+    $('la-tabs').addEventListener('keydown', function (e) {
+      var keys = { ArrowRight: 1, ArrowLeft: -1, Home: 'first', End: 'last' };
+      if (!(e.key in keys)) return;
+      var list = Array.prototype.slice.call($('la-tabs').querySelectorAll('[role="tab"]'));
+      var i = list.indexOf(document.activeElement);
+      if (i < 0) return;
+      var next = keys[e.key] === 'first' ? 0 : keys[e.key] === 'last' ? list.length - 1 : (i + keys[e.key] + list.length) % list.length;
+      e.preventDefault();
+      list[next].click();
+    });
+    var alertLink = $('tailer-alert-link');
+    if (alertLink) alertLink.addEventListener('click', openLogAccess);
   }
 
   function textList(items, code) {
@@ -2940,14 +3091,42 @@
   function updateEmpty() {
     var view = $('log-view');
     if (app.rendered) return;
-    var msg;
-    if (!app.store.lines.length) {
-      var t = app.tailer && str(app.tailer.state).toLowerCase();
-      msg = t === 'unavailable' ? 'No log lines: the log tailer cannot reach the seed node (see above).' : 'Waiting for log lines\u2026';
-    } else {
-      msg = 'No lines match the current filters.';
+    var win = stepWindow(), scoped = 0;
+    for (var i = 0; i < app.store.lines.length && !scoped; i++) { if (lineInView(app.store.lines[i], win)) scoped = 1; }
+    var v = emptyLogView(app.filter, scoped, app.store.lines.length, app.tailer && app.tailer.state);
+    var box = el('div', { class: 'log-empty', role: 'status', 'data-kind': v.kind }, [el('b', { text: v.title }), v.text ? el('span', { text: v.text }) : null]);
+    if (v.actions.length) {
+      var btns = el('div', { class: 'log-empty-actions' });
+      v.actions.forEach(function (a) {
+        var label = { node: 'Show all lines for this node', clear: 'Clear filter', clearAll: 'Clear all filters' }[a];
+        var b = el('button', { type: 'button', class: 'btn btn-sm', 'data-action': a, text: label });
+        b.addEventListener('click', function () { emptyAction(a); });
+        btns.appendChild(b);
+      });
+      box.appendChild(btns);
     }
-    view.appendChild(el('div', { class: 'log-empty', text: msg }));
+    view.appendChild(box);
+  }
+
+  // The buttons of the empty log pane.
+  function emptyAction(a) {
+    if (a === 'node') {
+      // keep the machine, drop the step: the machine's own lines
+      app.filter.nodeBy = 'card';
+      dropStepFilter();
+      app.selectedKey = null;
+    } else {
+      clearScope();
+      if (a === 'clearAll') {
+        app.filter.level = 'all'; app.filter.q = ''; app.filter.file = '';
+        $('log-search').value = ''; $('file-filter').value = '';
+        Array.prototype.forEach.call($('level-filter').querySelectorAll('button'), function (x) { x.setAttribute('aria-pressed', String(x.getAttribute('data-level') === 'all')); });
+      }
+    }
+    renderTree(false);
+    renderSummary();
+    renderChips();
+    rerenderLogs();
   }
 
   function updateLogStatus() {
@@ -2992,6 +3171,12 @@
     if (app.filter.node) {
       chip('Machine: ' + app.filter.node, 'Only the lines of this machine: its ZTP events, and the node log when it is the machine Sonar reads.', function () {
         app.filter.node = ''; renderSummary(); renderChips(); rerenderLogs(); $('log-view').focus();
+      });
+    }
+    if (app.filter.stage && app.selectedKey && app.stepIndex.has(app.selectedKey)) {
+      chip('Step: ' + str(app.stepIndex.get(app.selectedKey).node.name) + ' (ZTP ' + app.filter.stage + ' events)', 'The ZTP event lines of this stage for this machine.', function () {
+        clearStepFilter();
+        $('log-view').focus();
       });
     }
     var win = stepWindow();
@@ -3058,10 +3243,7 @@
     });
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && (popIsOpen('details') || popIsOpen('help'))) { e.preventDefault(); closePops(true); } });
     $('la-btn').addEventListener('click', openLogAccess);
-    setGuidanceOpen(guidanceOpen(), false);
-    $('guidance-toggle').addEventListener('click', function () { setGuidanceOpen($('guidance-detail').hidden, true); });
-    var alertLink = document.querySelector('#tailer-alert a[href="#guidance-panel"]');
-    if (alertLink) alertLink.addEventListener('click', function () { setGuidanceOpen(true, false); });
+    wireLogAccess();
     $('banner-close').addEventListener('click', function () {
       app.bannerDismissed = Array.from(app.errors.values()).join('|');
       $('banner').hidden = true;
@@ -3069,6 +3251,8 @@
 
     $('jump-current').addEventListener('click', function () {
       if (!app.currentKey) return;
+      var info = app.stepIndex.get(app.currentKey), want = info ? MODE_OF_SECTION[info.section] : null;
+      if (want && want !== currentModeId()) setMode(want);
       revealKey(app.currentKey);
       renderTree(false);
       scrollToKey(app.currentKey, true);
@@ -3131,13 +3315,6 @@
     setInterval(function () { tickTimers(); tickHeader(); }, 1000);
   }
 
-  // The Log access window. Step 1 of the redesign still has the old panel: the button opens it.
-  function openLogAccess() {
-    setGuidanceOpen(true, false);
-    var p = $('guidance-panel');
-    if (p) { p.scrollIntoView({ block: 'center' }); }
-  }
-
   function openFromHash() {
     var h = typeof location !== 'undefined' ? location.hash.replace(/^#/, '').toLowerCase() : '';
     if (h === 'details') setPop('details', true);
@@ -3151,7 +3328,15 @@
     renderTree(false);
     renderSummary();
     rerenderLogs();
-    if (DEMO) { loadAbout(); startDemo(); openFromHash(); return; }
+    if (DEMO) {
+      // Sample data, but when a Sonar back end serves this page the real version, links and phase guidance are read (a file
+      // opened straight from disk keeps the samples).
+      startDemo();
+      loadAbout();
+      getJSON('/api/guidance').then(function (g) { if (isObj(g) && g.available !== false) { app.guidance = g; renderGuidance(); } }, function () { /* sample guidance stays */ });
+      openFromHash();
+      return;
+    }
     openFromHash();
     loadAbout();
     setConn('connecting');

@@ -836,4 +836,116 @@ test('lineInScope (node cards): a machine keeps its ZTP lines, and the node log 
   eq([n3, n1, log].map(function (l) { return m.lineInScope(l, { node: '' }, null, 'iic-azl-n01'); }), [true, true, true], 'no machine selected: every line');
 });
 
+// ---------------------------------------------------------------- redesign: steps of a mode, step clicks, the empty log pane
+
+function ztpMachineTree() {
+  // one machine as the simplified route reports it: ZTP Device, Azure lifecycle (ProvisionMachine > RegisterMachine),
+  // the ProvisionOs job, then the ZTP Network stage
+  return m.provisioningTreeOf(ztpState([zNode('iic-azl-n03', 'InstallingOs', 'running', 'Disconnected', { tree: [
+    { id: 'ztp.device', name: 'Management address (maintenance environment)', status: 'success', start: '2026-11-07T17:02:00Z', end: '2026-11-07T17:04:00Z',
+      children: [{ id: 'ztp.device.0', name: 'DeviceConfigurationSubmitted', status: 'success', children: [] }] },
+    { id: 'lifecycle.0', name: 'ProvisionMachine', status: 'success', start: '2026-11-07T17:06:00Z', end: '2026-11-07T17:15:00Z',
+      children: [{ id: 'lifecycle.0.0', name: 'RegisterMachine', status: 'success', start: '2026-11-07T17:06:00Z', end: '2026-11-07T17:09:00Z', children: [] }] },
+    { id: 'lifecycle.1', name: 'InstallOs', status: 'running', start: '2026-11-07T17:16:00Z', children: [] },
+    { id: 'job', name: 'ProvisionOs job', status: 'running', start: '2026-11-07T17:16:00Z', children: [{ id: 'job.0', name: 'CreatedTargetArcMachine', status: 'success', children: [] }] },
+    { id: 'ztp.network', name: 'Management address on the management NIC', status: 'notstarted', children: [] }
+  ] })]));
+}
+
+test('stepRule: Azure steps of a machine are Azure; ZTP stages are node steps with their stage; the machine row selects the machine', function () {
+  var t = ztpMachineTree()[0], k = t.children;
+  eq(m.stepRule('provisioning', [t]), { side: 'machine', node: 'iic-azl-n03', stage: '', window: false });
+  eq(m.stepRule('provisioning', [t, k[1], k[1].children[0]]), { side: 'azure', node: 'iic-azl-n03', stage: '', window: false }, 'Register machine');
+  eq(m.stepRule('provisioning', [t, k[2]]).side, 'azure', 'Install OS');
+  eq(m.stepRule('provisioning', [t, k[3], k[3].children[0]]).side, 'azure', 'a ProvisionOs job step');
+  eq(m.stepRule('provisioning', [t, k[0]]), { side: 'node', node: 'iic-azl-n03', stage: 'device', window: false });
+  eq(m.stepRule('provisioning', [t, k[0], k[0].children[0]]), { side: 'node', node: 'iic-azl-n03', stage: 'device', window: false }, 'an event of the stage');
+  eq(m.stepRule('provisioning', [t, k[4]]).stage, 'network');
+});
+
+test('stepRule: OEM route groups, validation, extensions, deployment and update', function () {
+  var oem = { name: 'node01' };
+  eq(m.stepRule('provisioning', [oem, { id: 'update', name: 'OS image update' }, { id: 'update.1', name: 'Download' }]), { side: 'node', node: 'node01', stage: '', window: true });
+  eq(m.stepRule('provisioning', [oem, { id: 'bootstrap', name: 'Bootstrap' }]).window, true);
+  eq(m.stepRule('provisioning', [oem, { id: 'arc', name: 'Azure registration' }]).side, 'azure');
+  eq(m.stepRule('validation', [{ id: '1', name: 'Validate network' }]).side, 'azure');
+  eq(m.stepRule('extensions', [{ id: 'ext:n1', name: 'node01' }]).side, 'azure');
+  eq(m.stepRule('deployment', [{ id: '2', name: 'Deploy' }, { id: '2.1', name: 'x' }]), { side: 'node', node: '', stage: '', window: true });
+  eq(m.stepRule('update', [{ id: 'u', name: 'Update' }]).side, 'node');
+  eq(m.stepRule('', []).side, 'azure');
+});
+
+test('mode sections: each mode shows only its own steps; Health has none', function () {
+  eq(m.MODE_SECTIONS, { prov: ['provisioning'], validate: ['validation', 'extensions'], deploy: ['deployment'], update: ['update'], health: [] });
+});
+
+test('regression: clicking an Azure step (Register machine, Install OS) must not leave the logs empty', function () {
+  // The cause: every step offered a time-window filter. An Azure-side step runs in Azure and writes nothing to a node
+  // log, so its window held no line and the log pane said "No lines match the current filters".
+  var t = ztpMachineTree()[0], register = t.children[1].children[0];
+  var lines = [
+    { seq: 1, time: '2026-11-07T17:30:00.000Z', received: '2026-11-07T17:30:00.000Z', timeSource: 'line', file: 'C:\\Bootstrap\\setup.log', level: 'info', text: 'Bootstrap service started on iic-azl-n01.' },
+    { seq: 2, time: '2026-11-07T17:31:00.000Z', received: '2026-11-07T17:31:00.000Z', timeSource: 'line', file: 'ztp-events', level: 'info', text: '2026-11-07T17:31:00.000Z [ztp] iic-azl-n03 VoucherWritten: x' }
+  ];
+  var win = m.stepWindowOf(register);
+  eq(lines.filter(function (l) { return m.lineInWindow(l, win); }).length, 0, 'the old filter: the Register machine window holds no line');
+  var rule = m.stepRule('provisioning', [t, t.children[1], register]);
+  eq(rule.side, 'azure');
+  // an Azure step sets no filter at all, so every line stays visible
+  var none = { node: '', stage: '' };
+  eq(lines.filter(function (l) { return m.lineInScope(l, none, null, 'iic-azl-n01'); }).length, 2);
+});
+
+test('step click on a ZTP stage: the ZTP lines of that stage for that machine', function () {
+  var lines = [
+    { file: 'ztp-events', text: '2026-11-07T17:03:00.000Z [ztp] iic-azl-n03 DeviceAddressSet: a' },
+    { file: 'ztp-events', text: '2026-11-07T17:03:00.000Z [ztp] iic-azl-n02 DeviceAddressSet: b' },
+    { file: 'ztp-events', text: '2026-11-07T17:40:00.000Z [ztp] iic-azl-n03 NetworkJobSubmitted: c' },
+    { file: 'C:\\Bootstrap\\setup.log', text: 'node log line' }
+  ];
+  var rule = m.stepRule('provisioning', [ztpMachineTree()[0], ztpMachineTree()[0].children[0]]);
+  var f = { node: rule.node, stage: rule.stage };
+  eq(lines.filter(function (l) { return m.lineInScope(l, f, null, 'iic-azl-n01'); }).map(function (l) { return l.text.slice(-1); }), ['a']);
+});
+
+test('emptyLogView: a step with no lines says why and offers the machine and Clear filter', function () {
+  var f = { level: 'all', q: '', file: '', stepKey: 'k', node: 'iic-azl-n03', stage: '' };
+  var v = m.emptyLogView(f, 0, 37, 'connected');
+  eq(v.kind, 'step');
+  eq(v.title, 'No log lines for this step yet.');
+  eq(v.text.indexOf('This step has produced no lines on this node yet.'), 0);
+  eq(v.actions, ['node', 'clear']);
+  eq(m.emptyLogView({ stage: 'network', node: '' }, 0, 5, '').actions, ['clear'], 'no machine: only Clear filter');
+});
+
+test('emptyLogView: a machine with no lines, filters that emptied a scope, and no lines at all', function () {
+  eq(m.emptyLogView({ node: 'n2' }, 0, 10, '').kind, 'node');
+  eq(m.emptyLogView({ node: 'n2' }, 0, 10, '').title, 'No log lines for n2 yet.');
+  var f = m.emptyLogView({ level: 'error', node: 'n2' }, 4, 10, '');
+  eq(f.kind, 'filters');
+  eq(f.title, 'No lines match the current filters.');
+  eq(f.actions, ['clearAll']);
+  eq(m.emptyLogView({ level: 'error' }, 10, 10, '').kind, 'filters');
+  eq(m.emptyLogView({}, 0, 0, 'connected').title, 'Waiting for log lines\u2026');
+  eq(m.emptyLogView({}, 0, 0, 'unavailable').title, 'No log lines: the log tailer cannot reach the seed node.');
+});
+
+test('stepDescription: the ZTP steps use the plain text; Azure steps keep what Azure says; every machine stage has one', function () {
+  eq(m.stepDescription({ id: 'ztp.device', name: 'x', description: 'azurelocal-ztp Device: technical text' }),
+    'Finds the machine by its management MAC and sets the static address on that port, before the claim.');
+  eq(m.stepDescription({ id: 'ztp.network', name: 'x' }).indexOf('Checks the management port'), 0);
+  eq(m.stepDescription({ id: 'ztp.restore', name: 'x' }).indexOf('Puts the BIOS settings'), 0);
+  eq(m.stepDescription({ id: 'lifecycle.0.0', name: 'RegisterMachine', description: 'Register machine with onboarding service' }), 'Register machine with onboarding service');
+  eq(m.stepDescription({ id: 'lifecycle.1', name: 'InstallOs', description: '' }), 'Azure downloads the OS, installs it, restarts the machine and adds the Arc extensions.');
+  eq(m.stepDescription({ id: 'job.3', name: 'ArcNotificationSent', description: '' }), '');
+  eq(m.stepDescription({ id: 'n', name: 'node01', prov: {} }), '', 'the machine row has no description');
+});
+
+test('stepsEmptyText: a waiting mode says when it begins, Health says there are no steps', function () {
+  eq(m.stepsEmptyText('validate', 'idle', 'Starts after validation passes', true), 'The steps appear here when this mode begins. Starts after validation passes.');
+  eq(m.stepsEmptyText('health', 'ok', '', true).indexOf('There are no steps here.'), 0);
+  eq(m.stepsEmptyText('prov', 'run', '', false), 'No machines reported yet.');
+  eq(m.stepsEmptyText('deploy', 'run', '', true), 'No steps reported yet.');
+});
+
 process.stdout.write(JSON.stringify(cases));
