@@ -196,3 +196,19 @@ Top bar: brand, cluster name, **ⓘ Details** (the `/api/details` pop-down), a s
 **Step filter.** A step's window is its start −1 s to its end +1 s (open-ended while it runs). A line with its own timestamp (`timeSource: line`) matches by event time; a line timed by its file name (`file`) matches by that time or by its receive time; a line with no timestamp (`received`) is approximate and matches only when Sonar received it inside the window (shown with `~` before its time). When the selected step's window changes (running → finished) the log pane is filtered again; when the step disappears from the state the filter is removed.
 
 **File filter.** The options are the files the tailer reports now (`/api/logs` files, tailer `activeFiles`) plus the files of the lines the page still holds. The selection stays only while its file is still offered.
+
+## Approved UI mockups
+
+The page follows these mockups, approved by the owner. They are a static HTML file with sample data (example names only) and four screenshots of it, kept here so the intended design stays next to the code that implements it. Open the HTML in a browser and use the *Show state* list, the Details, Log access and `?` buttons, the mode tiles and the steps; `#details`, `#logaccess` and `#help` after the address open each pop-up at once.
+
+| Mockup | What it fixes in the design |
+| --- | --- |
+| [sonar-ux-mockup.html](./design/sonar-ux-mockup.html) | The interactive mockup: every state of the page (ZTP running, deployment, failed, no log access) |
+| [mockup-1-main.png](./design/mockup-1-main.png) | Top bar with the status chip, elapsed time and *updated N s ago*; five equal mode tiles; the summary with a card per machine and full machine names; the Steps box (descriptions, **Azure** badges) and the Live logs box (All / Warnings+ / Errors, search, file filter), both filling the window and scrolling inside |
+| [mockup-2-log-access.png](./design/mockup-2-log-access.png) | Log access as a window with a tab for every phase (Provisioning, Validation, Deployment, Post-deployment, Update, Add node, Repair) |
+| [mockup-3-details.png](./design/mockup-3-details.png) | The Details pop-down: Target, Mode, Nodes, Sources, Config, each value with where it came from |
+| [mockup-4-help.png](./design/mockup-4-help.png) | The `?` box: version, documentation links, and "Released under the MIT License. Copyright © Hybrid Cloud Solutions & AzureLocal" |
+
+![The main screen](./design/mockup-1-main.png)
+
+Where the built page differs from the mockup on purpose, it is because the page shows real data: the Steps box draws Azure's own lifecycle stages and the `ProvisionOs` job as a tree (the mockup condenses them into one line per stage and has a *Handoff* line that Sonar cannot read from Azure or the event file), and the Details pop-down opens from the left edge of the page instead of under the button so it fits narrow windows.
