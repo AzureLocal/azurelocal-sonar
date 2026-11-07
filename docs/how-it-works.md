@@ -59,6 +59,26 @@ The scrubber's markers come from the states themselves: each change of phase (Ar
 
 `?demo=1&replay=1` plays the demo deployment as a built-in recording (64 minutes: Arc registration, Validate, Deploy), made with the same keyframe and change format.
 
+## What Sonar reads
+
+Sonar only reads. Everything it takes from Azure, the nodes and the BMC is in this table; the reference for these calls (what each one returns, what else is possible) is in the ZTP docs: the [API reference](https://github.com/AzureLocal/azurelocal-ztp/blob/main/docs/appendix/api-reference.md) for Azure Resource Manager and Redfish, and [the Configurator app API](https://github.com/AzureLocal/azurelocal-ztp/blob/main/docs/appendix/configurator-app-api.md) for the service in the maintenance environment.
+
+| Source | What Sonar reads | How | When |
+| --- | --- | --- | --- |
+| **Azure Resource Manager** | The cluster's `deploymentSettings/default` (validation and deployment step trees) | `GET` through `Invoke-AzRestMethod` under your Az PowerShell sign-in; `apiVersion` (default `2026-10-01`), with `apiVersionFallback` tried once | Every `pollSeconds` |
+| | `edgeMachines` and each machine's `jobs/ProvisionOs` (simplified machine provisioning: lifecycle, the OS-install step tree, the Arc machine ID) | `GET`; `edgeApiVersion` (default `2026-10-01`). Skipped when `provisioningRoute` is `oem-image`. | Every `pollSeconds` |
+| | The Arc machine of each node (`Microsoft.HybridCompute/machines`) and its `extensions` | `GET`, api-version `2026-07-15`; the extensions on the OEM-image route only, once a validation or deployment has steps | Every `pollSeconds` |
+| | Running ARM deployments (`Microsoft.Resources/deployments`, filter `provisioningState eq 'Running'`) | `GET`, api-version `2021-04-01` | While the deployment has not succeeded |
+| | `updateSummaries/default`, `updates`, `updates/{name}/updateRuns` of the cluster | `GET`; skipped when `updateTrack` is `off` | Every `pollSeconds` |
+| **Nodes (WinRM or SSH)** | The deployment log files on the seed node | A read-only script per poll: it lists the `logs.paths` folders and tails growing files | Every `logs.pollSeconds` |
+| | Arc registration status on each node, OEM-image route only: `Get-ArcBootstrapStatus` and `Get-ArcZeroDaySolutionUpdateStatus` | The two local PowerShell cmdlets of the node, with `-ErrorAction SilentlyContinue` | Only while Arc registration runs |
+| **This workstation** | WinRM `TrustedHosts` | Reads it and tells you; never sets it | At start |
+| **Key Vault** | The log account's user name and password, only with `credential.source` `keyvault` | `Get-AzKeyVaultSecret`, held in memory | Once, at start |
+| **ZTP event file** | The events a ZTP run appends (`ztpEvents.path`) | Reads the local file, shared with the writer | Every 2 seconds |
+| **BMC (Redfish)** | Nothing | Sonar makes no Redfish call. The ZTP stages that use Redfish are in the ZTP [API reference](https://github.com/AzureLocal/azurelocal-ztp/blob/main/docs/appendix/api-reference.md). | |
+| **Configurator app service (TCP 20001)** | Nothing | Sonar does not call the maintenance environment's REST service. ZTP's Device stage does ([the Configurator app API](https://github.com/AzureLocal/azurelocal-ztp/blob/main/docs/appendix/configurator-app-api.md)). The two node cmdlets above are the local PowerShell front end of the same bootstrap service on an installed OS. | |
+
+Azure access is one function, `Invoke-AzlSonarArmGet`, which calls `Invoke-AzRestMethod -Method GET`; there is no other Azure call site in the module besides the sign-in checks and the Key Vault read. Only Arc machine IDs of the form `/subscriptions/{s}/resourceGroups/{rg}/providers/Microsoft.HybridCompute/machines/{name}` are followed. The sign-in needs read access to these resources only. How each ZTP stage shows up in the page is in [Following a ZTP run](./ztp.md).
 ## Read-only
 
 Sonar only reads Azure and the nodes. It never starts, retries or cancels a deployment, never writes to Azure (no Arc run command, no Arc SSH), never writes to a node, and never changes the workstation's `TrustedHosts`. The only file it writes is the recording you ask for, and a replay never contacts Azure or a node. The page is served to this machine only, and secrets are masked in everything it shows, exports or records.

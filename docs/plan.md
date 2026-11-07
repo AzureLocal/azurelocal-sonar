@@ -17,7 +17,7 @@ Status vocabulary: Backlog · In progress · Blocked (say on what) · Done (unve
 
 | Layer | Choice | Why |
 |---|---|---|
-| Back end | PowerShell 7 module, `System.Net.HttpListener` on localhost; JSON API plus Server-Sent Events for live updates | Ships as scripts; nothing to install |
+| Back end | PowerShell 7 module, `System.Net.HttpListener` on localhost; JSON routes for its own page plus Server-Sent Events for live updates | Ships as scripts; nothing to install |
 | Azure data | ARM REST with the signed-in Azure CLI or Az PowerShell token: `Microsoft.AzureStackHCI/clusters/{name}/deploymentSettings/default` (validation and deployment step tree), `edgeMachines` and `jobs` (provisioning), Arc machines and extensions, activity log | Published APIs; the portal reads the same resources |
 | Node logs | PowerShell remoting to the seed node (WinRM) with the right account per phase; fallback Arc run command (polling tail) or Arc SSH | Works on the management network and remotely through Arc |
 | Front end | Single static page (HTML, CSS, vanilla JavaScript; no build step, no CDN at run time), light and dark theme | Opens anywhere; works air-gapped |
@@ -30,7 +30,7 @@ Status vocabulary: Backlog · In progress · Blocked (say on what) · Done (unve
 | S-1 | Research: the deploymentSettings step tree (validation and deployment) — schema, nesting, status values, timestamps, error fields, refresh behaviour, api-version; edgeMachines lifecycle and jobs for provisioning | Done (unverified) (10 Oct; docs/research.md with Learn citations; live shape captured) | AI |
 | S-2 | Research: deployment log locations on the seed node per phase (bootstrap, validation, deployment, LCM/ECE), file naming and rotation, which account can read them for Local Identity and for AD deployments, and when each log appears; documented sources only, marked where verified live | Done (unverified) (10 Oct; live log paths verified on clus01 during Deploy) | AI |
 | S-3 | Research: access methods to the logs — WinRM/PS remoting (TrustedHosts for workgroup nodes), Arc run command, Arc SSH — limits and security | Done (unverified) (10 Oct; WinRM primary, SSH fallback; run command/Arc SSH excluded as writes) | AI |
-| S-4 | Design: API contract between back end and page; data model for steps, logs, accounts guidance; UI wireframe (step tree, timeline, log stream, node and account panel) | Done (unverified) (10 Oct 23:20; docs/design.md) | AI |
+| S-4 | Design: Contract between back end and page; data model for steps, logs, accounts guidance; UI wireframe (step tree, timeline, log stream, node and account panel) | Done (unverified) (10 Oct 23:20; docs/design.md) | AI |
 | S-5 | Build v0.1: back end (Azure poller, log tailer, SSE), page (step tree, live log pane, filters), `Start-AzlSonar.ps1`, config file, README | Done (unverified) (10 Oct; e88fea9, c6772a8, d1b889f; GPT review blockers fixed; should-fixes in progress) | AI |
 | S-6 | Tests: Pester for the back end (mocked ARM and node responses), PSScriptAnalyzer clean, page smoke test | Done (unverified) (10 Oct; 278 Pester tests pass, analyzer clean; 3e54f52) | AI |
 | S-7 | Live test against the test cluster deployment (`clus01`): follow Validate and Deploy end to end; screenshots | In progress (10 Oct 23:47; Sonar live on the clus01 Deploy pass, screenshot E17/20261010-2347) | AI |

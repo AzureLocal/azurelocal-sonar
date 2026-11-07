@@ -34,7 +34,7 @@ Each tab has the same rows: **Account** (who can read), **Where** (every folder)
 | **Add node** | Add-Server or Add machine | Run on an existing node with the new node's local administrator credentials; reading logs needs local Administrators on the nodes. | `C:\CloudDeployment\Logs`, `C:\MASLogs`, `C:\Observability` | Azure has no resource for it: set `track: add-node` and Sonar shows this tab, the Arc machines and the node log. The incoming node is still in a workgroup until added: TrustedHosts or HTTPS 5986. |
 | **Repair** | Repair-Server | Run on another member node with the repaired node's local administrator credentials (by default the built-in `Administrator`); the node name must be the NetBIOS name. | `C:\CloudDeployment\Logs`, `C:\MASLogs`, `C:\Observability` | `track: repair`. Reimage the node and register it with Arc first. The node being repaired is reachable by IP only until it has rejoined. |
 
-The exact, current text of every cell is in the window itself: it is read from `src/AzlSonar/data/phase-guidance.json` through `/api/guidance` ([Appendix A](./appendix/a-sonar-api.md#get-api-guidance)), per identity model.
+The exact, current text of every cell is in the window itself: it is read from `src/AzlSonar/data/phase-guidance.json` through `/api/guidance`, per identity model.
 
 ## Confidence
 

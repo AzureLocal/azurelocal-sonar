@@ -12,7 +12,7 @@ Unknown keys are ignored. Sonar validates at start and lists every problem at on
 
 ## Key reference
 
-Types are JSON types. "Dashboard" says what the key changes on the page. "Master file" is the `infrastructure.yml` key that fills it when you use `-InfrastructureFile` (a dash means there is no such key: Sonar's default applies, or you give it another way). Every key below can be changed with [`Set-AzlSonarConfig`](./appendix/a-sonar-api.md#set-azlsonarconfig) (the node keys with `Add-AzlSonarNode` and `Remove-AzlSonarNode`); [Update the configuration](#update-the-configuration) shows how.
+Types are JSON types. "Dashboard" says what the key changes on the page. "Master file" is the `infrastructure.yml` key that fills it when you use `-InfrastructureFile` (a dash means there is no such key: Sonar's default applies, or you give it another way). Every key below can be changed with `Set-AzlSonarConfig` (run it with no `-Key` to list the keys) (the node keys with `Add-AzlSonarNode` and `Remove-AzlSonarNode`); [Update the configuration](#update-the-configuration) shows how.
 
 | Key | Type | Required | Default | Example | Master file | What it changes in the dashboard |
 | --- | --- | --- | --- | --- | --- | --- |

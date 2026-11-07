@@ -36,5 +36,5 @@ features:
 
 ## Reference
 
-- [Appendix A: Sonar API and commands](/appendix/a-sonar-api): every HTTP route, exported command, config key, file Sonar reads or writes, and every Azure read it makes.
-- [Appendix B: The Azure Local Configurator app API](/appendix/b-configurator-app-api): every operation of the service the Configurator app uses, what it does, and how we know (not a supported API).
+- [What Sonar reads](/how-it-works#what-sonar-reads): the read-only Azure calls and node reads Sonar makes.
+- The Azure, Redfish and Configurator app calls of a ZTP run are documented in the ZTP docs: [API reference](https://github.com/AzureLocal/azurelocal-ztp/blob/main/docs/appendix/api-reference.md) and [The Configurator app API](https://github.com/AzureLocal/azurelocal-ztp/blob/main/docs/appendix/configurator-app-api.md).
