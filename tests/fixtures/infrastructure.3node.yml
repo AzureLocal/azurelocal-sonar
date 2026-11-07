@@ -1,0 +1,63 @@
+# Schema 5.3 fixture for the Sonar reader: three machines, two NIC types each (an onboard LOM for management and a
+# slot NIC for storage), node 3 has a DHCP reservation. Documentation ranges and example names only.
+_metadata:
+  schema_version: "5.3.0"
+
+scenario:
+  identity: active_directory
+  os_install: simplified
+
+azure:
+  tenant_id: "00000000-0000-0000-0000-000000000000"
+  subscription_id: "11111111-2222-3333-4444-555555555555"
+  resource_group: "rg-example-azl-01"
+
+cluster:
+  name: "example-clus01"
+
+key_vaults:
+  - { name: "kv-example-mgmt-01", subscription_id: "00000000-0000-0000-0000-000000000000", resource_group: "rg-example-mgmt-01" }
+
+nodes:
+  - name: "example-n01"
+    arc_machine_name: "example-n01"
+    serial_number: "SERIAL01"
+    bmc: { ip_address: "198.51.100.11", type: idrac }
+    network_adapters:
+      - { name: "Slot 3 Port 1", mac_address: "00:00:5E:00:53:01", roles: [storage], ip_assignment: none }
+      - name: "Embedded NIC 1"   # onboard port: management
+        mac_address: "00:00:5E:00:53:11"
+        roles: [management]
+        ip_assignment: static
+        ip_address: "192.0.2.11"
+      - { name: "Embedded NIC 2", mac_address: "00:00:5E:00:53:12", roles: [management], ip_assignment: none }
+  - name: "example-n02"
+    serial_number: "SERIAL02"
+    bmc: { ip_address: "198.51.100.12", type: idrac }
+    network_adapters:
+      - { name: "Embedded NIC 1", mac_address: "00:00:5E:00:53:21", roles: [management], ip_assignment: static, ip_address: "192.0.2.12" }
+      - { name: "Slot 3 Port 1", mac_address: "00:00:5E:00:53:22", roles: [storage], ip_assignment: none }
+  - name: "example-n03"
+    serial_number: "SERIAL03"
+    bmc: { ip_address: "198.51.100.13", type: idrac }
+    network_adapters:
+      - { name: "Slot 3 Port 1", mac_address: "00:00:5E:00:53:32", roles: [storage], ip_assignment: none }
+      - { name: "Embedded NIC 1", mac_address: "00:00:5E:00:53:31", roles: [management], ip_assignment: dhcp_reservation, ip_address: "192.0.2.13" }
+
+hardware:
+  bmc:
+    username: "keyvault://kv-example-mgmt-01/bmc-username"
+    password: "keyvault://kv-example-mgmt-01/bmc-password"
+
+identity:
+  local_admin:
+    username: "azl-admin"
+    password: "keyvault://kv-example-mgmt-01/local-admin-password"
+
+provisioning:
+  simplified:
+    site_name: "example-site-01"
+    admin:
+      username: "administrator"
+      password: "keyvault://kv-example-mgmt-01/provisioning-admin-password"
+    evidence_path: 'D:\Data\azl-ztp\example\evidence' # event log, run logs

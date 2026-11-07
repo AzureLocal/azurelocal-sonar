@@ -3,13 +3,21 @@
     Starts AzL Sonar: a real-time, read-only monitor for an Azure Local deployment, in your browser. Can record the run
     and replay it later.
 .DESCRIPTION
-    Imports the AzlSonar module, reads the config, checks the Az PowerShell sign-in (run Connect-AzAccount first),
+    Imports the AzlSonar module, builds the configuration (from the master infrastructure.yml with -InfrastructureFile, or from
+    a config file with -ConfigPath; with neither it prints the ways to configure Sonar and offers the guided setup), checks the Az PowerShell sign-in (run Connect-AzAccount first),
     resolves the account that reads the seed node's logs, starts the local back end on http://localhost:<Port>/ and
     opens the browser. Runs until Ctrl+C. Sonar only reads: it never changes Azure or the nodes.
     With -Record it also appends everything the page is sent (state, step tree, log lines, all masked) to a local JSON
     Lines recording. With -Replay it plays a recording through the same page instead: no Azure sign-in, no node access.
+.PARAMETER InfrastructureFile
+    Path to the master infrastructure.yml (schema 5, azurelocal-toolkit). Sonar builds its configuration from it in memory:
+    cluster, subscription, resource group, route, identity model, the nodes and their management addresses, and the ZTP event
+    file. The file is checked every 60 seconds; when its node set changes Sonar logs a notice to restart it. The log account
+    still comes from -Credential or a prompt: the file only holds keyvault:// references and Sonar never reads them.
 .PARAMETER ConfigPath
-    Path to the cluster's Sonar config (see examples/sonar.config.example.json).
+    Path to the cluster's Sonar config file (the older option; see examples/sonar.config.commented.jsonc).
+.PARAMETER PollSeconds
+    Seconds between Azure polls (5 to 3600). Overrides pollSeconds in the config; the default is 20.
 .PARAMETER Replay
     Path to a recording (.jsonl or .jsonl.gz) to play instead of watching a live deployment.
 .PARAMETER Port
@@ -36,6 +44,8 @@
     Replay: start playing at once instead of paused.
 .EXAMPLE
     Connect-AzAccount
+    ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml
+.EXAMPLE
     ./Start-AzlSonar.ps1 -ConfigPath ./config/my-cluster.json
 .EXAMPLE
     ./Start-AzlSonar.ps1 -ConfigPath ./config/my-cluster.json -Record ./recordings/my-cluster.jsonl
@@ -50,8 +60,15 @@
 
 [CmdletBinding(DefaultParameterSetName = 'Live')]
 param(
-    [Parameter(Mandatory, ParameterSetName = 'Live')]
+    [Parameter(ParameterSetName = 'Live')]
+    [string]$InfrastructureFile,
+
+    [Parameter(ParameterSetName = 'Live')]
     [string]$ConfigPath,
+
+    [Parameter(ParameterSetName = 'Live')]
+    [ValidateRange(5, 3600)]
+    [int]$PollSeconds,
 
     [Parameter(Mandatory, ParameterSetName = 'Replay')]
     [string]$Replay,
@@ -100,7 +117,19 @@ if ($PSCmdlet.ParameterSetName -eq 'Replay') {
     if ($PSBoundParameters.ContainsKey('StartAt')) { $serverParameters.StartAt = $StartAt }
 }
 else {
-    $serverParameters.ConfigPath = $ConfigPath
+    if ($ConfigPath -and $InfrastructureFile) { throw 'Give -InfrastructureFile or -ConfigPath, not both.' }
+    if (-not $ConfigPath -and -not $InfrastructureFile) {
+        # No arguments: use a config in the usual place, else explain the three ways and offer the guided setup.
+        $found = & (Get-Module -Name AzlSonar) { Find-AzlSonarDefaultConfig }
+        if ($found) { $ConfigPath = $found; Write-Information -MessageData "No -ConfigPath or -InfrastructureFile given: using $found." -InformationAction Continue }
+        else {
+            $ConfigPath = & (Get-Module -Name AzlSonar) { Invoke-AzlSonarNoConfigGuide }
+            if (-not $ConfigPath) { return }
+        }
+    }
+    if ($ConfigPath) { $serverParameters.ConfigPath = $ConfigPath }
+    if ($InfrastructureFile) { $serverParameters.InfrastructureFile = $InfrastructureFile }
+    if ($PSBoundParameters.ContainsKey('PollSeconds')) { $serverParameters.PollSeconds = $PollSeconds }
     if ($PSBoundParameters.ContainsKey('Credential')) { $serverParameters.Credential = $Credential }
     if ($PSBoundParameters.ContainsKey('Record')) { $serverParameters.Record = $Record }
     if ($Publishable) { $serverParameters.Publishable = $true }

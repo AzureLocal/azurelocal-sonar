@@ -19,18 +19,38 @@ function Test-AzlSonarConfig {
     .DESCRIPTION
         Pure function: no file, Azure or node access. Read-AzlSonarConfig calls it before normalising.
     #>
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName = 'Config')]
     [OutputType([string[]], [object[]])]
     param(
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory, ParameterSetName = 'Config')]
         [AllowNull()]
-        [object]$Config
+        [object]$Config,
+
+        [Parameter(Mandatory, ParameterSetName = 'Path')]
+        [string]$Path,
+
+        [Parameter(Mandatory, ParameterSetName = 'InfrastructureFile')]
+        [string]$InfrastructureFile
     )
 
     $problems = [System.Collections.Generic.List[string]]::new()
+    if ($PSCmdlet.ParameterSetName -eq 'Path') {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @("Sonar config file not found: $Path") }
+        try { $Config = ConvertFrom-Json -InputObject (Get-Content -LiteralPath $Path -Raw) -Depth 32 }
+        catch { return @("The config is not valid JSON: $($_.Exception.Message)") }
+    }
+    elseif ($PSCmdlet.ParameterSetName -eq 'InfrastructureFile') {
+        if (-not (Test-Path -LiteralPath $InfrastructureFile -PathType Leaf)) { return @("Infrastructure file not found: $InfrastructureFile") }
+        $full = (Resolve-Path -LiteralPath $InfrastructureFile).ProviderPath
+        try { $tree = ConvertFrom-AzlSonarYaml -Text (Get-Content -LiteralPath $full -Raw) }
+        catch { return @("The infrastructure file is not valid YAML: $($_.Exception.Message)") }
+        $mapped = ConvertFrom-AzlSonarInfrastructureTree -Tree $tree -BaseDirectory ([System.IO.Path]::GetDirectoryName($full)) -PollSeconds $null
+        if ($mapped.Problems.Count -gt 0) { return $mapped.Problems }
+        $Config = ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject $mapped.Config -Depth 32)
+    }
     if ($null -eq $Config) {
         $problems.Add('The config is empty.')
-        return , $problems.ToArray()
+        return $problems.ToArray()
     }
 
     $guidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
@@ -197,7 +217,7 @@ function Test-AzlSonarConfig {
         }
     }
 
-    return , $problems.ToArray()
+    return $problems.ToArray()
 }
 
 function Read-AzlSonarConfig {
@@ -229,17 +249,30 @@ function Read-AzlSonarConfig {
         [string]$Path,
 
         [Parameter(Mandatory, ParameterSetName = 'Json')]
-        [string]$Json
+        [string]$Json,
+
+        [Parameter(Mandatory, ParameterSetName = 'InfrastructureFile')]
+        [string]$InfrastructureFile,
+
+        [Nullable[int]]$PollSeconds
     )
 
     $ErrorActionPreference = 'Stop'
     $source = 'JSON string'
+    $baseDirectory = $null
     if ($PSCmdlet.ParameterSetName -eq 'Path') {
         if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
             throw "Sonar config file not found: $Path"
         }
         $source = (Resolve-Path -LiteralPath $Path).ProviderPath
+        $baseDirectory = [System.IO.Path]::GetDirectoryName($source)
         $Json = Get-Content -LiteralPath $source -Raw
+    }
+    elseif ($PSCmdlet.ParameterSetName -eq 'InfrastructureFile') {
+        $mappedConfig = Read-AzlSonarInfrastructureFile -Path $InfrastructureFile
+        $source = (Resolve-Path -LiteralPath $InfrastructureFile).ProviderPath
+        $baseDirectory = [System.IO.Path]::GetDirectoryName($source)
+        $Json = ConvertTo-Json -InputObject $mappedConfig -Depth 32
     }
 
     try {
@@ -248,8 +281,14 @@ function Read-AzlSonarConfig {
     catch {
         throw "Sonar config ($source) is not valid JSON: $($_.Exception.Message)"
     }
+    if ($null -ne $PollSeconds -and $null -ne $raw) {
+        # -PollSeconds overrides the file: the poll interval of Azure and, unless logs.pollSeconds is set, of the logs.
+        $raw | Add-Member -NotePropertyName pollSeconds -NotePropertyValue ([int]$PollSeconds) -Force
+        $rawLogs = Get-AzlSonarMember $raw 'logs'
+        if ($null -ne $rawLogs -and $null -ne (Get-AzlSonarMember $rawLogs 'pollSeconds')) { $rawLogs.pollSeconds = [int]$PollSeconds }
+    }
 
-    $problems = Test-AzlSonarConfig -Config $raw
+    $problems = @(Test-AzlSonarConfig -Config $raw)
     if ($problems.Count -gt 0) {
         throw ("Sonar config ($source) is not valid:`n - " + ($problems -join "`n - "))
     }
@@ -306,14 +345,14 @@ function Read-AzlSonarConfig {
 
     # recordPath: relative to the config file's folder (to the current folder for a JSON string).
     $recordPath = [string](Get-AzlSonarMember $raw 'recordPath' '')
-    if ($recordPath -and -not [System.IO.Path]::IsPathRooted($recordPath) -and $PSCmdlet.ParameterSetName -eq 'Path') {
-        $recordPath = [System.IO.Path]::GetFullPath((Join-Path -Path ([System.IO.Path]::GetDirectoryName($source)) -ChildPath $recordPath))
+    if ($recordPath -and -not [System.IO.Path]::IsPathRooted($recordPath) -and $baseDirectory) {
+        $recordPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $recordPath))
     }
 
     # ztpEvents.path: the event file the ZTP provisioning scripts write; relative to the config file's folder.
     $ztpEventsPath = [string](Get-AzlSonarMember (Get-AzlSonarMember $raw 'ztpEvents') 'path' '')
-    if ($ztpEventsPath -and -not [System.IO.Path]::IsPathRooted($ztpEventsPath) -and $PSCmdlet.ParameterSetName -eq 'Path') {
-        $ztpEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ([System.IO.Path]::GetDirectoryName($source)) -ChildPath $ztpEventsPath))
+    if ($ztpEventsPath -and -not [System.IO.Path]::IsPathRooted($ztpEventsPath) -and $baseDirectory) {
+        $ztpEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $ztpEventsPath))
     }
 
     return [pscustomobject]@{

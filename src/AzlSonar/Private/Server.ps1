@@ -707,7 +707,12 @@ function Start-AzlSonarServer {
         Replay: reads the recording and serves it through the same page with a transport bar (play, pause, speed,
         scrubber, phase markers). No Azure sign-in, no node access, no worker.
     .PARAMETER ConfigPath
-        Path to the Sonar config file (JSON).
+        Path to the Sonar config file (JSON). Give this or -InfrastructureFile.
+    .PARAMETER InfrastructureFile
+        Path to the master infrastructure.yml (schema 5). Sonar builds the same configuration from it in memory and checks
+        it every 60 seconds: when the node set changes it logs a notice to restart Sonar (the pollers are built at start).
+    .PARAMETER PollSeconds
+        Overrides pollSeconds (config file or default 20): seconds between Azure polls, 5 to 3600.
     .PARAMETER Replay
         Path to a recording (.jsonl, or .jsonl.gz) to play instead of watching a live deployment.
     .PARAMETER Port
@@ -733,8 +738,15 @@ function Start-AzlSonarServer {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Starts a local, read-only monitor; changes nothing outside the process (a recording is a local file the user asked for).')]
     [CmdletBinding(DefaultParameterSetName = 'Live')]
     param(
-        [Parameter(Mandatory, ParameterSetName = 'Live')]
+        [Parameter(ParameterSetName = 'Live')]
         [string]$ConfigPath,
+
+        [Parameter(ParameterSetName = 'Live')]
+        [string]$InfrastructureFile,
+
+        [Parameter(ParameterSetName = 'Live')]
+        [ValidateRange(5, 3600)]
+        [int]$PollSeconds,
 
         [Parameter(Mandatory, ParameterSetName = 'Replay')]
         [string]$Replay,
@@ -781,7 +793,11 @@ function Start-AzlSonarServer {
         if ($recording.Invalid -gt 0) { Write-Warning "$($recording.Invalid) line(s) of the recording are not valid events and were skipped (for example a line cut off when Sonar stopped)." }
     }
     else {
-        $config = Read-AzlSonarConfig -Path $ConfigPath
+        if ($ConfigPath -and $InfrastructureFile) { throw 'Give -ConfigPath or -InfrastructureFile, not both.' }
+        if (-not $ConfigPath -and -not $InfrastructureFile) { throw (Get-AzlSonarNoConfigMessage) }
+        $readArguments = @{}
+        if ($PSBoundParameters.ContainsKey('PollSeconds')) { $readArguments.PollSeconds = $PollSeconds }
+        $config = if ($InfrastructureFile) { Read-AzlSonarConfig -InfrastructureFile $InfrastructureFile @readArguments } else { Read-AzlSonarConfig -Path $ConfigPath @readArguments }
         Assert-AzlSonarAzContext
         $recordPath = if ($PSBoundParameters.ContainsKey('Record') -and $Record) { $Record } else { [string](Get-AzlSonarMember $config 'recordPath' '') }
         if ($Publishable -and -not $recordPath) { throw '-Publishable needs a recording: give -Record <file> or set recordPath in the config.' }
@@ -825,6 +841,10 @@ function Start-AzlSonarServer {
         if ($config.ztpEventsPath) {
             # azurelocal-ztp event file (JSON Lines): provisioning states of the machines, shown in the log pane.
             $workerSpecs.Add(@{ Name = 'ZtpEvents'; Command = 'Invoke-AzlSonarZtpEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
+        }
+        if ($InfrastructureFile) {
+            # Logs a notice when the master file's node set changes (restart Sonar to track it).
+            $workerSpecs.Add(@{ Name = 'InfrastructureWatch'; Command = 'Invoke-AzlSonarInfrastructureWatchLoop'; Arguments = @{ Shared = $shared; Config = $config; Path = $config.sourcePath } })
         }
         if ($config.provisioningRoute -ne 'simplified') {
             # Reads Get-ArcBootstrapStatus / Get-ArcZeroDaySolutionUpdateStatus on each node, only while Arc registration (OEM image route) runs.

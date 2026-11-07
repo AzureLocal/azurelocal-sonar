@@ -1,5 +1,7 @@
 # Getting started
 
+> Short on time? [Start here](./start-here.md) routes you by purpose, and the default way to configure Sonar is the master `infrastructure.yml`: `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml`. The config file below is the older option.
+
 ::: tip v0.1
 AzL Sonar v0.1 was used live on a two-node Local Identity deployment (Azure Local 2609) on 10 and 11 Oct 2026. Report problems as GitHub issues; see the [plan](./plan.md) for what comes next.
 :::

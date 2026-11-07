@@ -7,6 +7,9 @@ hero:
   tagline: Every step, its status and the live deployment logs, in real time. PowerShell back end, modern local web view, nothing to install. Read-only.
   actions:
     - theme: brand
+      text: Start here
+      link: /start-here
+    - theme: alt
       text: Getting started
       link: /getting-started
     - theme: alt

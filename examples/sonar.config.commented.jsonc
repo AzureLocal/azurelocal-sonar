@@ -1,0 +1,64 @@
+// AzL Sonar config, every key explained. Copy to ./config/<cluster>.json (git-ignored) and fill in.
+// Comments (// and /* */) are allowed: Sonar reads this file as is. Add-AzlSonarNode and Remove-AzlSonarNode rewrite
+// the file as plain JSON and drop the comments.
+// Do not put passwords here: password, secret and secretValue under "credential" are refused.
+// Easier: Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml builds all of this from the master file.
+{
+  // REQUIRED. The subscription of the cluster (a GUID). Infrastructure file: azure.subscription_id.
+  "subscriptionId": "00000000-0000-0000-0000-000000000000",
+  // REQUIRED. The resource group the cluster, the Arc machines and the deployment live in. azure.resource_group.
+  "resourceGroup": "rg-example-azl",
+  // REQUIRED. The Azure Local cluster name. cluster.name.
+  "clusterName": "clus01",
+  // REQUIRED. LocalIdentity (no Active Directory) or ActiveDirectory. scenario.identity: local_identity | active_directory.
+  "identityModel": "LocalIdentity",
+  // Optional, default "auto". simplified (simplified machine provisioning, azurelocal-ztp), oem-image (OEM image or ISO
+  // plus Arc registration) or auto. scenario.os_install: simplified | iso.
+  "provisioningRoute": "auto",
+  // Optional, default 20. Seconds between Azure polls, 5 to 3600. Start-AzlSonar.ps1 -PollSeconds overrides it.
+  "pollSeconds": 20,
+  // Optional, default Standard. Standard or RackAware: what the page says about the shape of the deployment.
+  "clusterPattern": "Standard",
+  // Optional, default hyperconverged. hyperconverged or disaggregated.
+  "architecture": "hyperconverged",
+  // Optional, default "auto". auto, deployment, update, add-node or repair: which operation is followed after the deployment.
+  "track": "auto",
+  // Optional. API versions; the defaults are the current GA versions. Change only if Azure rejects them.
+  "apiVersion": "2026-10-01",
+  "edgeApiVersion": "2026-10-01",
+  // REQUIRED, at least one node. In the infrastructure file: nodes[].name and the management address of the port with
+  // role management and ip_assignment static (or dhcp_reservation).
+  "nodes": [
+    // name: the machine name. address: host name or IP address Sonar connects to for logs and the Arc probe.
+    // seed: true on ONE node: the seed node, whose deployment logs are read (default: the first node, with a warning).
+    // arcMachineName: optional; only when the Arc machine is named differently from the node.
+    { "name": "node01", "address": "192.0.2.11", "seed": true },
+    { "name": "node02", "address": "192.0.2.12" }
+  ],
+  // Optional. The event file azurelocal-ztp writes: <provisioning.simplified.evidence_path>/ztp-events.jsonl. Relative paths
+  // are relative to this file. Without it the ZTP lines and per-machine ZTP steps are not shown.
+  "ztpEvents": { "path": "D:\\Data\\azl-ztp\\example\\evidence\\ztp-events.jsonl" },
+  // Optional. Append the run to this recording (JSON Lines). Start-AzlSonar.ps1 -Record overrides it.
+  // "recordPath": "./recordings/clus01.jsonl",
+  // Optional. Where the deployment logs are read on the seed node. The defaults are shown.
+  "logs": {
+    "paths": [
+      "C:\\CloudContent\\MASLogs",
+      "C:\\MASLogs",
+      "C:\\CloudDeployment\\Logs",
+      "C:\\Observability",
+      "C:\\Windows\\System32\\Bootstrap\\Logs"
+    ],
+    "include": ["*.log", "*.txt", "*.xml"],   // file name patterns to follow
+    "exclude": ["*.etl"],                      // patterns to skip (may be empty)
+    "recurseDepth": 3,                         // 0 to 10, folder levels below each path
+    "activeWindowMinutes": 30,                 // 1 to 10080, a file is "active" if written within this time
+    "maxLinesPerPoll": 500,                    // 1 to 10000
+    "pollSeconds": 20,                         // 1 to 3600, default: pollSeconds above
+    "transport": "auto"                        // auto, winrm or ssh
+  },
+  // Optional, default {"source": "prompt"}: which account reads the logs on the seed node.
+  // prompt: Sonar asks at start. parameter: give -Credential to Start-AzlSonar.ps1. keyvault: read the NAMES below
+  // from Key Vault (vault, usernameSecret, passwordSecret are names, never values).
+  "credential": { "source": "prompt" }
+}

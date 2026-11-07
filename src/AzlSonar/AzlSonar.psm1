@@ -14,6 +14,12 @@ Export-ModuleMember -Function @(
     'ConvertTo-AzlSonarStepTree',
     'Get-AzlSonarPhaseGuidance',
     'Read-AzlSonarConfig',
+    'Test-AzlSonarConfig',
+    'Get-AzlSonarConfig',
+    'New-AzlSonarConfig',
+    'Add-AzlSonarNode',
+    'Remove-AzlSonarNode',
+    'ConvertTo-AzlSonarConfig',
     'Export-AzlSonarPublishableRecording',
     'Test-AzlSonarPublishableRecording',
     'Export-AzlSonarBundle'

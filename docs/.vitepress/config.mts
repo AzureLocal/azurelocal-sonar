@@ -18,7 +18,10 @@ export default defineConfig({
     ],
     sidebar: [
       { text: 'Home', link: '/' },
+      { text: 'Start here', link: '/start-here' },
       { text: 'Getting started', link: '/getting-started' },
+      { text: 'Running Sonar, by purpose', link: '/run' },
+      { text: 'Configuration', link: '/config' },
       { text: 'Following a ZTP run', link: '/ztp' },
       { text: 'How it works', link: '/how-it-works' },
       { text: 'Design', link: '/design' },

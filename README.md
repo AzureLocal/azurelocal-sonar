@@ -6,6 +6,7 @@ Beacon checks the environment before deployment. Sonar listens to the deployment
 
 > Status: new. See [repo-intent.md](repo-intent.md) and the [plan](docs/plan.md).
 
+- [Start here](#start-here)
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [Record and replay](#record-and-replay)
@@ -20,6 +21,38 @@ Beacon checks the environment before deployment. Sonar listens to the deployment
 - [Screenshots](#screenshots)
 - [Further reading](#further-reading)
 
+## Start here
+
+Sonar needs to know which cluster to watch. There are three ways, and all three end in the same configuration:
+
+1. **From the master infrastructure file (the default).** The `infrastructure.yml` (schema 5) that ZTP, OS configuration and the ARM deployment use. Nothing else to write.
+
+   ```powershell
+   Connect-AzAccount
+   ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml
+   ```
+
+   To keep a config file you can commit or edit: `ConvertTo-AzlSonarConfig -InfrastructureFile ./infrastructure.yml -OutFile ./config/clus01.json`.
+2. **Commands that fill in a config file.** `New-AzlSonarConfig -Path ./config/clus01.json -Interactive` asks for each value (and offers your subscriptions when you are signed in to Azure); `Add-AzlSonarNode`, `Remove-AzlSonarNode`, `Test-AzlSonarConfig` and `Get-AzlSonarConfig` edit and check the file. No password is asked for or stored.
+3. **A config file by hand (the older option).** Copy [`examples/sonar.config.commented.jsonc`](examples/sonar.config.commented.jsonc) (every key explained) and start with `-ConfigPath`.
+
+`./Start-AzlSonar.ps1` with no arguments prints these three ways with the exact commands and offers to run the guided setup.
+
+Then pick what you want to do:
+
+| I want to... | Page |
+| --- | --- |
+| Watch a ZTP run, per machine | [docs/run.md](docs/run.md#watch-a-ztp-run) |
+| Watch the OEM image or ISO route | [docs/run.md](docs/run.md#watch-the-oem-image-or-iso-route) |
+| Watch OS configuration and Validate | [docs/run.md](docs/run.md#watch-os-configuration-and-validate) |
+| Watch a deployment (steps, logs, WinRM or SSH) | [docs/run.md](docs/run.md#watch-a-deployment) |
+| Audit an existing cluster read-only | [docs/run.md](docs/run.md#read-only-audit-and-recording-of-an-existing-cluster) |
+| Run from a pipeline or unattended | [docs/run.md](docs/run.md#run-from-a-pipeline-or-an-unattended-session) |
+| Record and share a session, or restart mid-run | [docs/run.md](docs/run.md#record-and-share-a-session) |
+| Change the config (add a node, change route, new cluster) | [docs/config.md](docs/config.md#update-the-configuration) |
+| Know which `infrastructure.yml` keys Sonar reads | [docs/config.md](docs/config.md#from-the-master-infrastructureyml) |
+
+The full routing page is [docs/start-here.md](docs/start-here.md).
 ## Requirements
 
 On the workstation or jump server that runs Sonar:
@@ -59,7 +92,7 @@ There is nothing to install: no service, no database, no build step.
    Set-AzContext -Subscription '<subscription id>'
    ```
 
-2. Copy the example config and fill in your values (one file per cluster, kept outside the repo):
+2. Easiest: skip the config file and use `-InfrastructureFile ./infrastructure.yml` in step 4 (see [Start here](#start-here)). The older option is a config file; copy the example and fill in your values (one file per cluster, kept outside the repo; `New-AzlSonarConfig -Interactive` can write it for you):
 
    ```powershell
    New-Item -ItemType Directory -Force ./config | Out-Null   # git-ignored
@@ -92,14 +125,17 @@ There is nothing to install: no service, no database, no build step.
 4. Start Sonar:
 
    ```powershell
-   ./Start-AzlSonar.ps1 -ConfigPath ./config/clus01.json
+   ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml   # the master file
+   ./Start-AzlSonar.ps1 -ConfigPath ./config/clus01.json          # the older option
    ```
 
    It asks for the account that reads the logs (`credential.source: prompt`), starts the back end on `http://localhost:8642/` and opens the browser. Press Ctrl+C to stop.
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `-ConfigPath` | (required) | The cluster's config file. |
+| `-InfrastructureFile` | (none) | The master `infrastructure.yml` (schema 5). Sonar builds the configuration from it and tells you (log notice) when its node set changes. |
+| `-ConfigPath` | (none) | The cluster's config file (the older option). Give this or `-InfrastructureFile`; with neither, Sonar explains the options. |
+| `-PollSeconds` | `20` | Seconds between Azure polls (5 to 3600). Overrides the file. |
 | `-Port` | `8642` | Local port. Pick another if 8642 is taken (Sonar says so). |
 | `-Credential` | (none) | The log account; overrides `credential.source`. |
 | `-NoBrowser` | off | Do not open the browser. |
@@ -163,7 +199,7 @@ Token formats: `00000000-0000-0000-0000-000000000001` for GUIDs, `192.0.2.x`, `1
 
 ## Configuration reference
 
-Unknown fields are ignored. Sonar validates the file at start and lists every problem at once.
+Unknown fields are ignored. Sonar validates the file at start and lists every problem at once. The same reference with an example and what each key changes on the page, how to update the config, how the master `infrastructure.yml` maps to it and the common mistakes: [docs/config.md](docs/config.md).
 
 | Field | Required | Default | Meaning |
 | --- | --- | --- | --- |
