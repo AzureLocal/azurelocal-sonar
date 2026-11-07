@@ -1,6 +1,10 @@
+import { cpSync } from 'node:fs'
+import { join } from 'node:path'
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
+  // The approved UI mockups (docs/design/*.html and *.png) are not Markdown: copy them next to the built pages so the links work.
+  buildEnd: (siteConfig) => { cpSync(join(siteConfig.srcDir, 'design'), join(siteConfig.outDir, 'design'), { recursive: true }) },
   ignoreDeadLinks: true,
   base: '/azurelocal-sonar/',
   title: 'AzL Sonar',
