@@ -27,6 +27,13 @@ features:
     details: Beacon checks the environment before deployment. Sonar listens while it runs.
 ---
 
+## Run it and configure it
+
+- [Start here](/start-here): pick your purpose; the three ways to configure Sonar (the master `infrastructure.yml`, guided prompts, a file by hand).
+- [Running Sonar, by purpose](/run) and [stage by stage](/stages): the commands, what the page shows, what done and failed look like and the access needed, for each ZTP stage, Validate, Deployment, Update, Health, add node and repair, and replay.
+- [Log access](/log-access): the account and folders for every phase, and how Sonar reaches the node.
+- [Configuration](/config): every key, the master-file mapping, and how to update the file (`Set-AzlSonarConfig`).
+
 ## Reference
 
 - [Appendix A: Sonar API and commands](/appendix/a-sonar-api): every HTTP route, exported command, config key, file Sonar reads or writes, and every Azure read it makes.

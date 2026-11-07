@@ -36,7 +36,7 @@ The row under the top bar has one tile per mode: **Provisioning (ZTP)**, **Valid
 
 - The tile of the mode that is happening now is selected when the page opens. Click any tile to look at another mode: the summary box and the Steps box switch to it.
 - A tile that has not started is grey and has no state line. Hover it to see when it starts (*Starts after validation passes*).
-- A mode that does not apply is hidden. On the OEM image route the first tile reads **Provisioning (OS image)** instead of *Provisioning (ZTP)*; a run that has no machine data does not show it at all.
+- There are always five tiles. On the OEM image route the first tile reads **Provisioning (OS image)** instead of *Provisioning (ZTP)*. A run Sonar joined after provisioning has no machine data: the first tile is grey and its hover text says so (Sonar cannot tell whether provisioning was done, so it does not tick it).
 
 ## The summary box
 
@@ -72,7 +72,7 @@ The **Log access** button opens a window with everything about reading the node 
 
 ![The Help box](images/tour-help.png)
 
-The **?** button shows the Sonar version, links to the documentation (running Sonar for each purpose, updating the config, troubleshooting) and the GitHub repository, and the license. The version and the links come from the Sonar back end.
+The **?** button shows the Sonar version, links to the documentation (running Sonar stage by stage, updating the config, troubleshooting) and the GitHub repository, and the license. The version and the links come from the Sonar back end.
 
 ## Dark theme and narrow screens
 

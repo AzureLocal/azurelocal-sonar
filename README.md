@@ -34,7 +34,7 @@ Sonar needs to know which cluster to watch. There are three ways, and all three 
    ```
 
    To keep a config file you can commit or edit: `ConvertTo-AzlSonarConfig -InfrastructureFile ./infrastructure.yml -OutFile ./config/clus01.json`.
-2. **Commands that fill in a config file.** `New-AzlSonarConfig -Path ./config/clus01.json -Interactive` asks for each value (and offers your subscriptions when you are signed in to Azure); `Add-AzlSonarNode`, `Remove-AzlSonarNode`, `Test-AzlSonarConfig` and `Get-AzlSonarConfig` edit and check the file. No password is asked for or stored.
+2. **Commands that fill in a config file.** `New-AzlSonarConfig -Path ./config/clus01.json -Interactive` asks for each value (and offers your subscriptions when you are signed in to Azure); `Add-AzlSonarNode`, `Remove-AzlSonarNode`, `Set-AzlSonarConfig` (any one key, checked before it is written), `Test-AzlSonarConfig` and `Get-AzlSonarConfig` edit and check the file. No password is asked for or stored.
 3. **A config file by hand (the older option).** Copy [`examples/sonar.config.commented.jsonc`](examples/sonar.config.commented.jsonc) (every key explained) and start with `-ConfigPath`.
 
 `./Start-AzlSonar.ps1` with no arguments prints these three ways with the exact commands and offers to run the guided setup.
@@ -47,6 +47,9 @@ Then pick what you want to do:
 | Watch the OEM image or ISO route | [docs/run.md](docs/run.md#watch-the-oem-image-or-iso-route) |
 | Watch OS configuration and Validate | [docs/run.md](docs/run.md#watch-os-configuration-and-validate) |
 | Watch a deployment (steps, logs, WinRM or SSH) | [docs/run.md](docs/run.md#watch-a-deployment) |
+| Understand each ZTP stage (Boot, Bootstrap, Vouchers and claim, Install OS, Device, Network, Restore, Handoff) | [docs/stages.md](docs/stages.md) |
+| Which account and folders read the logs in each phase (the Log access window) | [docs/log-access.md](docs/log-access.md) |
+| Follow an update, add node or repair, or look at a deployed cluster (Health) | [docs/run.md](docs/run.md#follow-an-update) |
 | Audit an existing cluster read-only | [docs/run.md](docs/run.md#read-only-audit-and-recording-of-an-existing-cluster) |
 | Run from a pipeline or unattended | [docs/run.md](docs/run.md#run-from-a-pipeline-or-an-unattended-session) |
 | Record and share a session, or restart mid-run | [docs/run.md](docs/run.md#record-and-share-a-session) |
@@ -391,7 +394,7 @@ Demo data (example names only); the [tour of the page](docs/tour.md) explains ea
 
 ## Further reading
 
-- [Tour of the page](docs/tour.md), [Getting started](docs/getting-started.md) and [How it works](docs/how-it-works.md)
+- [Tour of the page](docs/tour.md), [Getting started](docs/getting-started.md), [Running Sonar stage by stage](docs/stages.md), [Log access](docs/log-access.md) and [How it works](docs/how-it-works.md)
 - [Design](docs/design.md): the API, data model and behaviour contract
 - Appendices: [A. Sonar API and commands](docs/appendix/a-sonar-api.md) (every HTTP route, exported command, config key, file, and Azure read) and [B. The Azure Local Configurator app API](docs/appendix/b-configurator-app-api.md) (every operation of the service the Configurator app uses, with how we know each one; not a supported API)
 - [Research](docs/research.md): Microsoft Learn sources and what was verified live

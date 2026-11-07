@@ -4,7 +4,7 @@ One section per purpose. Each lists the commands, what Sonar shows, what to expe
 
 In every command, `-InfrastructureFile ./infrastructure.yml` (the master file, the default way) can be replaced by `-ConfigPath ./config/clus01.json` (the older option). How the two are configured: [Start here](./start-here.md#three-ways-to-configure-sonar).
 
-Access for each purpose is summarised in its section. The full picture, which roles and network paths a run needs, is in the toolkit's [access and connectivity](https://github.com/AzureLocal/azurelocal-toolkit/blob/main/docs/access-and-connectivity.md) page.
+The ZTP run has a page of its own for each stage (Boot, Bootstrap, Vouchers and the claim, Install OS, Device, Network, Restore, Handoff): [Running Sonar, stage by stage](./stages.md); the Log access window (which account and folders for each phase) is explained in [Log access](./log-access.md). Access for each purpose is summarised in its section. The full picture, which roles and network paths a run needs, is in the toolkit's [access and connectivity](https://github.com/AzureLocal/azurelocal-toolkit/blob/main/docs/access-and-connectivity.md) page.
 
 ## Watch a ZTP run
 
@@ -69,6 +69,52 @@ Connect-AzAccount
 **WinRM or SSH.** Logs are read from the seed node with `logs.transport`: `auto` (WinRM first, then SSH), `winrm` or `ssh`. SSH needs the Posh-SSH module on the workstation (`Install-Module Posh-SSH -Scope CurrentUser`), `sshd` on the node and a credential. WinRM needs port 5985/5986 and, for IP addresses or workgroup nodes, `TrustedHosts`. If neither works, Sonar still runs: the step tree and node status come from Azure, and the log pane says why the logs are unavailable.
 
 **Access:** Reader on the resource group; the log account in the seed node's local Administrators; network path from the Sonar workstation to the seed node's management address on 5985/5986 (WinRM) or 22 (SSH).
+
+## Follow an update
+
+**When:** the cluster is deployed and a solution update is available or installing. The **Update** tile of the page is for this.
+
+```powershell
+Connect-AzAccount
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml
+```
+
+With the default `track: auto` (and `updateTrack: auto`) Sonar reads the update resources once the deployment is done and follows an update when Azure reports one. To follow it from the start, or when Azure has not reported it yet, use a config file with `track: update` (`ConvertTo-AzlSonarConfig -InfrastructureFile ./infrastructure.yml -OutFile ./config/clus01.json`, then `Set-AzlSonarConfig -Path ./config/clus01.json -Key track -Value update`). `updateTrack: off` never reads the update resources.
+
+**What Sonar shows:** the **Update** mode with the update run's steps (status, start and end, duration, error text, from `updateRuns`), a summary of what Azure says about the update (available, preparing, installing, failed, needs attention), and the node log of the seed node as it is written. The tab *Update* of [Log access](./log-access.md) names the account (the deployment local admin, or the LCM user on Active Directory) and the folders. A failed update can be resumed in the portal; Sonar only reports it.
+
+**Access:** Reader on the resource group; for the node logs an account in the seed node's local Administrators.
+
+## Look at a deployed cluster (Health)
+
+**When:** the cluster is deployed and you want to see its state without touching it.
+
+```powershell
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml
+```
+
+**What Sonar shows:** the **Health** mode: each machine's Azure Arc status (*N of M connected*). Sonar runs no health checks and shows no steps here; the Steps box says so. The status chip says *Done* for a finished deployment.
+
+**Access:** Reader on the resource group.
+
+## Follow add node or repair
+
+Azure has no resource that lists the steps of an Add-Server or Repair-Server, so Sonar follows these by the node log and the Arc machines. Use a config file and set the track, then start Sonar before you run the command on the cluster:
+
+```powershell
+Set-AzlSonarConfig -Path ./config/clus01.json -Key track -Value add-node      # or: repair
+./Start-AzlSonar.ps1 -ConfigPath ./config/clus01.json -Credential (Get-Credential)
+```
+
+**What Sonar shows:** the **Health** mode with the Arc status of each machine, the live logs from the seed node, and the *Add node* or *Repair* tab of [Log access](./log-access.md) with the account, folders and the commands to check progress. **Access:** Reader on the resource group; the account the tab names in the seed node's local Administrators.
+
+## Learn the page without a deployment (demo and replay)
+
+```powershell
+./Start-AzlSonar.ps1 -Replay ./tests/fixtures/recording-sample.jsonl -Port 8642     # no Azure, no node
+```
+
+Open `http://localhost:8642/?demo=1` (a running deployment), `?demo=1&route=simplified` (a ZTP run of three machines), `?demo=1&route=oem` (the OEM image route) or `?demo=1&replay=1` (the replay controls with a built-in recording). The demo uses built-in sample data and example names, and makes no API calls except for the Help box and Log access text.
 
 ## Read-only audit and recording of an existing cluster
 
