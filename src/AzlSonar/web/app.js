@@ -607,8 +607,8 @@
     var route = provRouteOf(s), machines = provMachines(s);
     var active = activeModeId(s), order = MODE_IDS.indexOf(active), phase = normPhase(s.phase);
     var out = [];
-    function tile(id, status, line, hidden) {
-      out.push({ id: id, name: modeName(id, route), status: status, line: line || '', tip: status === 'idle' ? modeWhen(id, route) : '', hidden: !!hidden });
+    function tile(id, status, line, hidden, tip) {
+      out.push({ id: id, name: modeName(id, route), status: status, line: line || '', tip: tip || (status === 'idle' ? modeWhen(id, route) : ''), hidden: !!hidden });
     }
 
     var psum = provisioningSummary(provisioningTreeOf(s));
@@ -617,10 +617,12 @@
     var pst, pline = '';
     if (psum.failed) { pst = 'err'; pline = psum.ready + ' of ' + psum.total + ' ' + unit + ', ' + psum.failed + ' failed'; }
     else if (psum.total && psum.ready === psum.total) { pst = 'ok'; pline = ztpComplete(s) ? 'ZTP complete' : counted; }
+    else if ((order > 0 || phase === 'done') && !psum.total && !machines.length && !route) { pst = 'idle'; }   // Sonar saw no machines: it cannot say provisioning is done
     else if (order > 0 || phase === 'done') { pst = 'ok'; pline = psum.total ? counted : 'Done'; }
     else if (active === 'prov') { pst = 'run'; pline = psum.total ? counted : 'Waiting for the machines'; }
     else pst = 'idle';
-    tile('prov', pst, pline, !machines.length && !route && active !== 'prov');
+    // Always five tiles. With no machine data (a run Sonar joined after provisioning) the tile is grey and its tip says why.
+    tile('prov', pst, pline, false, pst === 'idle' && order > 0 ? 'No machine data in this run: Sonar started after provisioning, or the resource group has no edge machines.' : '');
 
     [['validate', s.validation, 1], ['deploy', s.deployment, 2]].forEach(function (x) {
       var sec = isObj(x[1]) ? x[1] : null, st = sec ? sectionStatus(sec) : 'notstarted', pr = stepProgress(sec && sec.tree);

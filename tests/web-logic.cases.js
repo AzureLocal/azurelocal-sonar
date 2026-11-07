@@ -724,13 +724,17 @@ test('modeStates: Provisioning is named after the route; the OEM image route say
   eq(m.modeStates(s)[1].tip, 'Starts when every machine is registered');
 });
 
-test('modeStates: Provisioning is hidden when the run has no machines and is past it (a plain deployment)', function () {
+test('modeStates: there are always five tiles; Provisioning is grey with a reason when the run has no machines and is past it (a plain deployment)', function () {
   var s = { phase: 'deployment', activePhase: 'deployment', validation: { status: 'Success', tree: [{ id: '1', name: 'v', status: 'success', children: [] }] },
     deployment: { status: 'InProgress', tree: [{ id: '2', name: 'Deploy', status: 'running', children: [
       { id: '2.1', name: 'a', status: 'success', children: [] }, { id: '2.2', name: 'b', status: 'running', children: [] }, { id: '2.3', name: 'c', status: 'notstarted', children: [] }] }] } };
   var tiles = m.modeStates(s);
-  eq(tiles[0].hidden, true);
-  eq(tiles.map(function (t) { return t.status; }), ['ok', 'ok', 'run', 'idle', 'idle']);
+  eq(tiles.length, 5);
+  eq(tiles.some(function (t) { return t.hidden; }), false);
+  eq(tiles[0].status, 'idle');
+  eq(tiles[0].line, '');
+  eq(/No machine data/.test(tiles[0].tip), true);
+  eq(tiles.map(function (t) { return t.status; }), ['idle', 'ok', 'run', 'idle', 'idle']);
   eq(tiles[1].line, 'Passed');
   eq(tiles[2].line, 'Step 2 of 3');
 });
