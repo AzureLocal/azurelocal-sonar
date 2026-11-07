@@ -192,7 +192,7 @@ Invoke-RestMethod -Uri 'http://localhost:8642/api/config' -WebSession $sonar
 **Verified live** (replay; the links are trimmed here):
 
 ```json
-{"name":"AzL Sonar","version":"0.4.0","summary":"Watches an Azure Local build from provisioning to deployment.","links":[{"id":"docs","label":"Documentation","url":"https://azurelocal.cloud/azurelocal-sonar/"},{"id":"run","label":"Running Sonar for each purpose","url":"https://azurelocal.cloud/azurelocal-sonar/run"},{"id":"github","label":"Release notes and source on GitHub","url":"https://github.com/AzureLocal/azurelocal-sonar"}]}
+{"name":"AzL Sonar","version":"0.4.0","summary":"Watches an Azure Local build from provisioning to deployment.","links":[{"id":"docs","label":"Documentation","url":"https://azurelocal.cloud/azurelocal-sonar/"},{"id":"run","label":"Running Sonar, stage by stage","url":"https://azurelocal.cloud/azurelocal-sonar/stages"},{"id":"github","label":"Release notes and source on GitHub","url":"https://github.com/AzureLocal/azurelocal-sonar"}]}
 ```
 
 ```powershell

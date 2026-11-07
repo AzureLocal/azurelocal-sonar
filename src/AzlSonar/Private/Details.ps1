@@ -25,7 +25,7 @@ function Get-AzlSonarAbout {
         summary = 'Watches an Azure Local build from provisioning to deployment.'
         links   = @(
             [ordered]@{ id = 'docs'; label = 'Documentation'; url = $base }
-            [ordered]@{ id = 'run'; label = 'Running Sonar for each purpose'; url = $base + 'run' }
+            [ordered]@{ id = 'run'; label = 'Running Sonar, stage by stage'; url = $base + 'stages' }
             [ordered]@{ id = 'config'; label = 'Updating the config'; url = $base + 'config#update-the-configuration' }
             [ordered]@{ id = 'troubleshooting'; label = 'Troubleshooting'; url = $base + 'getting-started#if-something-does-not-work' }
             [ordered]@{ id = 'github'; label = 'Release notes and source on GitHub'; url = $script:AzlSonarRepoUrl }

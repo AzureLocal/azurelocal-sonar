@@ -72,7 +72,7 @@ The **Log access** button opens a window with everything about reading the node 
 
 ![The Help box](images/tour-help.png)
 
-The **?** button shows the Sonar version, links to the documentation (running Sonar for each purpose, updating the config, troubleshooting) and the GitHub repository, and the license. The version and the links come from the Sonar back end.
+The **?** button shows the Sonar version, links to the documentation (running Sonar stage by stage, updating the config, troubleshooting) and the GitHub repository, and the license. The version and the links come from the Sonar back end.
 
 ## Dark theme and narrow screens
 

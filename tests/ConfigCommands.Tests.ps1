@@ -149,15 +149,11 @@ Describe 'Set-AzlSonarConfig (change one key of a config file)' {
 }
 
 Describe 'Guided setup (New-AzlSonarConfig -Interactive)' {
-    AfterEach {
-        Remove-Variable -Name SonarTestAnswers -Scope Global -ErrorAction SilentlyContinue
-        Remove-Variable -Name SonarTestPrompts -Scope Global -ErrorAction SilentlyContinue
-    }
-
     It 'asks for each value, pre-fills from the Az context, and never asks for a password' {
-        $global:SonarTestAnswers = [System.Collections.Queue]::new(@('2', '', 'clus01', 'simplified', '', 'D:\ztp\ztp-events.jsonl', '30', 'node01', '192.0.2.11', 'node02', '192.0.2.12', ''))
-        $global:SonarTestPrompts = [System.Collections.Generic.List[string]]::new()
-        Mock -ModuleName AzlSonar Read-Host { $global:SonarTestPrompts.Add([string]$Prompt); [string]$global:SonarTestAnswers.Dequeue() }
+        # The mock runs in the module's scope: a closure carries the queue and the list in without a global variable.
+        $answers = [System.Collections.Queue]::new(@('2', '', 'clus01', 'simplified', '', 'D:\ztp\ztp-events.jsonl', '30', 'node01', '192.0.2.11', 'node02', '192.0.2.12', ''))
+        $prompts = [System.Collections.Generic.List[string]]::new()
+        Mock -ModuleName AzlSonar Read-Host ({ $prompts.Add([string]$Prompt); [string]$answers.Dequeue() }.GetNewClosure())
         Mock -ModuleName AzlSonar Get-AzlSonarAzChoice { @{ SubscriptionId = '11111111-2222-3333-4444-555555555555'; ResourceGroup = 'rg-from-context'; Subscriptions = @(@{ Id = '11111111-2222-3333-4444-555555555555'; Name = 'sub-one' }, @{ Id = '66666666-7777-8888-9999-000000000000'; Name = 'sub-two' }) } }
         $path = Join-Path $TestDrive 'wizard.json'
         $null = New-AzlSonarConfig -Path $path -Interactive 6>$null
@@ -171,13 +167,13 @@ Describe 'Guided setup (New-AzlSonarConfig -Interactive)' {
         $config.ztpEventsPath | Should -Be 'D:\ztp\ztp-events.jsonl'
         ($config.nodes | ForEach-Object name) | Should -Be @('node01', 'node02')
         $config.seedNode.name | Should -Be 'node01'
-        ($global:SonarTestPrompts -join '|') | Should -Not -Match '(?i)password|secret'
+        ($prompts -join '|') | Should -Not -Match '(?i)password|secret'
         (Get-Content -LiteralPath $path -Raw) | Should -Not -Match '(?i)"password"|secretValue'
     }
 
     It 'asks again after an invalid answer' {
-        $global:SonarTestAnswers = [System.Collections.Queue]::new(@('not-a-guid', '11111111-2222-3333-4444-555555555555', 'rg-x', 'c1', 'oem-image', '', '30', 'n1', '192.0.2.1', ''))
-        Mock -ModuleName AzlSonar Read-Host { [string]$global:SonarTestAnswers.Dequeue() }
+        $answers = [System.Collections.Queue]::new(@('not-a-guid', '11111111-2222-3333-4444-555555555555', 'rg-x', 'c1', 'oem-image', '', '30', 'n1', '192.0.2.1', ''))
+        Mock -ModuleName AzlSonar Read-Host ({ [string]$answers.Dequeue() }.GetNewClosure())
         Mock -ModuleName AzlSonar Get-AzlSonarAzChoice { @{ SubscriptionId = ''; ResourceGroup = ''; Subscriptions = @() } }
         $path = Join-Path $TestDrive 'wizard2.json'
         $null = New-AzlSonarConfig -Path $path -Interactive 6>$null
