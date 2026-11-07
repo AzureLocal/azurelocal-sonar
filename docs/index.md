@@ -26,3 +26,8 @@ features:
   - title: Pairs with Beacon
     details: Beacon checks the environment before deployment. Sonar listens while it runs.
 ---
+
+## Reference
+
+- [Appendix A: Sonar API and commands](/appendix/a-sonar-api): every HTTP route, exported command, config key, file Sonar reads or writes, and every Azure read it makes.
+- [Appendix B: The Azure Local Configurator app API](/appendix/b-configurator-app-api): every operation of the service the Configurator app uses, what it does, and how we know (not a supported API).

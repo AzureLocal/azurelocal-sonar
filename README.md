@@ -393,6 +393,7 @@ Demo data (example names only); the [tour of the page](docs/tour.md) explains ea
 
 - [Tour of the page](docs/tour.md), [Getting started](docs/getting-started.md) and [How it works](docs/how-it-works.md)
 - [Design](docs/design.md): the API, data model and behaviour contract
+- Appendices: [A. Sonar API and commands](docs/appendix/a-sonar-api.md) (every HTTP route, exported command, config key, file, and Azure read) and [B. The Azure Local Configurator app API](docs/appendix/b-configurator-app-api.md) (every operation of the service the Configurator app uses, with how we know each one; not a supported API)
 - [Research](docs/research.md): Microsoft Learn sources and what was verified live
 - [Publishable recordings](docs/reference/publishable-recordings.md) and the [event feed](docs/reference/events.md) (the JSON Lines contract other tools can emit, and how to launch Sonar from a deployment pipeline)
 - Export bundle: `./scripts/Export-SonarBundle.ps1 -Recording <file> -OutDirectory <dir>` writes a timeline JSON and a self-contained HTML report from any recording.
