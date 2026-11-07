@@ -18,6 +18,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 * **provisioning:** with the ZTP event file, a machine is done when Azure reports it Provisioned, its Network step succeeded, and its Restore step succeeded or is not applicable. Restore is not applicable when the stage ends (its `StageCompleted`, or Handoff) with no events for the machine. Until then the machine stays running at 95%.
 * **provisioning:** `provisioning.ztpComplete` (all machines done) and `provisioning.nextStep` (`OS configuration` and its guide, https://azurelocal.cloud). Each machine has a `ztp` entry with its Device, Network and Restore step status.
 * **web:** when ZTP is complete, the phase chip reads **ZTP complete**, the status reads "ZTP complete: N of N machines provisioned. OS configuration next", and a note under the header links the OS configuration guide.
+* **web:** the page is rebuilt (see [Tour of the page](docs/tour.md)). The top bar has the cluster name, **ⓘ Details**, the run status with elapsed time and "updated N s ago", **Log access** (with a dot: live, Azure only, none), Export, a **?** button (version, documentation links, license) and the theme toggle. One tile per mode (Provisioning (ZTP) or (OS image), Validate, Deployment, Update, Health) selects what the summary box and the Steps box show. A summary box with a card per machine (full name, plain-word state, Arc connection, what it waits on, progress; a click filters the steps and the logs to that machine). Steps carry a description and an **Azure** badge. The Steps box and the Live logs box fill the window height and scroll inside; on a narrow screen they stack.
+* **web:** **Details** shows what Sonar collected and is using (target, mode, nodes, sources, config), each value with where it came from and how old it is; secrets are never shown and the subscription only as its first 8 characters.
+* **web:** Log access is a window opened from the top bar (a tab per phase), no longer a panel on the page.
+* **api:** read-only `GET /api/about` (Sonar version from the module manifest and the documentation links) and `GET /api/details` (what Sonar collected and is using).
+* **config:** optional `location` (infrastructure file: `azure.location`), shown in Details.
+* **demo:** `?demo=1&route=simplified` is a ZTP run of three machines (two done, one installing the OS), with ZTP events in the logs.
+
+### Fixed
+
+* **web:** clicking a provisioning step such as *Register machine* or *Install OS* left the live logs empty ("No lines match the current filters"). Cause: every step offered a time-window log filter, but a step that runs in Azure writes nothing to a node log, so its window held no line. Azure steps now show their details under the step and never filter the logs; node steps filter by machine and time window (or, for a ZTP stage, by the ZTP event lines of that stage); and an empty result says why and offers **Show all lines for this node** and **Clear filter**.
 
 ### Changed
 

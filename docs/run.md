@@ -19,14 +19,14 @@ The ZTP event file is `<provisioning.simplified.evidence_path>/ztp-events.jsonl`
 
 **What Sonar shows** (page at `http://localhost:8642/`):
 
-- The phase chip **Provisioning**, one entry per machine in the **Provisioning** panel: lifecycle chip, progress bar, Arc machine, lifecycle message.
+- The **Provisioning (ZTP)** mode: a card per machine (its full name, its state in plain words, the Arc connection, what it waits on, a progress bar while it runs) and the Steps box with the machine's steps. See the [tour of the page](tour.md).
 - Per machine, three ZTP steps from the event file:
   - **Management address (maintenance environment)** (stage Device): before the Azure claim, ZTP sets the static management address on the port with the management MAC. Shown before the edge machine exists. Skipped when the machine has no maintenance address; the next step does the job then.
   - **Management address on the management NIC** (stage Network): after the OS install, the address is moved to the management NIC through the edge machine's per-NIC API.
   - **BIOS restored** (stage Restore): where ZTP set temporary BIOS values for the install (for example a Fibre Channel HBA off), it puts the final values back, restarts the machine and waits for Arc to reconnect. Not applicable when a machine has no temporary values.
-- Live log pane: the `[ztp]` event lines, coloured by level. Choose the file `ztp-events` to see only them.
+- Live log pane: the `[ztp]` event lines, coloured by level. Click a machine's card to see only its lines, or a ZTP step to see the events of that stage. Choose the file `ztp-events` to see only the event lines.
 
-**What the end looks like.** A machine is done when Azure reports it Provisioned, its Network step succeeded and its Restore step succeeded or is not applicable. When every machine is done the chip reads **ZTP complete** and the status "ZTP complete: N of N machines provisioned. OS configuration next". That means: ZTP's job is over (it writes files only after this), and the next step is OS configuration (OEM drivers, `C:\SBE`, DHCP off, DNS and time, the deployment admin), then Validate. Nothing is wrong when Sonar sits there: start OS configuration. A failed state turns the machine red with the event's text; fix it, rerun that ZTP stage, and the machine goes on from there.
+**What the end looks like.** A machine is done when Azure reports it Provisioned, its Network step succeeded and its Restore step succeeded or is not applicable. When every machine is done the cards read **ZTP complete** with *Next: OS configuration*, and the summary says "ZTP is complete: all N machines are provisioned. Next: OS configuration". That means: ZTP's job is over (it writes files only after this), and the next step is OS configuration (OEM drivers, `C:\SBE`, DHCP off, DNS and time, the deployment admin), then Validate. Nothing is wrong when Sonar sits there: start OS configuration. A failed state turns the machine red with the event's text; fix it, rerun that ZTP stage, and the machine goes on from there.
 
 **Access:** Reader on the resource group of the edge machines and on the managed resource group that holds their Arc machines (Reader on the subscription covers both); Az.Accounts signed in; read access to the event file's folder. No access to the machines is needed during provisioning: there are no logs to read yet, so cancel the credential prompt (Sonar uses your Windows identity). Details: [ztp.md](./ztp.md).
 
@@ -39,7 +39,7 @@ Connect-AzAccount
 ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml
 ```
 
-**What Sonar shows:** the phase chip **Arc registration**, the same panel per machine with the node's own step groups: *OS image update*, *Bootstrap* and *Azure registration*, with step counters, live timers and the error text. It ends with **Ready for Validate**. Sonar reads the status on each machine (a node probe over WinRM or SSH), so unlike the ZTP route it needs access to the machines.
+**What Sonar shows:** the **Provisioning (OS image)** mode, the same cards and a Steps box per machine with the node's own step groups: *OS image update*, *Bootstrap* and *Azure registration*, with step counters, live timers and the error text. It ends with **Ready for Validate**. Sonar reads the status on each machine (a node probe over WinRM or SSH), so unlike the ZTP route it needs access to the machines.
 
 **What to do:** wait for every machine to reach Ready for Validate; if one fails, the failed step shows its text. Then continue with OS configuration if it is not done, and Validate.
 
@@ -64,7 +64,7 @@ Connect-AzAccount
 ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Credential (Get-Credential)
 ```
 
-**What Sonar shows:** the phase **Deployment** with the nested step tree (steps within steps) with status, times, durations and errors; the **live logs** from the seed node (the first node in the master file, or the node marked `seed: true`), with filters by level, text, file and step; the **Log access** card (which account and folders for this phase). If Azure lags behind the node (the step list says *Deploy not started* while the node is running), Sonar labels the step the node log shows. When the deployment succeeds the phase is **Done**.
+**What Sonar shows:** the phase **Deployment** with the nested step tree (steps within steps) with status, times, durations and errors; the **live logs** from the seed node (the first node in the master file, or the node marked `seed: true`), with filters by level, text, file and step; the **Log access** window (which account and folders for each phase, opened from the top bar). If Azure lags behind the node (the step list says *Deploy not started* while the node is running), Sonar labels the step the node log shows. When the deployment succeeds the phase is **Done**.
 
 **WinRM or SSH.** Logs are read from the seed node with `logs.transport`: `auto` (WinRM first, then SSH), `winrm` or `ssh`. SSH needs the Posh-SSH module on the workstation (`Install-Module Posh-SSH -Scope CurrentUser`), `sshd` on the node and a credential. WinRM needs port 5985/5986 and, for IP addresses or workgroup nodes, `TrustedHosts`. If neither works, Sonar still runs: the step tree and node status come from Azure, and the log pane says why the logs are unavailable.
 

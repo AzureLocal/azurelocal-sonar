@@ -520,7 +520,13 @@
   };
   var MODE_TITLE = { validate: 'Validate', deploy: 'Deployment', update: 'Update', health: 'Health' };
 
-  function provRouteOf(state) { return isObj(state) && isObj(state.provisioning) ? str(state.provisioning.route) : ''; }
+  // The provisioning route the run follows: the one the state names, else what the phase says (Arc registration is the
+  // OEM image route's machine phase).
+  function provRouteOf(state) {
+    var r = isObj(state) && isObj(state.provisioning) ? str(state.provisioning.route) : '';
+    if (!r && isObj(state) && (normPhase(state.phase) === 'arc-registration' || str(state.activePhase).toLowerCase() === 'arc-registration')) return 'oem-image';
+    return r;
+  }
   function provMachines(state) { return isObj(state) && isObj(state.provisioning) ? arr(state.provisioning.nodes).filter(isObj) : []; }
 
   // Provisioning is named after its route: ZTP on the simplified route, the OS image on the OEM image route.
@@ -732,7 +738,7 @@
       else if (readyForValidate(s)) out.headline = 'All ' + sum.total + ' machines are registered. Next: Validate';
       else if (zDone) out.headline = 'ZTP is complete: all ' + sum.total + ' machines are provisioned. Next: OS configuration';
       else if (failed.length) out.headline = head + ': ' + failed[0].name + ' is blocked (' + failed[0].waits + ')' + (failed.length > 1 ? ' and ' + (failed.length - 1) + ' more failed' : '');
-      else if (busy.length) out.headline = head + ': ' + busy[0].name + ' is ' + busy[0].activity + (busy.length > 1 ? ' and ' + (busy.length - 1) + ' more are working' : '');
+      else if (busy.length) out.headline = head + ': ' + busy[0].name + ' is ' + busy[0].activity + (busy.length > 1 ? ' and ' + (busy.length - 1) + ' more ' + (busy.length === 2 ? 'is' : 'are') + ' working' : '');
       else out.headline = head;
       return out;
     }
@@ -1774,6 +1780,11 @@
     if (!host) return;
     var sm = summaryFor(app.state, currentModeId(), app.config);
     app.summary = sm;
+    // an unchanged summary is left alone, so a poll never takes the keyboard focus off a card
+    var sig = JSON.stringify([sm, app.filter.node, !!app.state]);
+    if (host.getAttribute('data-sig') === sig) return;
+    host.setAttribute('data-sig', sig);
+    var focusedCard = document.activeElement && host.contains(document.activeElement) ? document.activeElement.getAttribute('data-node') : null;
     host.textContent = '';
     var head = el('div', { class: 'sumh' }, [
       el('span', { class: 'eyebrow', id: 'sum-title', text: sm.title }),
@@ -1805,6 +1816,7 @@
     });
     host.appendChild(cards);
     host.setAttribute('data-empty', String(!sm.cards.length));
+    if (focusedCard) { var fc = cards.querySelector('[data-node="' + cssEscape(focusedCard) + '"]'); if (fc) fc.focus(); }
   }
 
   function updateSummaryMeta() {
@@ -2762,7 +2774,7 @@
 
   function loadAbout() {
     if (app.about) { renderHelp(); return Promise.resolve(); }
-    return getJSON('/api/about').then(function (a) { if (isObj(a)) { app.about = a; renderHelp(); } }, function () { renderHelp(); });
+    return getJSON('/api/about').then(function (a) { if (isObj(a)) { app.about = a; renderHelp(); if (app.details) renderDetails(); } }, function () { renderHelp(); });
   }
 
   function renderHelp() {

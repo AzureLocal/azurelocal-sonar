@@ -14,6 +14,10 @@ Pick what you want to do. Each purpose has its own section in [Running Sonar](./
 | Restart Sonar in the middle of a run | [Restart mid-run](./run.md#restart-sonar-mid-run) |
 | Change the config: add a node, change the route, point it at another cluster | [Update the configuration](./config.md#update-the-configuration) |
 
+## What you will see
+
+A top bar (cluster, status, **Details**, **Log access**), one tile per mode (Provisioning, Validate, Deployment, Update, Health), a summary with a card per machine, the steps of the selected mode and the live logs. The [tour of the page](tour.md) explains each part with screenshots; **Details** in the top bar shows what Sonar read from your configuration and where it came from.
+
 ## Three ways to configure Sonar
 
 All three end in the same configuration object, so everything after the start behaves the same.

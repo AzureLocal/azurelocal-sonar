@@ -143,7 +143,7 @@ There is nothing to install: no service, no database, no build step.
 | `-Publishable` | off | With `-Record`: also replace every identifier with a stable pseudonym, so the recording can be shared. Needs a new file. See [Share a recording](#share-a-recording-publishable). |
 | `-ExtraTerm` | (none) | With `-Publishable`: extra strings that must never appear (a company or site name). |
 
-Add `?demo=1` to the page URL to see the page with built-in sample data (no API calls): a running deployment. `?demo=1&route=simplified` shows three machines on simplified machine provisioning (one provisioned, one installing the OS, one failed at `InstallExtensions`); `?demo=1&route=oem` shows two machines registering on the OEM image route (one updating its OS image, in `Download`; one bootstrapping, in `ArcConfiguration > ArcRegistration`). `?demo=1&replay=1` plays the demo deployment as a built-in recording, so you can try the replay controls without a file.
+Add `?demo=1` to the page URL to see the page with built-in sample data (a running deployment). `?demo=1&route=simplified` is a ZTP run of three machines (example names `iic-azl-n01` to `n03`): two are done, the third is installing the OS, and the ZTP events are in the logs. `?demo=1&route=oem` shows two machines registering on the OEM image route (one updating its OS image, in `Download`; one bootstrapping, in `ArcConfiguration > ArcRegistration`). `?demo=1&replay=1` plays the demo deployment as a built-in recording, so you can try the replay controls without a file. Add `#details`, `#logaccess` or `#help` to open the Details pop-down, the Log access window or the Help box. Demo mode makes no API call of its own; when a Sonar back end serves the page it reads `/api/about` and `/api/guidance` only, to show the real version, links and phase guidance.
 
 ## Record and replay
 
@@ -311,7 +311,7 @@ Also on the nodes, not tailed by default (add them to `logs.paths` if you need t
 
 ## Which account reads the logs
 
-Learn does not document the permissions on these folders; members of the node's local Administrators could read them in a live test. The page's **Log access** card shows the same guidance for your identity model, with sources.
+Learn does not document the permissions on these folders; members of the node's local Administrators could read them in a live test. The page's **Log access** window (the button in the top bar) shows the same guidance for your identity model, with sources.
 
 | Phase | Local Identity | Active Directory |
 | --- | --- | --- |
@@ -360,13 +360,18 @@ Do not use the built-in `Administrator` for validation or deployment: deployment
 
 ## Screenshots
 
-<!-- Screenshots go here once the live run (plan task S-7) is complete: the step tree during Deploy, the live log pane with a step filter, the Log access card, and the dark theme. -->
+Demo data (example names only); the [tour of the page](docs/tour.md) explains each part.
 
-_Screenshots will be added after the live test on a test cluster (plan task S-7)._
+![The page during a ZTP run](docs/images/tour-main.png)
+
+| | |
+| --- | --- |
+| ![Details: what Sonar collected and is using](docs/images/tour-details.png) | ![The Log access window](docs/images/tour-log-access.png) |
+| ![An Azure step with its details](docs/images/tour-azure-step.png) | ![The dark theme](docs/images/tour-dark.png) |
 
 ## Further reading
 
-- [Getting started](docs/getting-started.md) and [How it works](docs/how-it-works.md)
+- [Tour of the page](docs/tour.md), [Getting started](docs/getting-started.md) and [How it works](docs/how-it-works.md)
 - [Design](docs/design.md): the API, data model and behaviour contract
 - [Research](docs/research.md): Microsoft Learn sources and what was verified live
 - [Publishable recordings](docs/reference/publishable-recordings.md) and the [event feed](docs/reference/events.md) (the JSON Lines contract other tools can emit, and how to launch Sonar from a deployment pipeline)

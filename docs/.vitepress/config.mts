@@ -22,6 +22,7 @@ export default defineConfig({
       { text: 'Getting started', link: '/getting-started' },
       { text: 'Running Sonar, by purpose', link: '/run' },
       { text: 'Configuration', link: '/config' },
+      { text: 'Tour of the page', link: '/tour' },
       { text: 'Following a ZTP run', link: '/ztp' },
       { text: 'How it works', link: '/how-it-works' },
       { text: 'Design', link: '/design' },

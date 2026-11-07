@@ -8,6 +8,8 @@
   "subscriptionId": "00000000-0000-0000-0000-000000000000",
   // REQUIRED. The resource group the cluster, the Arc machines and the deployment live in. azure.resource_group.
   "resourceGroup": "rg-example-azl",
+  // Optional. The Azure region, shown in Details on the page (not used to reach Azure). Infrastructure file: azure.location.
+  "location": "eastus",
   // REQUIRED. The Azure Local cluster name. cluster.name.
   "clusterName": "clus01",
   // REQUIRED. LocalIdentity (no Active Directory) or ActiveDirectory. scenario.identity: local_identity | active_directory.

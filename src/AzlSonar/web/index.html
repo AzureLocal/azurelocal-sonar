@@ -104,12 +104,12 @@
 
   <ul id="live-notes" class="live-notes" aria-label="Notes on this run" role="status" hidden></ul>
 
+  <div class="wrap">
   <nav id="modes" class="modes" aria-label="Modes"></nav>
 
   <section id="summary" class="panel sum" aria-labelledby="sum-title" aria-live="off"></section>
 
-  <main id="main" class="layout">
-    <div class="col-left">
+  <main id="main" class="main">
       <section id="steps-panel" class="panel panel-steps" aria-labelledby="steps-title">
         <div class="panel-head">
           <h2 id="steps-title">Steps</h2>
@@ -118,10 +118,9 @@
             <button id="collapse-all" type="button" class="btn btn-ghost btn-sm">Collapse all</button>
           </div>
         </div>
-        <p class="hint" id="tree-hint">Arrow keys move, Enter expands or collapses, Space selects a step: an Azure step shows its details, a node step filters the logs.</p>
+        <p class="hint" id="tree-hint">Arrow keys move &middot; Enter expands &middot; Space selects</p>
         <div id="tree-host" class="panel-body scroll" aria-describedby="tree-hint"></div>
       </section>
-    </div>
 
     <section id="log-panel" class="panel panel-logs" aria-labelledby="log-title" tabindex="-1">
       <div class="panel-head">
@@ -175,6 +174,7 @@
       </div>
     </section>
   </main>
+  </div>
 
   <div id="la-modal" class="scrim" hidden>
     <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="la-title">

@@ -18,11 +18,11 @@ Types are JSON types. "Dashboard" says what the key changes on the page.
 | --- | --- | --- | --- | --- | --- |
 | `subscriptionId` | string (GUID) | yes | | `00000000-0000-0000-0000-000000000000` | Which subscription every Azure read goes to. Wrong: no data, Azure 403/404 warnings. |
 | `resourceGroup` | string | yes | | `rg-example-azl` | The resource group of the cluster, its Arc machines and edge machines. |
-| `clusterName` | string | yes | | `clus01` | The cluster name in the header and the `deploymentSettings` that gives the step tree. |
-| `identityModel` | `LocalIdentity` or `ActiveDirectory` | yes | | `ActiveDirectory` | The account guidance on the Log access card and whether `TrustedHosts` is checked. |
-| `provisioningRoute` | `auto`, `simplified`, `oem-image` | no | `auto` | `simplified` | The pre-deployment panel: **Provisioning** (edge machines, ZTP) or **Arc registration** (node probe). `oem-image` never reads edge machines; `simplified` never starts the node probe. |
+| `clusterName` | string | yes | | `clus01` | The cluster name in the top bar and the `deploymentSettings` that gives the step tree. |
+| `identityModel` | `LocalIdentity` or `ActiveDirectory` | yes | | `ActiveDirectory` | The account guidance in the Log access window and whether `TrustedHosts` is checked. |
+| `provisioningRoute` | `auto`, `simplified`, `oem-image` | no | `auto` | `simplified` | The first mode: **Provisioning (ZTP)** (edge machines) or **Provisioning (OS image)** (node probe). `oem-image` never reads edge machines; `simplified` never starts the node probe. |
 | `pollSeconds` | integer 5 to 3600 | no | `20` | `30` | How often Azure is read; how fresh the page is. `-PollSeconds` overrides it. |
-| `nodes` | list | yes (one or more) | | see below | The machines in the header chips, the panel and the log pane. |
+| `nodes` | list | yes (one or more) | | see below | The machine cards, the steps per machine and the log filters. |
 | `nodes[].name` | string, unique | yes | | `node01` | The machine's name on the page. |
 | `nodes[].address` | string | yes | | `192.0.2.11` | Host name or IP address Sonar connects to for logs (seed) and Arc status (OEM route). |
 | `nodes[].arcMachineName` | string | no | resolved | `node01` | The Arc machine to follow. Default: simplified route, the Arc machine the edge machine names; OEM route, the node name. |
@@ -55,6 +55,7 @@ Types are JSON types. "Dashboard" says what the key changes on the page.
 | `_metadata.schema_version` | (checked) | Must be `5.x`. |
 | `azure.subscription_id` | `subscriptionId` | Required. |
 | `azure.resource_group` | `resourceGroup` | Required. |
+| `azure.location` | `location` | Optional. The region shown in **Details** in the top bar; Sonar does not use it to reach Azure. |
 | `cluster.name` | `clusterName` | Required. A ZTP-only file (`_metadata.scope: ztp`) has no cluster section: give it one, or use a config file. |
 | `scenario.os_install`: `simplified` or `iso` | `provisioningRoute`: `simplified` or `oem-image` | Required. |
 | `scenario.identity`: `active_directory` or `local_identity` | `identityModel`: `ActiveDirectory` or `LocalIdentity` | Required. |
@@ -103,7 +104,7 @@ It refuses these, with `YAML line N: ...` (the message names the line, never its
 
 ### Change the route or the identity model
 
-Master file: `scenario.os_install` and `scenario.identity`. Config file: edit `provisioningRoute` (`simplified`, `oem-image`, `auto`) and `identityModel`. Restart Sonar. The route decides which panel and which workers run; the identity model decides the log-account guidance.
+Master file: `scenario.os_install` and `scenario.identity`. Config file: edit `provisioningRoute` (`simplified`, `oem-image`, `auto`) and `identityModel`. Restart Sonar. The route decides which provisioning mode and which workers run; the identity model decides the log-account guidance.
 
 ### Point Sonar at a different cluster
 

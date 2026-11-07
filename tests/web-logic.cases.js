@@ -948,4 +948,20 @@ test('stepsEmptyText: a waiting mode says when it begins, Health says there are 
   eq(m.stepsEmptyText('deploy', 'run', '', true), 'No steps reported yet.');
 });
 
+// ---------------------------------------------------------------- redesign: route from the phase, plural
+
+test('modeStates: Arc registration without machine data is still the OS image route', function () {
+  var tiles = m.modeStates({ phase: 'arc-registration', activePhase: 'arc-registration' });
+  eq(tiles[0].name, 'Provisioning (OS image)');
+  eq(tiles[0].hidden, false);
+  eq(tiles[0].line, 'Waiting for the machines');
+});
+
+test('summaryFor (provisioning): the headline says "is" for one more machine and "are" for several', function () {
+  var nodes = [zNode('a', 'InstallingOs', 'running', 'Disconnected'), zNode('b', 'InstallingOs', 'running', 'Disconnected')];
+  eq(m.summaryFor(ztpState(nodes), 'prov').headline, '0 of 2 machines ready: a is installing the OS and 1 more is working');
+  nodes.push(zNode('c', 'InstallingOs', 'running', 'Disconnected'));
+  eq(m.summaryFor(ztpState(nodes), 'prov').headline, '0 of 3 machines ready: a is installing the OS and 2 more are working');
+});
+
 process.stdout.write(JSON.stringify(cases));

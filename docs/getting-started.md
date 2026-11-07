@@ -89,7 +89,7 @@ Every field, its default and its limits are in the [README configuration referen
 
 ## Which account
 
-Use the non-built-in deployment local admin (Local Identity) or the local administrator (Active Directory). Do not use the built-in `Administrator` for validation and deployment: deployment renames it to `ASBuiltInAdmin` (it is fine while the machines register with Arc). The page's **Log access** card shows the account, folders and timing for each phase and your identity model.
+Use the non-built-in deployment local admin (Local Identity) or the local administrator (Active Directory). Do not use the built-in `Administrator` for validation and deployment: deployment renames it to `ASBuiltInAdmin` (it is fine while the machines register with Arc). The page's **Log access** window (the button in the top bar) shows the account, folders and timing for each phase and your identity model.
 
 ## If something does not work
 
