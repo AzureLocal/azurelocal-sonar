@@ -239,7 +239,7 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
     It 'GET /api/logs?since=abc is a 400 with a JSON error' {
         $r = Invoke-SonarRequest '/api/logs?since=abc'
         $r.Status | Should -Be 400
-        ($r.Body | ConvertFrom-Json).error | Should -Be 'since must be a whole number.'
+        ($r.Body | ConvertFrom-Json).error | Should -Be 'since must be a whole number from 0.'
     }
 
     It 'GET /api/export returns one bundle as an attachment, without secrets' {
@@ -390,10 +390,10 @@ Describe 'SSE live streams: client cap (real HttpListener on localhost)' {
         if ($script:CapListener) { $script:CapListener.Stop(); $script:CapListener.Close() }
     }
 
-    It 'answers 503 with Retry-After when 10 streams are already open' {
+    It 'answers 429 with Retry-After when 4 streams are already open' {
         $server = InModuleScope AzlSonar {
             $clients = [System.Collections.Generic.List[hashtable]]::new()
-            foreach ($i in 1..10) { $clients.Add(@{ Dummy = $i }) }
+            foreach ($i in 1..4) { $clients.Add(@{ Dummy = $i }) }
             @{ Shared = Initialize-AzlSonarSharedState; Clients = $clients }
         }
         $send = $script:CapClient.GetAsync("http://localhost:$($script:CapPort)/api/events")
@@ -401,10 +401,10 @@ Describe 'SSE live streams: client cap (real HttpListener on localhost)' {
         $null = $pending.Wait(10000)
         InModuleScope AzlSonar -Parameters @{ Context = $pending.Result; Server = $server } { param($Context, $Server) Invoke-AzlSonarHttpRequest -Context $Context -Server $Server }
         $response = $send.GetAwaiter().GetResult()
-        [int]$response.StatusCode | Should -Be 503
+        [int]$response.StatusCode | Should -Be 429
         @($response.Headers.GetValues('Retry-After')) | Should -Be @('30')
-        $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | Should -BeLike '*at most 10 live streams*'
-        $server.Clients.Count | Should -Be 10
+        $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | Should -BeLike '*at most 4 live streams*'
+        $server.Clients.Count | Should -Be 4
     }
 }
 
@@ -584,7 +584,7 @@ Describe 'Start-AzlSonarServer end to end (random port, mocked poller and tailer
             if (([datetime]::UtcNow - $d.Started).TotalSeconds -gt 30) { throw 'AZLSONAR-TEST-TIMEOUT' }
         }
 
-        { Start-AzlSonarServer -ConfigPath $script:SecretConfigPath -Port $script:E2EPort -NoBrowser -InformationAction SilentlyContinue } |
+        { Start-AzlSonarServer -ConfigPath $script:SecretConfigPath -Port $script:E2EPort -NoBrowser -NoAccessToken -InformationAction SilentlyContinue } |
             Should -Throw '*AZLSONAR-TEST-STOP*'
 
         $results = $script:Driver.Results
@@ -597,7 +597,7 @@ Describe 'Start-AzlSonarServer end to end (random port, mocked poller and tailer
         $results['/api/guidance'].Status | Should -Be 200
         @(($results['/api/guidance'].Body | ConvertFrom-Json).phases.PSObject.Properties.Name).Count | Should -Be 8
         $results['/api/logs'].Status | Should -Be 200
-        ($results['/api/logs'].Body | ConvertFrom-Json).PSObject.Properties.Name | Should -Be @('server', 'lastSeq', 'tailer', 'files', 'lines')
+        ($results['/api/logs'].Body | ConvertFrom-Json).PSObject.Properties.Name | Should -Be @('server', 'lastSeq', 'truncated', 'tailer', 'files', 'lines')
         ($results['/api/logs'].Body | ConvertFrom-Json).server | Should -Be ($results['/api/config'].Body | ConvertFrom-Json).serverId
         $results['/api/nope'].Status | Should -Be 404
         $results['/'].Status | Should -Be 200

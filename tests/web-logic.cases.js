@@ -378,7 +378,7 @@ test('ZTP complete (simplified route): the chip says so, never Ready for Validat
   var notes = m.liveNotes(s);
   eq(notes.length, 1);
   eq(notes[0].kind, 'ztp');
-  eq(notes[0].href, 'https://azurelocal.cloud', 'the guide the back end names');
+  eq(notes[0].href, 'https://azurelocal.cloud/', 'the guide the back end names, as the URL parser writes it');
   eq(notes[0].linkText, 'azurelocal.cloud');
   eq(/OS configuration/.test(notes[0].text), true, 'names the next step');
   eq(/Ready for Validate/.test(notes[0].text), false);
@@ -962,6 +962,238 @@ test('summaryFor (provisioning): the headline says "is" for one more machine and
   eq(m.summaryFor(ztpState(nodes), 'prov').headline, '0 of 2 machines ready: a is installing the OS and 1 more is working');
   nodes.push(zNode('c', 'InstallingOs', 'running', 'Disconnected'));
   eq(m.summaryFor(ztpState(nodes), 'prov').headline, '0 of 3 machines ready: a is installing the OS and 2 more are working');
+});
+
+// ---------------------------------------------------------------- security: data is text, links are allow-listed
+
+var fs = require('fs');
+var appSource = fs.readFileSync(path, 'utf8');
+
+// A small fake document: enough of the DOM for the page's render functions. It records what is created, so a test can
+// check that hostile data became text nodes and attribute values, never elements, handlers or live links.
+function makeFakeDom() {
+  var byId = {}, inner = [];
+  function Text(t) { this.nodeType = 3; this.text = String(t); }
+  function El(tag) {
+    this.nodeType = 1; this.tagName = String(tag).toLowerCase(); this.attrs = {}; this.children = []; this.parent = null; this.listeners = {};
+    this.value = ''; this.scrollTop = 0; this.scrollHeight = 0; this.clientHeight = 0; this.disabled = false;
+    var self = this;
+    this.style = { props: {}, setProperty: function (k, v) { self.style.props[k] = v; } };
+    this.classList = { add: function (c) { self.attrs['class'] = (self.attrs['class'] || '') + ' ' + c; }, remove: function () {}, contains: function (c) { return (' ' + (self.attrs['class'] || '') + ' ').indexOf(' ' + c + ' ') >= 0; } };
+  }
+  El.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); if (k === 'id') byId[v] = this; };
+  El.prototype.getAttribute = function (k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; };
+  El.prototype.removeAttribute = function (k) { delete this.attrs[k]; };
+  El.prototype.appendChild = function (c) {
+    if (c && c.tagName === '#fragment') { var kids = c.children.slice(); c.children = []; kids.forEach(function (k) { this.appendChild(k); }, this); return c; }
+    c.parent = this; this.children.push(c); return c;
+  };
+  El.prototype.insertBefore = function (c) { return this.appendChild(c); };
+  El.prototype.replaceChild = function (n) { return this.appendChild(n); };
+  El.prototype.remove = function () {};
+  El.prototype.focus = function () {};
+  El.prototype.select = function () {};
+  El.prototype.addEventListener = function (n, f) { (this.listeners[n] = this.listeners[n] || []).push(f); };
+  El.prototype.contains = function (n) { for (var p = n; p; p = p.parent) if (p === this) return true; return false; };
+  El.prototype.querySelector = function (sel) { return this.querySelectorAll(sel)[0] || null; };
+  El.prototype.querySelectorAll = function (sel) {
+    var out = [], m;
+    function match(e) {
+      if (e.nodeType !== 1) return false;
+      if ((m = /^#(.+)$/.exec(sel))) return e.attrs.id === m[1];
+      if ((m = /^\.([\w-]+)$/.exec(sel))) return e.classList.contains(m[1]);
+      if ((m = /^\[([\w-]+)="(.*)"\]$/.exec(sel))) return e.attrs[m[1]] === m[2];
+      return e.tagName === sel;
+    }
+    (function walk(e) { e.children.forEach(function (c) { if (match(c)) out.push(c); if (c.nodeType === 1) walk(c); }); })(this);
+    return out;
+  };
+  Object.defineProperty(El.prototype, 'textContent', {
+    get: function () { return this.children.map(function (c) { return c.nodeType === 3 ? c.text : c.textContent; }).join(''); },
+    set: function (v) { var s = String(v); this.children = s === '' ? [] : [new Text(s)]; }
+  });
+  Object.defineProperty(El.prototype, 'className', { get: function () { return this.attrs['class'] || ''; }, set: function (v) { this.attrs['class'] = String(v); } });
+  Object.defineProperty(El.prototype, 'hidden', { get: function () { return 'hidden' in this.attrs; }, set: function (v) { if (v) this.attrs.hidden = ''; else delete this.attrs.hidden; } });
+  Object.defineProperty(El.prototype, 'title', { get: function () { return this.attrs.title || ''; }, set: function (v) { this.attrs.title = String(v); } });
+  Object.defineProperty(El.prototype, 'innerHTML', { set: function (v) { inner.push({ el: this, html: String(v) }); }, get: function () { return ''; } });
+  var doc = {
+    activeElement: null,
+    createElement: function (t) { return new El(t); },
+    createTextNode: function (t) { return new Text(t); },
+    createDocumentFragment: function () { return new El('#fragment'); },
+    getElementById: function (id) { if (!byId[id]) { var e = new El('div'); e.attrs.id = id; byId[id] = e; } return byId[id]; },
+    addEventListener: function () {}
+  };
+  return { document: doc, byId: byId, inner: inner };
+}
+
+var HOSTILE = ['<img src=x onerror=alert(1)>', '"><script>alert(1)</script>', 'javascript:alert(1)', 'data:text/html,<script>alert(1)</script>'];
+var BAD_TAGS = ['img', 'script', 'iframe', 'style', 'link', 'object', 'embed', 'form', 'input', 'svg'];
+
+// Walks a rendered tree: no element made from data, no event-handler attribute, every link allow-listed.
+function assertInert(root, what) {
+  (function walk(e) {
+    if (e.nodeType !== 1) return;
+    if (BAD_TAGS.indexOf(e.tagName) >= 0) throw new Error(what + ': data became a <' + e.tagName + '> element');
+    Object.keys(e.attrs).forEach(function (k) {
+      if (/^on/i.test(k)) throw new Error(what + ': event-handler attribute ' + k);
+      if ((k === 'href' || k === 'src') && !/^https:\/\/(azurelocal\.cloud|learn\.microsoft\.com|github\.com)(\/|$)/.test(e.attrs[k])) throw new Error(what + ': a live link to ' + e.attrs[k]);
+    });
+    e.children.forEach(walk);
+  })(root);
+}
+function textOf(root) { return root.textContent; }
+function withDom(fn) {
+  var dom = makeFakeDom(), hooks = m.__dom();
+  global.document = dom.document;
+  try { fn(dom, hooks); } finally { delete global.document; }
+}
+function staticIcons(dom, what) {
+  dom.inner.forEach(function (x) { if (/onerror|<script|javascript:/i.test(x.html)) throw new Error(what + ': innerHTML got ' + x.html.slice(0, 60)); });
+}
+
+test('safeLink: only https on a known documentation host is a link', function () {
+  eq(m.safeLink('https://learn.microsoft.com/azure/azure-local/x?view=azloc-2609'), 'https://learn.microsoft.com/azure/azure-local/x?view=azloc-2609');
+  eq(m.safeLink('https://azurelocal.cloud/azurelocal-sonar/run'), 'https://azurelocal.cloud/azurelocal-sonar/run');
+  eq(m.safeLink('https://github.com/AzureLocal/azurelocal-sonar'), 'https://github.com/AzureLocal/azurelocal-sonar');
+  HOSTILE.concat(['http://github.com/x', 'https://evil.example/x', 'https://github.com.evil.example/x', 'https://github.com@evil.example/x', 'https://user:pw@github.com/x',
+    '//github.com/x', 'ftp://github.com/x', '', null, undefined, 'https://github.com:8443@evil.example/']).forEach(function (u) {
+    eq(m.safeLink(u), '', 'refused: ' + String(u));
+  });
+});
+
+test('help links from the back end: a hostile or foreign URL is plain text, a good one has rel and target', function () {
+  withDom(function (dom, h) {
+    h.app.about = { version: HOSTILE[0], summary: HOSTILE[1], links: [
+      { label: 'Docs', url: 'https://azurelocal.cloud/azurelocal-sonar/' },
+      { label: HOSTILE[0], url: HOSTILE[2] }, { label: 'Data', url: HOSTILE[3] }, { label: 'Foreign', url: 'https://evil.example/x' }] };
+    h.renderHelp();
+    var host = dom.byId['help-links'];
+    assertInert(host, 'help');
+    var anchors = host.querySelectorAll('a');
+    eq(anchors.length, 1, 'only the allow-listed link is a link');
+    eq(anchors[0].attrs.rel, 'noopener noreferrer');
+    eq(anchors[0].attrs.target, '_blank');
+    eq(textOf(host).indexOf(HOSTILE[0]) >= 0, true, 'the hostile label shows as text');
+    eq(dom.byId['help-version'].textContent, 'v' + HOSTILE[0], 'the version is text');
+    staticIcons(dom, 'help');
+  });
+});
+
+test('summary box: hostile cluster, machine names, errors and Azure messages render as text', function () {
+  withDom(function (dom, h) {
+    var n = HOSTILE[0], n2 = '<script>x</script>';
+    h.app.config = { cluster: HOSTILE[1], nodes: [{ name: n, seed: true }, { name: n2 }] };
+    h.app.state = { cluster: HOSTILE[1], phase: 'provisioning', activePhase: 'provisioning',
+      provisioning: { route: 'simplified', status: 'running', nodes: [
+        { name: n, route: 'simplified', lifecycle: HOSTILE[2], lifecycleMessage: HOSTILE[3], status: 'error', arcStatus: HOSTILE[0], errors: [HOSTILE[1]], tree: [] },
+        { name: n2, route: 'simplified', lifecycle: 'InstallingOs', status: 'running', percent: 50, tree: [] }] },
+      nodes: [{ name: n, arcStatus: HOSTILE[0] }, { name: n2, arcStatus: 'Connected' }] };
+    h.renderSummary();
+    var host = dom.byId.summary;
+    assertInert(host, 'summary');
+    eq(textOf(host).indexOf(n) >= 0 && textOf(host).indexOf(n2) >= 0, true, 'full names shown as text');
+    eq(host.querySelectorAll('button').length, 2, 'two cards');
+    staticIcons(dom, 'summary');
+  });
+});
+
+test('Details pop-down: hostile values in every field render as text', function () {
+  withDom(function (dom, h) {
+    var H = HOSTILE;
+    h.app.details = { mode: 'live', target: { cluster: { value: H[0], source: H[1] }, resourceGroup: { value: H[1], source: H[2] }, subscription: { value: H[2], source: H[3], note: H[0] }, region: { value: H[3], source: H[0] } },
+      route: { label: H[0], source: H[1] }, identity: { label: H[1], meaning: H[2], source: H[3] },
+      nodes: [{ name: H[0], address: H[1], seed: true }, { name: H[2], address: H[3] }],
+      sources: { azure: { pollSeconds: 20, lastAnswerAt: '2026-11-07T10:00:00Z', ok: false, message: H[0] }, ztpEvents: { configured: true, file: H[1], fileFound: false, events: 3, lastEventAt: '2026-11-07T10:00:00Z' },
+        nodeLogs: { state: 'unavailable', node: H[2], credential: H[3], transport: H[0], reason: H[1], lastLineAt: null } },
+      config: { readFrom: H[0], file: H[1], sourceKind: 'infrastructure', readAt: '2026-11-07T10:00:00Z', checkEverySeconds: 60, lastChangeAt: '2026-11-07T10:00:00Z', lastChangeNote: H[2],
+        notSet: [{ label: H[3], key: H[0], effect: H[1] }], version: H[2] } };
+    h.renderDetails();
+    var host = dom.byId['details-body'];
+    assertInert(host, 'details');
+    eq(textOf(host).indexOf(H[0]) >= 0 && textOf(host).indexOf(H[1]) >= 0, true, 'hostile text is shown as text');
+    staticIcons(dom, 'details');
+  });
+});
+
+test('log lines: hostile text and file names, with a search that highlights them, stay text', function () {
+  withDom(function (dom, h) {
+    h.app.filter.q = 'script';
+    var line = { seq: 1, time: '2026-11-07T10:00:00.000Z', t: Date.parse('2026-11-07T10:00:00Z'), received: '', r: NaN, timeSource: 'line', file: 'C:\\Logs\\' + HOSTILE[0] + '.log', level: 'error', text: HOSTILE[1] + ' ' + HOSTILE[2], lc: null };
+    var row = h.buildLine(line);
+    assertInert(row, 'log line');
+    eq(row.querySelectorAll('mark').length >= 1, true, 'the match is marked');
+    eq(textOf(row).indexOf(HOSTILE[1]) >= 0, true, 'the text is intact');
+    h.app.filter.q = '';
+  });
+});
+
+test('live notes and the filter chips: hostile guide URL and machine filter stay inert', function () {
+  withDom(function (dom, h) {
+    h.app.state = { phase: 'provisioning', provisioning: { ztpComplete: true, nextStep: { name: HOSTILE[0], guide: HOSTILE[2] }, route: 'simplified', nodes: [] }, lag: { detected: true, message: HOSTILE[1], source: HOSTILE[0] } };
+    h.renderLiveNotes();
+    assertInert(dom.byId['live-notes'], 'live notes');
+    h.app.filter.node = HOSTILE[0];
+    h.renderChips();
+    assertInert(dom.byId['filter-chips'], 'chips');
+    eq(textOf(dom.byId['filter-chips']).indexOf(HOSTILE[0]) >= 0, true);
+    h.app.filter.node = '';
+  });
+});
+
+test('Log access window: hostile guidance text and source links are inert, a foreign link is only text', function () {
+  withDom(function (dom, h) {
+    h.app.state = { phase: 'provisioning', activePhase: 'provisioning', provisioning: { route: 'simplified', nodes: [] } };
+    h.app.config = { identityModel: HOSTILE[0], profile: { notes: [HOSTILE[1]] } };
+    h.app.guidance = { identityModel: HOSTILE[0], phases: { provisioning: { account: HOSTILE[0], where: [HOSTILE[1]], when: HOSTILE[2], how: HOSTILE[3], verified: false,
+      source: ['https://learn.microsoft.com/azure/azure-local/x', HOSTILE[2], HOSTILE[3], 'https://evil.example/x'], notes: HOSTILE[1] } } };
+    h.renderLogAccessWindow();
+    var body = dom.byId['la-body'];
+    assertInert(body, 'log access');
+    eq(body.querySelectorAll('a').length, 1, 'one allow-listed source link');
+    eq(textOf(body).indexOf(HOSTILE[2]) >= 0, true, 'the other sources are text');
+    h.app.guidance = null; h.app.config = null;
+  });
+});
+
+test('step tree item: hostile step names, descriptions and errors stay text', function () {
+  withDom(function (dom, h) {
+    var n = { id: HOSTILE[0], name: HOSTILE[1], description: HOSTILE[2], status: 'error', errors: [HOSTILE[3], HOSTILE[0]], children: [], __key: 'deployment/x', start: '2026-11-07T10:00:00Z' };
+    h.app.stepIndex.set('deployment/x', { node: n, section: 'deployment', parentKey: 'deployment' });
+    h.app.selectedKey = 'deployment/x';
+    var li = h.buildItem(n, 1, null, 'validation', [n]);   // an Azure step, selected: its details are shown under it
+    assertInert(li, 'step');
+    eq(textOf(li).indexOf(HOSTILE[1]) >= 0, true);
+    eq(li.querySelectorAll('.detail').length, 1, 'the Azure details are shown');
+    h.app.selectedKey = null;
+    staticIcons(dom, 'step');
+  });
+});
+
+test('hostile config: a cluster name and node name with markup flow through the model as data', function () {
+  var c = '"><img src=x onerror=alert(1)>', n = '<script>x</script>';
+  var state = { cluster: c, phase: 'deployment', activePhase: 'deployment', nodes: [{ name: n, arcStatus: 'Connected' }],
+    validation: { status: 'Success', tree: [] }, deployment: { status: 'InProgress', tree: [{ id: '1', name: 'Deploy', status: 'running', children: [{ id: '1.1', name: 's', status: 'running', children: [] }] }] } };
+  eq(m.machineList(state, { nodes: [{ name: n, seed: true }] }).map(function (x) { return x.name; }), [n], 'the machine name is data, unchanged');
+  var sm = m.summaryFor(state, 'deploy', { nodes: [{ name: n, seed: true }] });
+  eq(sm.cards.map(function (x) { return x.name; }), [n]);
+  // through the JSON the back end serves, the markup is escaped
+  eq(JSON.parse(JSON.stringify(state)).cluster, c);
+  withDom(function (dom, h) {
+    h.app.state = state; h.app.config = { cluster: c, nodes: [{ name: n, seed: true }] };
+    h.renderSummary();
+    assertInert(dom.byId.summary, 'hostile config');
+    eq(textOf(dom.byId.summary).indexOf(n) >= 0, true, 'the node name is visible as text');
+  });
+});
+
+test('page source: no HTML injection, no inline style, no eval; innerHTML only takes the fixed icons', function () {
+  ['insertAdjacentHTML', 'outerHTML', 'document.write', 'eval(', 'new Function', "setAttribute('style'", 'setAttribute("style"'].forEach(function (bad) {
+    eq(appSource.indexOf(bad), -1, 'app.js must not contain ' + bad);
+  });
+  var assigns = appSource.match(/\.innerHTML\s*=\s*[^;]+;/g) || [];
+  assigns.forEach(function (a) { eq(/=\s*(ICON\.\w+|icon\(\w+\))\s*;/.test(a), true, 'innerHTML takes only an icon constant: ' + a); });
+  eq(assigns.length > 0, true);
 });
 
 process.stdout.write(JSON.stringify(cases));

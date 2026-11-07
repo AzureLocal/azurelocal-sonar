@@ -17,6 +17,7 @@ Beacon checks the environment before deployment. Sonar listens to the deployment
 - [Where the logs are](#where-the-logs-are)
 - [Which account reads the logs](#which-account-reads-the-logs)
 - [Read-only and security model](#read-only-and-security-model)
+- [Security](#security)
 - [Troubleshooting](#troubleshooting)
 - [Screenshots](#screenshots)
 - [Further reading](#further-reading)
@@ -129,7 +130,7 @@ There is nothing to install: no service, no database, no build step.
    ./Start-AzlSonar.ps1 -ConfigPath ./config/clus01.json          # the older option
    ```
 
-   It asks for the account that reads the logs (`credential.source: prompt`), starts the back end on `http://localhost:8642/` and opens the browser. Press Ctrl+C to stop.
+   It asks for the account that reads the logs (`credential.source: prompt`), starts the back end and opens the browser on the URL it prints, `http://localhost:8642/?t=<token>` (the token is new at every start; the page keeps it in a cookie and the address bar loses it). Press Ctrl+C to stop.
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
@@ -138,7 +139,8 @@ There is nothing to install: no service, no database, no build step.
 | `-PollSeconds` | `20` | Seconds between Azure polls (5 to 3600). Overrides the file. |
 | `-Port` | `8642` | Local port. Pick another if 8642 is taken (Sonar says so). |
 | `-Credential` | (none) | The log account; overrides `credential.source`. |
-| `-NoBrowser` | off | Do not open the browser. |
+| `-NoBrowser` | off | Do not open the browser. The URL with the access token is still printed. |
+| `-NoAccessToken` | off | Turn the per-start access token off (also `accessToken: false` in the config). For a single-user machine only: any account on this machine can then read the page. |
 | `-Record` | (none) | Also append the run to this recording file (JSON Lines). See [Record and replay](#record-and-replay). A normal recording keeps identifiers (GUIDs, IP addresses, host and cluster names). |
 | `-Publishable` | off | With `-Record`: also replace every identifier with a stable pseudonym, so the recording can be shared. Needs a new file. See [Share a recording](#share-a-recording-publishable). |
 | `-ExtraTerm` | (none) | With `-Publishable`: extra strings that must never appear (a company or site name). |
@@ -214,6 +216,8 @@ Unknown fields are ignored. Sonar validates the file at start and lists every pr
 | `provisioningRoute` | no | `auto` | How the machines get ready before deployment: `simplified` (simplified machine provisioning, edge machines), `oem-image` (OEM image + Arc registration; edge machines are never read) or `auto` (simplified when edge machines for the configured nodes exist in the resource group, else oem-image). See [the two routes](#how-the-machines-get-ready-the-two-routes). |
 | `identityModel` | yes | | `LocalIdentity` or `ActiveDirectory`. Picks the account guidance and whether `TrustedHosts` is needed. |
 | `pollSeconds` | no | `20` | Azure poll interval, 5 to 3600 seconds. |
+| `accessToken` | no | `true` | `false` turns the per-start access token off (single-user machine only). `-NoAccessToken` does the same. |
+| `maxEventStreams` | no | `4` | Live browser streams served at once, 1 to 50; more get 429 and the page polls. |
 | `nodes` | yes | | At least one node. |
 | `nodes[].name` | yes | | Host name, unique. |
 | `nodes[].address` | yes | | Host name or IP address Sonar connects to for logs (seed node only). |
@@ -325,14 +329,30 @@ Do not use the built-in `Administrator` for validation or deployment: deployment
 
 ## Read-only and security model
 
-- **Loopback only.** The server binds `http://localhost:<port>/` and answers requests from this machine only (anything else gets 403). Only `GET` is accepted (others get 405). Static files are served from the `web` folder only.
+- **Loopback only, with an access token.** The server binds `localhost` and `127.0.0.1` only, answers this machine only, accepts only `GET` (others get 405) and serves a fixed list of files. By default the URL Sonar prints and opens carries a per-start token (see [Security](#security)).
 - **Never writes to Azure.** Every Azure call is a `GET` through `Invoke-AzRestMethod`. Arc run command and Arc SSH are not used because both write to Azure.
 - **Never writes to a node.** Each poll runs one read-only script that lists and reads log files with shared read access (the writer and log rotation are never blocked). Over SSH the script is streamed through stdin; no file is written on the node. Sonar keeps no state on the node.
 - **Never changes the workstation.** Sonar reads `TrustedHosts` and tells you what is missing; it never sets it. The only file it ever writes is the recording you ask for with `-Record` (or `recordPath`), and it only appends to it.
 - **Recordings.** A recording holds what the page was sent, masked again on the way to the file (see [Record and replay](#record-and-replay)): no credential, token or Key Vault name. It still holds identifiers unless it was made with `-Publishable`. A replay (`-Replay`) reads that file only: no Azure sign-in, no call to Azure, no connection to a node.
 - **Secrets.** No secret is allowed in the config file. Key Vault secrets are read once at start and kept in memory as a `PSCredential`. `/api/config` and the export carry no secrets, no secret names and no node addresses. Log text is redacted before it is stored, served or exported: the log account's password, and common secret formats (`password=`, `secret=`, `token=`, `AccountKey=`, `Bearer ...`, SAS `sig=`, `-Password ...`).
 - **SSH host keys.** The SSH fallback accepts the node's host key on first use (Posh-SSH `-AcceptKey`). Use it on a management network you trust.
-- **Resource use.** Bounded memory (5000 lines, 5000 snapshots, 2000 tracked files), at most 10 live browser streams, and a slow or stuck browser tab is dropped instead of slowing the others.
+- **Resource use.** Bounded memory (5000 lines, 5000 snapshots, 2000 tracked files), at most 4 live browser streams (`maxEventStreams`), and a slow or stuck browser tab is dropped instead of slowing the others.
+
+## Security
+
+### What protects the page
+
+- **Loopback only.** Sonar listens on `localhost` and `127.0.0.1` only, answers requests from this machine only, and accepts only `GET`.
+- **An access token, on by default.** At start Sonar makes a random token (32 hex characters). The URL it prints and opens, `http://localhost:<port>/?t=<token>`, carries it once; Sonar answers with a cookie (`sonar_t`, `HttpOnly`, `SameSite=Strict`) and redirects to the same address without the token, so it stays out of the address bar and the history. Every other request, the page and every `/api` route included, needs that cookie and gets 401 without it. The token is new at every start, is never logged, recorded, exported or shown (it is masked like a password), and is compared in constant time.
+- **Host and Origin checks.** A request must name `localhost`, `127.0.0.1` or `[::1]` with Sonar's port in its `Host` header (anything else gets 400), and an `Origin` header, when there is one, must be Sonar's own (anything else gets 403). That defeats DNS rebinding, where a web page on the internet gets your browser to talk to a name that points at your own machine.
+- **Browser hardening.** Every response carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and a `Content-Security-Policy` that allows only Sonar's own files (no inline script or style). The page writes data into the DOM as text, and follows a link from the back end only when it is `https` on `azurelocal.cloud`, `learn.microsoft.com` or `github.com`. Only a fixed list of files is served.
+- **Limits.** At most 4 live streams at once (`maxEventStreams`, 429 beyond it), one `/api/logs` answer is capped at 2000 lines and about 2 MB, and `since` must be a whole number.
+
+### What an operator should know
+
+- **Loopback is not a security boundary on a shared host.** On a jump host every signed-in account (and every program they run) can reach `localhost`. The access token is what keeps another account out: do not paste the printed URL into a shared chat, a ticket or a screen share, and do not leave Sonar running unattended. If you start Sonar with `-NoAccessToken` (or `accessToken: false`), any local account can read the page: use that on a single-user machine only.
+- **The page shows addresses.** Details lists the nodes' management addresses, the resource group and the first 8 characters of the subscription, and the logs hold whatever the nodes log (secrets are masked, not guaranteed absent). Treat the page and the export like the deployment itself.
+- **Remote access** is an SSH tunnel or a remote desktop session, never a changed binding. Open the printed URL on the machine where Sonar runs (or through the tunnel, with the same `?t=` URL).
 
 ## Troubleshooting
 

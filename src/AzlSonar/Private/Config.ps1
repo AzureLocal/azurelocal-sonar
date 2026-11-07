@@ -197,6 +197,18 @@ function Test-AzlSonarConfig {
         }
     }
 
+    $accessToken = Get-AzlSonarMember $Config 'accessToken'
+    if ($null -ne $accessToken -and $accessToken -isnot [bool]) {
+        $problems.Add('accessToken must be true or false (false is for a single-user machine only).')
+    }
+    $maxStreams = Get-AzlSonarMember $Config 'maxEventStreams'
+    if ($null -ne $maxStreams) {
+        $number = 0
+        if (-not [int]::TryParse([string]$maxStreams, [ref]$number) -or $number -lt 1 -or $number -gt 50) {
+            $problems.Add('maxEventStreams must be a whole number from 1 to 50.')
+        }
+    }
+
     $credential = Get-AzlSonarMember $Config 'credential'
     if ($null -ne $credential) {
         $source = [string](Get-AzlSonarMember $credential 'source' 'prompt')
@@ -388,6 +400,9 @@ function Read-AzlSonarConfig {
         sourcePath     = $source
         # Where the settings came from: the master infrastructure.yml, a config file, or a JSON string (tests).
         sourceKind     = $sourceKind
+        # The per-start access token (on by default; false is for a single-user machine only) and the live streams served at once.
+        accessToken    = [bool](Get-AzlSonarMember $raw 'accessToken' $true)
+        maxEventStreams = [int](Get-AzlSonarMember $raw 'maxEventStreams' 4)
     }
 }
 

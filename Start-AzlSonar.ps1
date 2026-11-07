@@ -22,6 +22,9 @@
     Path to a recording (.jsonl or .jsonl.gz) to play instead of watching a live deployment.
 .PARAMETER Port
     Local port for the web view. Default 8642.
+.PARAMETER NoAccessToken
+    Turns the per-start access token off (also: accessToken: false in the config). The page then answers any account on this
+    machine. For a single-user machine only. By default Sonar prints and opens a URL that carries a one-time token.
 .PARAMETER NoBrowser
     Do not open the browser.
 .PARAMETER Credential
@@ -78,6 +81,8 @@ param(
 
     [switch]$NoBrowser,
 
+    [switch]$NoAccessToken,
+
     [Parameter(ParameterSetName = 'Live')]
     [pscredential]$Credential,
 
@@ -110,6 +115,7 @@ $serverParameters = @{
     Port      = $Port
     NoBrowser = $NoBrowser
 }
+if ($NoAccessToken) { $serverParameters.NoAccessToken = $true }
 if ($PSCmdlet.ParameterSetName -eq 'Replay') {
     $serverParameters.Replay = $Replay
     $serverParameters.Speed = $Speed

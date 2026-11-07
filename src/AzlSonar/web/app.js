@@ -10,6 +10,7 @@
   var POLL_MS = 5000;              // fallback polling interval
   var SSE_MAX_BACKOFF_MS = 30000;
   var THEME_KEY = 'azlsonar.theme';
+  var LA_PHASES = ['provisioning', 'arc-registration', 'validation', 'deployment', 'post-deployment', 'update', 'add-node', 'repair'];
   var PHASES = ['provisioning', 'arc-registration', 'validation', 'deployment', 'done', 'failed', 'update', 'add-node', 'repair'];
   var PHASE_LABEL = {
     provisioning: 'Provisioning', 'arc-registration': 'Arc registration', validation: 'Validation',
@@ -147,6 +148,24 @@
     return i >= 0 ? s.slice(i + 1) : s;
   }
 
+  // "left:5%;width:10px" through the CSS object model: the page's Content-Security-Policy has no 'unsafe-inline'.
+  function setStyleText(e, text) {
+    String(text).split(';').forEach(function (decl) {
+      var i = decl.indexOf(':');
+      if (i > 0) e.style.setProperty(decl.slice(0, i).trim(), decl.slice(i + 1).trim());
+    });
+  }
+
+  // A link from the back end or from data is followed only when it is an https URL on a known documentation host.
+  var LINK_HOSTS = ['azurelocal.cloud', 'learn.microsoft.com', 'github.com'];
+  function safeLink(url) {
+    var u;
+    try { u = new URL(String(url)); } catch (e) { return ''; }
+    if (u.protocol !== 'https:' || u.username || u.password) return '';
+    if (LINK_HOSTS.indexOf(u.hostname.toLowerCase()) < 0) return '';
+    return u.href;
+  }
+
   function el(tag, attrs, children) {
     var e = document.createElement(tag);
     if (attrs) {
@@ -156,6 +175,8 @@
         if (v === null || v === undefined || v === false) continue;
         if (k === 'class') e.className = v;
         else if (k === 'text') e.textContent = v;
+        else if (k === 'style') setStyleText(e, v);
+        else if (/^on/i.test(k)) continue;   // data never becomes an event handler
         else e.setAttribute(k, v === true ? '' : v);
       }
     }
@@ -947,7 +968,7 @@
     if (normPhase(s.phase) === 'provisioning' && ztpComplete(s)) {
       // The guide's URL comes from the back end (provisioning.nextStep.guide): the web files carry no URL.
       var next = isObj(s.provisioning.nextStep) ? s.provisioning.nextStep : {};
-      var guide = /^https:\/\/[^\s]+$/i.test(str(next.guide)) ? str(next.guide) : '';
+      var guide = safeLink(next.guide);
       var note = { kind: 'ztp', text: 'ZTP is complete: every machine is provisioned, with its management address on the management NIC and its final BIOS values. ' +
         'Next: OS configuration (OEM drivers, C:\\SBE, DHCP off, DNS and time, the deployment admin), then Validate.' + (guide ? ' Guide: ' : '') };
       if (guide) { note.href = guide; note.linkText = guide.replace(/^https:\/\//i, '').replace(/\/$/, ''); }
@@ -1365,6 +1386,10 @@
       createLogStore: createLogStore, logStoreReset: logStoreReset, logStoreIngest: logStoreIngest,
       logStoreStreamOpened: logStoreStreamOpened, logStoreStreamClosed: logStoreStreamClosed,
       stepWindowOf: stepWindowOf, windowSignature: windowSignature, lineInWindow: lineInWindow, stepFilterChange: stepFilterChange,
+      safeLink: safeLink, __dom: function () {
+        return { app: app, el: el, renderSummary: renderSummary, renderDetails: renderDetails, renderHelp: renderHelp, buildLine: buildLine,
+          renderLiveNotes: renderLiveNotes, renderChips: renderChips, renderLogAccessWindow: renderLogAccessWindow, renderTree: renderTree, buildItem: buildItem };
+      },
       lineScope: lineScope, lineInScope: lineInScope, stepRule: stepRule, stepDescription: stepDescription, stepsEmptyText: stepsEmptyText,
       emptyLogView: emptyLogView, MODE_SECTIONS: MODE_SECTIONS,
       fileOptionList: fileOptionList, keptFileSelection: keptFileSelection, normLevel: normLevel, parseTime: parseTime,
@@ -1477,6 +1502,7 @@
       if (r.tailer) applyTailer(r.tailer);
       if (Array.isArray(r.files)) applyFiles(r.files);
       applyLogBatch(r.lines, { server: r.server, source: 'catchup', lastSeq: r.lastSeq });
+      if (r.truncated === true) return loadLogs();   // the back end caps one answer: fetch the rest
     }, function (e) { setError('logs', 'Could not read the logs: ' + e.message); throw e; });
   }
 
@@ -2490,7 +2516,6 @@
   // The Log access window: the one-line status, then per phase the account, the folders, when, how, this deployment,
   // how sure Sonar is, and where it comes from. Opened by the Log access button in the top bar.
 
-  var LA_PHASES = ['provisioning', 'arc-registration', 'validation', 'deployment', 'post-deployment', 'update', 'add-node', 'repair'];
   var laReturnFocus = null;
 
   function laIsOpen() { var m = $('la-modal'); return !!m && !m.hidden; }
@@ -2623,7 +2648,8 @@
       var ul = el('ul');
       listOf(src).forEach(function (s) {
         var li = el('li');
-        if (/^https?:\/\//i.test(s)) li.appendChild(el('a', { href: s, target: '_blank', rel: 'noopener noreferrer', text: s }));
+        var sl = safeLink(s);
+        if (sl) li.appendChild(el('a', { href: sl, target: '_blank', rel: 'noopener noreferrer', text: s }));
         else li.appendChild(document.createTextNode(s));
         ul.appendChild(li);
       });
@@ -2785,8 +2811,9 @@
     if (!a || !arr(a.links).length) return;
     links.textContent = '';
     arr(a.links).filter(isObj).forEach(function (l) {
-      if (!/^https:\/\//i.test(str(l.url))) return;   // only https links the back end sent
-      links.appendChild(el('a', { class: 'lk', href: l.url, target: '_blank', rel: 'noopener noreferrer', text: str(l.label) + ' ↗' }));
+      var href = safeLink(l.url);   // https on a known documentation host, else it is only text
+      if (href) links.appendChild(el('a', { class: 'lk', href: href, target: '_blank', rel: 'noopener noreferrer', text: str(l.label) + ' ↗' }));
+      else links.appendChild(el('span', { class: 'lk', text: str(l.label) }));
     });
   }
 

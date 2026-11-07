@@ -25,6 +25,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 * **config:** optional `location` (infrastructure file: `azure.location`), shown in Details.
 * **demo:** `?demo=1&route=simplified` is a ZTP run of three machines (two done, one installing the OS), with ZTP events in the logs.
 
+### Security
+
+* **web:** every request is checked before routing. The `Host` header must be `localhost`, `127.0.0.1` or `[::1]` with Sonar's port (400 otherwise; defeats DNS rebinding) and an `Origin` header must be Sonar's own (403). Sonar listens on `localhost` and `127.0.0.1`.
+* **web:** a per-start **access token**, on by default. The URL Sonar prints and opens carries `?t=<token>`; Sonar sets a `HttpOnly`, `SameSite=Strict` cookie and redirects to the URL without it. Every other request needs the cookie (401 without). The token is masked like a password and is in no recording, export, `/api/details` or message. `-NoAccessToken` (or `accessToken: false`) turns it off, for a single-user machine only. **How you open Sonar changes:** use the printed URL with `?t=`.
+* **web:** security headers on every response (`Cache-Control: no-store`, `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options: DENY`, a `Content-Security-Policy` with no `unsafe-inline`); JSON bodies escape `<`, `>` and `&`. The page no longer sets inline styles.
+* **web:** only the page's own five files are served, from a fixed table. Help and Log access links are followed only when `https` on `azurelocal.cloud`, `learn.microsoft.com` or `github.com`; otherwise they are text.
+* **api:** at most 4 live streams (`maxEventStreams`), 429 beyond; `/api/logs` answers are capped (2000 lines, about 2 MB, `truncated`) and `since` is parsed strictly. `/api/details` cuts local paths out of free text.
+
 ### Fixed
 
 * **web:** clicking a provisioning step such as *Register machine* or *Install OS* left the live logs empty ("No lines match the current filters"). Cause: every step offered a time-window log filter, but a step that runs in Azure writes nothing to a node log, so its window held no line. Azure steps now show their details under the step and never filter the logs; node steps filter by machine and time window (or, for a ZTP stage, by the ZTP event lines of that stage); and an empty result says why and offers **Show all lines for this node** and **Clear filter**.

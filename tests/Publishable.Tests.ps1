@@ -376,7 +376,7 @@ Describe 'Publishable: the scrubbed recording replays like the original' {
         Mock -ModuleName AzlSonar -CommandName Start-Process -MockWith { throw 'The browser must not open in tests.' }
         $port = Get-SonarFreeTcpPort
         $results = Invoke-ReplayRun -Port $port -Paths @('/api/config', '/api/replay', '/api/state', '/api/logs', '/') -Start {
-            Start-AzlSonarServer -Replay $script:Scrubbed -Port $port -Speed 240 -StartAt '0:35' -NoBrowser -InformationAction SilentlyContinue
+            Start-AzlSonarServer -Replay $script:Scrubbed -Port $port -Speed 240 -StartAt '0:35' -NoBrowser -NoAccessToken -InformationAction SilentlyContinue
         }
         $results['/api/config'].Status | Should -Be 200
         ($results['/api/config'].Body | ConvertFrom-Json).cluster | Should -Be 'cluster-01'

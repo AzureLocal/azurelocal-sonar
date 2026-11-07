@@ -441,7 +441,7 @@ Describe 'Start-AzlSonarServer -Replay and -Record (random port, no Azure, no no
         Mock -ModuleName AzlSonar -CommandName Start-Process -MockWith { throw 'The browser must not open in tests.' }
         $port = Get-SonarFreeTcpPort
         $results = Invoke-SonarServerRun -Port $port -Paths @('/api/config', '/api/replay', '/api/state', '/api/guidance', '/api/logs', '/api/events', '/api/export', '/') -Start {
-            Start-AzlSonarServer -Replay $script:Fixture -Port $port -Speed 240 -StartAt '0:35' -NoBrowser -InformationAction SilentlyContinue
+            Start-AzlSonarServer -Replay $script:Fixture -Port $port -Speed 240 -StartAt '0:35' -NoBrowser -NoAccessToken -InformationAction SilentlyContinue
         }
         $config = $results['/api/config'].Body | ConvertFrom-Json
         $results['/api/config'].Status | Should -Be 200
@@ -470,7 +470,7 @@ Describe 'Start-AzlSonarServer -Replay and -Record (random port, no Azure, no no
         Mock -ModuleName AzlSonar -CommandName Start-AzlSonarWorker -MockWith { throw 'A replay starts no worker.' }
         $port = Get-SonarFreeTcpPort
         $results = Invoke-SonarServerRun -Port $port -Paths @('/api/config') -Start {
-            Start-AzlSonarServer -Replay $script:Fixture -Port $port -StartAt deployment -Autoplay -NoBrowser -InformationAction SilentlyContinue
+            Start-AzlSonarServer -Replay $script:Fixture -Port $port -StartAt deployment -Autoplay -NoBrowser -NoAccessToken -InformationAction SilentlyContinue
         }
         $config = $results['/api/config'].Body | ConvertFrom-Json
         $config.replay.startAtPhase | Should -Be 'deployment'
@@ -496,7 +496,7 @@ Describe 'Start-AzlSonarServer -Replay and -Record (random port, no Azure, no no
         $recordPath = Join-Path $TestDrive 'live/clus01.jsonl'
         $port = Get-SonarFreeTcpPort
         $results = Invoke-SonarServerRun -Port $port -Paths @('/api/config', '/api/replay') -Start {
-            Start-AzlSonarServer -ConfigPath $script:ConfigPath -Record $recordPath -Port $port -NoBrowser -InformationAction SilentlyContinue
+            Start-AzlSonarServer -ConfigPath $script:ConfigPath -Record $recordPath -Port $port -NoBrowser -NoAccessToken -InformationAction SilentlyContinue
         }
         $config = $results['/api/config'].Body | ConvertFrom-Json
         $config.recording.file | Should -Be 'clus01.jsonl'
@@ -525,7 +525,7 @@ Describe 'Start-AzlSonarServer -Replay and -Record (random port, no Azure, no no
         ConvertTo-SonarConfigJson $cfg | Set-Content -LiteralPath $path
         $port = Get-SonarFreeTcpPort
         $null = Invoke-SonarServerRun -Port $port -Paths @('/api/config') -Start {
-            Start-AzlSonarServer -ConfigPath $path -Port $port -NoBrowser -InformationAction SilentlyContinue
+            Start-AzlSonarServer -ConfigPath $path -Port $port -NoBrowser -NoAccessToken -InformationAction SilentlyContinue
         }
         Should -Invoke -ModuleName AzlSonar -CommandName Start-AzlSonarWorker -Times 1 -Exactly -ParameterFilter {
             $Command -eq 'Invoke-AzlSonarRecorderLoop' -and $Arguments.Path -eq [System.IO.Path]::GetFullPath((Join-Path $dir 'recordings/from-config.jsonl'))

@@ -92,10 +92,26 @@ Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $spCredential 
 
 - `-NoBrowser` stops it opening a browser; `-Credential` avoids the prompt (without it, `credential.source: prompt` waits for input); `-Record` keeps the run as the output you collect.
 - Sonar runs until it is stopped (Ctrl+C or the job being stopped). Run it as a background job or a separate step and stop it when the pipeline step ends.
-- The page answers `localhost` only (anything else gets 403). To look at it from another machine, use an SSH tunnel or a remote desktop session; there is no setting to open it up.
+- The page answers `localhost` only, and only with the access token. `-NoBrowser` still prints the URL with the token (`http://localhost:8642/?t=<token>`; read it from the step's output, it is new at every start). To look at it from another machine, use an SSH tunnel or a remote desktop session; there is no setting to open it up.
 - Give the log credential from the pipeline's secret store, never from the infrastructure file or the config file (the file only holds `keyvault://` references; secrets in the config are refused). `credential.source: keyvault` reads the secret names you give from Key Vault (needs Az.KeyVault).
 
 **Access:** a service principal or managed identity with Reader on the resource group, a network path to the seed node if you want logs, and the log account from the secret store.
+
+## Security
+
+### What protects the page
+
+- **Loopback only.** Sonar listens on `localhost` and `127.0.0.1` only, answers requests from this machine only, and accepts only `GET`.
+- **An access token, on by default.** At start Sonar makes a random token (32 hex characters). The URL it prints and opens, `http://localhost:<port>/?t=<token>`, carries it once; Sonar answers with a cookie (`sonar_t`, `HttpOnly`, `SameSite=Strict`) and redirects to the same address without the token, so it stays out of the address bar and the history. Every other request, the page and every `/api` route included, needs that cookie and gets 401 without it. The token is new at every start, is never logged, recorded, exported or shown (it is masked like a password), and is compared in constant time.
+- **Host and Origin checks.** A request must name `localhost`, `127.0.0.1` or `[::1]` with Sonar's port in its `Host` header (anything else gets 400), and an `Origin` header, when there is one, must be Sonar's own (anything else gets 403). That defeats DNS rebinding, where a web page on the internet gets your browser to talk to a name that points at your own machine.
+- **Browser hardening.** Every response carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and a `Content-Security-Policy` that allows only Sonar's own files (no inline script or style). The page writes data into the DOM as text, and follows a link from the back end only when it is `https` on `azurelocal.cloud`, `learn.microsoft.com` or `github.com`. Only a fixed list of files is served.
+- **Limits.** At most 4 live streams at once (`maxEventStreams`, 429 beyond it), one `/api/logs` answer is capped at 2000 lines and about 2 MB, and `since` must be a whole number.
+
+### What an operator should know
+
+- **Loopback is not a security boundary on a shared host.** On a jump host every signed-in account (and every program they run) can reach `localhost`. The access token is what keeps another account out: do not paste the printed URL into a shared chat, a ticket or a screen share, and do not leave Sonar running unattended. If you start Sonar with `-NoAccessToken` (or `accessToken: false`), any local account can read the page: use that on a single-user machine only.
+- **The page shows addresses.** Details lists the nodes' management addresses, the resource group and the first 8 characters of the subscription, and the logs hold whatever the nodes log (secrets are masked, not guaranteed absent). Treat the page and the export like the deployment itself.
+- **Remote access** is an SSH tunnel or a remote desktop session, never a changed binding. Open the printed URL on the machine where Sonar runs (or through the tunnel, with the same `?t=` URL).
 
 ## Record and share a session
 

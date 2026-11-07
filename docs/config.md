@@ -21,6 +21,8 @@ Types are JSON types. "Dashboard" says what the key changes on the page.
 | `clusterName` | string | yes | | `clus01` | The cluster name in the top bar and the `deploymentSettings` that gives the step tree. |
 | `identityModel` | `LocalIdentity` or `ActiveDirectory` | yes | | `ActiveDirectory` | The account guidance in the Log access window and whether `TrustedHosts` is checked. |
 | `provisioningRoute` | `auto`, `simplified`, `oem-image` | no | `auto` | `simplified` | The first mode: **Provisioning (ZTP)** (edge machines) or **Provisioning (OS image)** (node probe). `oem-image` never reads edge machines; `simplified` never starts the node probe. |
+| `accessToken` | `true` or `false` | no | `true` | `false` | `false` turns the per-start access token off: any account on the machine can read the page. Single-user machines only. `-NoAccessToken` does the same. |
+| `maxEventStreams` | integer 1 to 50 | no | `4` | `4` | Live browser streams served at once; more get 429 and the page polls instead. |
 | `pollSeconds` | integer 5 to 3600 | no | `20` | `30` | How often Azure is read; how fresh the page is. `-PollSeconds` overrides it. |
 | `nodes` | list | yes (one or more) | | see below | The machine cards, the steps per machine and the log filters. |
 | `nodes[].name` | string, unique | yes | | `node01` | The machine's name on the page. |

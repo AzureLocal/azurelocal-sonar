@@ -194,6 +194,8 @@ function Protect-AzlSonarText {
         $script:AzlSonarSecretRegex = @(
             '(?i)(\b(?:password|passwd|pwd|secret|client_?secret|access_?token|refresh_?token|api_?key|accountkey|sharedaccesskey)\b\s*[=:]\s*)("[^"]*"|''[^'']*''|[^\s;,&]+)',
             '(?i)(\bBearer\s+)[A-Za-z0-9\-\._~\+/]+=*',
+            '(?i)(\bsonar_t=)[^\s;,&]+',
+            '(?i)([?&]t=)[0-9a-f]{32}\b',
             '(?i)(\b(?:sig|se|skoid|sktid)=)[^&\s"]+',
             '(?i)(-(?:Password|AsPlainText\s+-Force)\s+)("[^"]*"|''[^'']*''|\S+)'
         ) | ForEach-Object { [regex]::new($_, $options) }

@@ -154,6 +154,22 @@ function Get-AzlSonarIdentityMeaning {
     return 'Machines stay in a workgroup (local identity); Sonar reads the logs with the local administrator account.'
 }
 
+function ConvertTo-AzlSonarSafeText {
+    <#
+    .SYNOPSIS
+        Free text for the page's Details: a local path is cut to its file name, secrets are masked, the length is capped.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowNull()][AllowEmptyString()][string]$Text, [int]$Max = 240)
+
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    $out = [regex]::Replace($Text, '(?<![\w])(?:[A-Za-z]:[\\/]|\\\\)[^\s''";,)]*', { param($m) ($m.Value -split '[\\/]')[-1] })
+    $out = Protect-AzlSonarText -Text $out
+    if ($out.Length -gt $Max) { $out = $out.Substring(0, $Max - 1) + '...' }
+    return $out
+}
+
 function Get-AzlSonarDetail {
     <#
     .SYNOPSIS
@@ -234,7 +250,7 @@ function Get-AzlSonarDetail {
                 pollSeconds  = $(if ($null -ne $facts) { [int]$facts.pollSeconds } else { 0 })
                 lastAnswerAt = $(if ($polledAt) { $polledAt } else { $null })
                 ok           = $(if ($null -eq $state) { $false } else { -not $pollError })
-                message      = $(if ($pollError) { [string]$pollError } else { '' })
+                message      = $(if ($pollError) { ConvertTo-AzlSonarSafeText ([string]$pollError) } else { '' })
             }
             ztpEvents = [ordered]@{
                 configured  = [bool]($null -ne $facts -and $facts.ztpEventsFile)
@@ -248,7 +264,7 @@ function Get-AzlSonarDetail {
                 node        = [string](Get-AzlSonarMember $tailer 'node' '')
                 credential  = [string](Get-AzlSonarMember $tailer 'credential' '')
                 transport   = $(if ($null -ne $facts) { [string]$facts.transport } else { '' })
-                reason      = [string](Get-AzlSonarMember $tailer 'reason' '')
+                reason      = ConvertTo-AzlSonarSafeText ([string](Get-AzlSonarMember $tailer 'reason' ''))
                 lastLineAt  = $lastLine
             }
         }
@@ -260,7 +276,7 @@ function Get-AzlSonarDetail {
             checkedAt       = $(if ($null -ne $watch -and $watch['CheckedAt']) { [string]$watch['CheckedAt'] } else { $null })
             checkEverySeconds = $(if ($kind -eq 'infrastructure' -and -not $replaying) { 60 } else { $null })
             lastChangeAt    = $(if ($null -ne $watch -and $watch['ChangedAt']) { [string]$watch['ChangedAt'] } else { $null })
-            lastChangeNote  = $(if ($null -ne $watch -and $watch['Note']) { [string]$watch['Note'] } else { '' })
+            lastChangeNote  = $(if ($null -ne $watch -and $watch['Note']) { ConvertTo-AzlSonarSafeText ([string]$watch['Note']) } else { '' })
             notSet          = @($(if ($null -ne $facts -and -not $replaying) { $facts.notSet }))
             version         = [string]$Server.Version
         }

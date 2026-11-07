@@ -17,6 +17,11 @@
   // Optional, default "auto". simplified (simplified machine provisioning, azurelocal-ztp), oem-image (OEM image or ISO
   // plus Arc registration) or auto. scenario.os_install: simplified | iso.
   "provisioningRoute": "auto",
+  // Optional, default true. The page needs a per-start access token (the URL Sonar prints carries it). false turns that off:
+  // any account on this machine can then read the page. For a single-user machine only. -NoAccessToken does the same.
+  "accessToken": true,
+  // Optional, default 4 (1 to 50). Live browser streams served at once; more get 429 and the page polls instead.
+  "maxEventStreams": 4,
   // Optional, default 20. Seconds between Azure polls, 5 to 3600. Start-AzlSonar.ps1 -PollSeconds overrides it.
   "pollSeconds": 20,
   // Optional, default Standard. Standard or RackAware: what the page says about the shape of the deployment.

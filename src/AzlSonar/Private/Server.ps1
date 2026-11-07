@@ -15,7 +15,10 @@ $script:AzlSonarContentTypes = @{
 }
 $script:AzlSonarSsePingSeconds = 15
 $script:AzlSonarSseMaxLinesPerEvent = 1000
-$script:AzlSonarSseMaxClients = 10              # live streams served at once; more get 503
+$script:AzlSonarSseMaxClients = 4               # live streams served at once (config maxEventStreams); more get 429
+$script:AzlSonarLogsMaxLines = 2000             # lines in one /api/logs answer
+$script:AzlSonarLogsMaxBytes = 2097152          # bytes of lines in one /api/logs answer (2 MB)
+$script:AzlSonarContentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 $script:AzlSonarSseMaxQueuedBytes = 4194304     # bytes queued for one client before it counts as fallen behind
 $script:AzlSonarSseWriteTimeoutSeconds = 15     # one write still in flight after this long drops the client
 
@@ -125,6 +128,40 @@ function Stop-AzlSonarWorker {
     }
 }
 
+function ConvertTo-AzlSonarSafeJsonText {
+    <#
+    .SYNOPSIS
+        Writes the characters less-than, greater-than and ampersand of a JSON text as their \u escapes. They only occur
+        inside strings, so the meaning is unchanged.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowNull()][AllowEmptyString()][string]$Json)
+
+    if ([string]::IsNullOrEmpty($Json)) { return [string]$Json }
+    $lt = '\u' + '003c'
+    $gt = '\u' + '003e'
+    $amp = '\u' + '0026'
+    return $Json.Replace('<', $lt).Replace('>', $gt).Replace('&', $amp)
+}
+
+function Set-AzlSonarSecurityHeader {
+    <#
+    .SYNOPSIS
+        Puts the security headers on a response: no caching, no sniffing, no referrer, no framing and a Content-Security-Policy
+        that allows only this origin's own files.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Sets headers on an in-memory response only.')]
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Net.HttpListenerResponse]$Response)
+
+    $Response.Headers['Cache-Control'] = 'no-store'
+    $Response.Headers['X-Content-Type-Options'] = 'nosniff'
+    $Response.Headers['Referrer-Policy'] = 'no-referrer'
+    $Response.Headers['X-Frame-Options'] = 'DENY'
+    $Response.Headers['Content-Security-Policy'] = $script:AzlSonarContentSecurityPolicy
+}
+
 function Send-AzlSonarHttpResponse {
     <#
     .SYNOPSIS
@@ -148,12 +185,13 @@ function Send-AzlSonarHttpResponse {
     )
 
     try {
+        # JSON never carries a raw <, > or & (an HTML parser that ever saw the body finds no tag in it); JSON.parse reads it unchanged.
+        if ($Body -is [string] -and $ContentType -like 'application/json*') { $Body = ConvertTo-AzlSonarSafeJsonText $Body }
         $bytes = if ($Body -is [byte[]]) { $Body } elseif ($null -eq $Body) { [byte[]]@() } else { [System.Text.Encoding]::UTF8.GetBytes([string]$Body) }
         $Response.StatusCode = $StatusCode
         $Response.ContentType = $ContentType
-        $Response.Headers['X-Content-Type-Options'] = 'nosniff'
-        $Response.Headers['Referrer-Policy'] = 'no-referrer'
-        if ($NoCache) { $Response.Headers['Cache-Control'] = 'no-store' }
+        $null = $NoCache   # every response is no-store now
+        Set-AzlSonarSecurityHeader -Response $Response
         foreach ($key in $Header.Keys) { $Response.Headers[$key] = [string]$Header[$key] }
         $Response.ContentLength64 = $bytes.Length
         if ($bytes.Length -gt 0) { $Response.OutputStream.Write($bytes, 0, $bytes.Length) }
@@ -182,10 +220,23 @@ function Send-AzlSonarJsonError {
     Send-AzlSonarHttpResponse -Response $Response -StatusCode $StatusCode -Body (ConvertTo-AzlSonarJson ([ordered]@{ error = $Message })) -NoCache
 }
 
+# The only files the page is made of. The request path picks an entry; it is never combined into a file path.
+$script:AzlSonarStaticFiles = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+$script:AzlSonarStaticFiles['/'] = 'index.html'
+$script:AzlSonarStaticFiles['/index.html'] = 'index.html'
+$script:AzlSonarStaticFiles['/app.js'] = 'app.js'
+$script:AzlSonarStaticFiles['/app.css'] = 'app.css'
+$script:AzlSonarStaticFiles['/azurelocal-sonar-icon.svg'] = 'azurelocal-sonar-icon.svg'
+
 function Resolve-AzlSonarStaticPath {
     <#
     .SYNOPSIS
-        Maps a URL path to a file under the web root; returns $null for anything outside it.
+        Maps a (once decoded) URL path to one of the shipped page files; returns $null for anything else.
+    .DESCRIPTION
+        An allow-list: /, /index.html, /app.js, /app.css and the icon. A path with a control character, a drive colon, a
+        wildcard, a quote, an angle bracket, a pipe or a backslash is refused before the lookup, so are reserved device
+        names, a trailing dot or space and an alternate data stream. The file is then resolved under the web root and must
+        start with the root plus a directory separator.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -197,12 +248,17 @@ function Resolve-AzlSonarStaticPath {
         [string]$UrlPath
     )
 
-    $relative = if ($UrlPath -eq '/' -or $UrlPath -eq '') { 'index.html' } else { $UrlPath.TrimStart('/') }
-    if ($relative -match '(^|[\\/])\.\.([\\/]|$)' -or $relative.Contains(':')) { return $null }
+    if ($UrlPath -match '[\x00-\x1f:*?"<>|\\]') { return $null }
+    foreach ($segment in $UrlPath.Split('/')) {
+        if ($segment -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$') { return $null }
+        if ($segment -match '[. ]$' -and $segment -notin '', '.', '..') { return $null }
+        if ($segment -eq '..') { return $null }
+    }
+    $name = $null
+    if (-not $script:AzlSonarStaticFiles.TryGetValue($UrlPath, [ref]$name)) { return $null }
     $root = [System.IO.Path]::GetFullPath($WebRoot).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
-    $full = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($root, $relative))
-    $prefix = $root + [System.IO.Path]::DirectorySeparatorChar
-    if (-not $full.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+    $full = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($root, $name))
+    if (-not $full.StartsWith($root + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
     if (-not [System.IO.File]::Exists($full)) { return $null }
     return $full
 }
@@ -222,13 +278,44 @@ function Get-AzlSonarLogsJson {
         [Parameter(Mandatory)]
         [System.Collections.IDictionary]$Shared,
 
-        [long]$Since = 0
+        [long]$Since = 0,
+
+        # The export keeps the whole ring buffer; the page's answers are capped.
+        [switch]$NoLimit
     )
 
-    $window = Get-AzlSonarLogWindow -Shared $Shared -Since $Since
+    if ($NoLimit) {
+        $window = Get-AzlSonarLogWindow -Shared $Shared -Since $Since
+        $lines = @($window.Lines)
+        $lastSeq = [long]$window.LastSeq
+        $truncated = $false
+    }
+    else {
+        $window = Get-AzlSonarLogWindow -Shared $Shared -Since $Since -Max $script:AzlSonarLogsMaxLines
+        $lines = [System.Collections.Generic.List[object]]::new()
+        $texts = [System.Collections.Generic.List[string]]::new()
+        $bytes = 0
+        foreach ($line in @($window.Lines)) {
+            $json = ConvertTo-AzlSonarJson $line
+            if ($lines.Count -gt 0 -and $bytes + $json.Length -gt $script:AzlSonarLogsMaxBytes) { break }
+            $bytes += $json.Length + 1
+            $lines.Add($line)
+            $texts.Add($json)
+        }
+        $lastSeq = [long]$window.LastSeq
+        $truncated = $false
+        # Not every line fitted (or the ring holds more than one answer): the cursor stops at the last line sent, so the
+        # page asks again for the rest.
+        if ($lines.Count -gt 0 -and [long]$lines[$lines.Count - 1]['seq'] -lt $lastSeq) {
+            $lastSeq = [long]$lines[$lines.Count - 1]['seq']
+            $truncated = $true
+        }
+        $lines = $texts
+    }
+    $linesJson = if ($NoLimit) { ConvertTo-AzlSonarJson $lines } else { '[' + ($lines -join ',') + ']' }
     $files = ConvertTo-AzlSonarJson @($Shared.Files)
-    return '{"server":' + (ConvertTo-AzlSonarJson ([string]$Shared.ServerId)) + ',"lastSeq":' + [long]$window.LastSeq +
-        ',"tailer":' + $Shared.TailerJson + ',"files":' + $files + ',"lines":' + (ConvertTo-AzlSonarJson $window.Lines) + '}'
+    return '{"server":' + (ConvertTo-AzlSonarJson ([string]$Shared.ServerId)) + ',"lastSeq":' + $lastSeq + ',"truncated":' + $truncated.ToString().ToLowerInvariant() +
+        ',"tailer":' + $Shared.TailerJson + ',"files":' + $files + ',"lines":' + $linesJson + '}'
 }
 
 function Get-AzlSonarExportJson {
@@ -282,7 +369,7 @@ function Get-AzlSonarExportJson {
         ',"guidance":' + $Server.GuidanceJson +
         ',"state":' + $stateJson +
         ',"timeline":[' + ($timeline -join ',') + ']' +
-        ',"logs":' + (Get-AzlSonarLogsJson -Shared $shared -Since 0) + '}'
+        ',"logs":' + (Get-AzlSonarLogsJson -Shared $shared -Since 0 -NoLimit) + '}'
 }
 
 function Open-AzlSonarSseClient {
@@ -305,15 +392,15 @@ function Open-AzlSonarSseClient {
     )
 
     $response = $Context.Response
-    if ($Server.Clients.Count -ge $script:AzlSonarSseMaxClients) {
-        Send-AzlSonarHttpResponse -Response $response -StatusCode 503 -ContentType 'text/plain; charset=utf-8' -NoCache -Header @{ 'Retry-After' = '30' } `
-            -Body "AzL Sonar serves at most $($script:AzlSonarSseMaxClients) live streams at once. Close another Sonar tab; this page polls meanwhile."
+    $cap = if ($Server.ContainsKey('MaxEventStreams') -and [int]$Server['MaxEventStreams'] -gt 0) { [int]$Server['MaxEventStreams'] } else { $script:AzlSonarSseMaxClients }
+    if ($Server.Clients.Count -ge $cap) {
+        Send-AzlSonarHttpResponse -Response $response -StatusCode 429 -ContentType 'text/plain; charset=utf-8' -NoCache -Header @{ 'Retry-After' = '30' } `
+            -Body "AzL Sonar serves at most $cap live streams at once. Close another Sonar tab; this page polls meanwhile."
         return
     }
     $response.StatusCode = 200
     $response.ContentType = 'text/event-stream; charset=utf-8'
-    $response.Headers['Cache-Control'] = 'no-store'
-    $response.Headers['X-Content-Type-Options'] = 'nosniff'
+    Set-AzlSonarSecurityHeader -Response $response
     $response.SendChunked = $true
     $response.KeepAlive = $true
     $client = New-AzlSonarSseClient -Response $response -Stream $response.OutputStream -LogSeq ([long]$Server.Shared.LogSeq)
@@ -375,7 +462,7 @@ function Add-AzlSonarSseText {
         [string]$Text
     )
 
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-AzlSonarSafeJsonText $Text))
     if ([long]$Client.QueuedBytes + $bytes.Length -gt $script:AzlSonarSseMaxQueuedBytes) {
         throw "The client fell behind: more than $($script:AzlSonarSseMaxQueuedBytes) bytes queued."
     }
@@ -520,6 +607,59 @@ function Send-AzlSonarSseUpdate {
     }
 }
 
+function Test-AzlSonarHostHeader {
+    <#
+    .SYNOPSIS
+        True when the Host header names this machine's loopback address on the port the request came in on.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([AllowNull()][AllowEmptyString()][string]$HostHeader, [Parameter(Mandatory)][int]$Port)
+
+    if ([string]::IsNullOrEmpty($HostHeader)) { return $false }
+    return $HostHeader -imatch ('^(localhost|127\.0\.0\.1|\[::1\]):' + $Port + '$')
+}
+
+function Test-AzlSonarOriginHeader {
+    <#
+    .SYNOPSIS
+        True when an Origin header is this page's own origin (http://localhost:<port> or http://127.0.0.1:<port>).
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([AllowNull()][AllowEmptyString()][string]$Origin, [Parameter(Mandatory)][int]$Port)
+
+    return $Origin -imatch ('^http://(localhost|127\.0\.0\.1):' + $Port + '$')
+}
+
+function Test-AzlSonarTokenEqual {
+    <#
+    .SYNOPSIS
+        Compares two access tokens in constant time.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([AllowNull()][AllowEmptyString()][string]$Left, [AllowNull()][AllowEmptyString()][string]$Right)
+
+    $a = [System.Text.Encoding]::UTF8.GetBytes([string]$Left)
+    $b = [System.Text.Encoding]::UTF8.GetBytes([string]$Right)
+    if ($a.Length -ne $b.Length -or $a.Length -eq 0) { return $false }
+    return [System.Security.Cryptography.CryptographicOperations]::FixedTimeEquals($a, $b)
+}
+
+function New-AzlSonarAccessToken {
+    <#
+    .SYNOPSIS
+        A fresh access token: 32 hex characters from the system's cryptographic random generator.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Returns a random string only.')]
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    return [System.Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(16)).ToLowerInvariant()
+}
+
 function Invoke-AzlSonarHttpRequest {
     <#
     .SYNOPSIS
@@ -546,6 +686,40 @@ function Invoke-AzlSonarHttpRequest {
         if ($request.HttpMethod -ne 'GET') {
             Send-AzlSonarHttpResponse -Response $response -StatusCode 405 -ContentType 'text/plain; charset=utf-8' -Body 'Only GET is supported.' -Header @{ Allow = 'GET' }
             return
+        }
+        # DNS rebinding: the peer is loopback but the Host header is the attacker's name. Only this machine's own names pass.
+        $port = [int]$request.LocalEndPoint.Port
+        if (-not (Test-AzlSonarHostHeader -HostHeader ([string]$request.Headers['Host']) -Port $port)) {
+            Send-AzlSonarHttpResponse -Response $response -StatusCode 400 -ContentType 'text/plain; charset=utf-8' -Body ''
+            return
+        }
+        $origin = $request.Headers['Origin']
+        if ($null -ne $origin -and -not (Test-AzlSonarOriginHeader -Origin ([string]$origin) -Port $port)) {
+            Send-AzlSonarHttpResponse -Response $response -StatusCode 403 -ContentType 'text/plain; charset=utf-8' -Body ''
+            return
+        }
+        $token = if ($Server.ContainsKey('Token')) { [string]$Server['Token'] } else { '' }
+        if ($token) {
+            $cookie = $request.Cookies['sonar_t']
+            $cookieOk = $null -ne $cookie -and (Test-AzlSonarTokenEqual -Left ([string]$cookie.Value) -Right $token)
+            if (-not $cookieOk) {
+                $offered = $request.QueryString['t']
+                if ($offered -and (Test-AzlSonarTokenEqual -Left ([string]$offered) -Right $token)) {
+                    # First visit with the token: keep it in a cookie and redirect to the same address without it.
+                    $query = foreach ($key in @($request.QueryString.AllKeys)) {
+                        if ($key -and $key -ne 't') { [uri]::EscapeDataString($key) + '=' + [uri]::EscapeDataString([string]$request.QueryString[$key]) }
+                    }
+                    $target = '/' + $request.Url.AbsolutePath.TrimStart('/')
+                    if (@($query).Count -gt 0) { $target += '?' + (@($query) -join '&') }
+                    Send-AzlSonarHttpResponse -Response $response -StatusCode 302 -ContentType 'text/plain; charset=utf-8' -Body '' -Header @{
+                        Location     = $target
+                        'Set-Cookie' = "sonar_t=$token; HttpOnly; SameSite=Strict; Path=/"
+                    }
+                    return
+                }
+                Send-AzlSonarHttpResponse -Response $response -StatusCode 401 -ContentType 'text/plain; charset=utf-8' -Body 'Open the URL Sonar printed.'
+                return
+            }
         }
         $path = [uri]::UnescapeDataString($request.Url.AbsolutePath)
         $shared = $Server.Shared
@@ -586,9 +760,12 @@ function Invoke-AzlSonarHttpRequest {
             '/api/logs' {
                 $since = [long]0
                 $sinceText = $request.QueryString['since']
-                if ($sinceText -and -not [long]::TryParse($sinceText, [ref]$since)) {
-                    Send-AzlSonarJsonError -Response $response -StatusCode 400 -Message 'since must be a whole number.'
-                    return
+                if ($sinceText) {
+                    if ($sinceText -notmatch '^[0-9]{1,15}$') {
+                        Send-AzlSonarJsonError -Response $response -StatusCode 400 -Message 'since must be a whole number from 0.'
+                        return
+                    }
+                    $since = [Math]::Min([long]$sinceText, [long]$shared.LogSeq)
                 }
                 Send-AzlSonarHttpResponse -Response $response -Body (Get-AzlSonarLogsJson -Shared $shared -Since $since) -NoCache
                 return
@@ -788,7 +965,10 @@ function Start-AzlSonarServer {
         [Parameter(ParameterSetName = 'Replay')]
         [switch]$Autoplay,
 
-        [switch]$NoBrowser
+        [switch]$NoBrowser,
+
+        # For a single-user machine only: without the access token any local account (and any local program) can read the page.
+        [switch]$NoAccessToken
     )
 
     $ErrorActionPreference = 'Stop'
@@ -867,13 +1047,29 @@ function Start-AzlSonarServer {
         if ($recordPath) { $startMessage += " Recording to $recordPath$(if ($Publishable) { ' (publishable: identifiers replaced by pseudonyms)' } else { ' (secrets masked; identifiers are kept: use -Publishable to share it)' })." }
     }
     $shared = $server.Shared
+    $tokenOn = -not $NoAccessToken
+    $maxStreams = $script:AzlSonarSseMaxClients
+    if ($PSCmdlet.ParameterSetName -eq 'Live') {
+        if (-not [bool](Get-AzlSonarMember $config 'accessToken' $true)) { $tokenOn = $false }
+        $maxStreams = [int](Get-AzlSonarMember $config 'maxEventStreams' $script:AzlSonarSseMaxClients)
+    }
+    $server.MaxEventStreams = $maxStreams
+    $accessToken = ''
+    if ($tokenOn) {
+        $accessToken = New-AzlSonarAccessToken
+        $server.Token = $accessToken
+        # Masked like a password in everything Sonar stores, serves or records.
+        $shared.Redact = @($shared.Redact) + $accessToken
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $server.WebRoot 'index.html'))) {
         Write-Warning "The page is missing ($($server.WebRoot)\index.html); the API still works."
     }
 
     $url = "http://localhost:$Port/"
+    $openUrl = if ($accessToken) { $url + '?t=' + $accessToken } else { $url }
     $listener = [System.Net.HttpListener]::new()
     $listener.Prefixes.Add($url)
+    $listener.Prefixes.Add("http://127.0.0.1:$Port/")
     try {
         $listener.Start()
     }
@@ -888,9 +1084,10 @@ function Start-AzlSonarServer {
             $workers.Add((Start-AzlSonarWorker -Name $spec.Name -Command $spec.Command -Arguments $spec.Arguments))
         }
 
-        Write-Information -MessageData ($startMessage -f $url) -InformationAction Continue
+        Write-Information -MessageData ($startMessage -f $openUrl) -InformationAction Continue
+        if (-not $accessToken) { Write-Warning 'The access token is off: any account on this machine can read this page. Use that on a single-user machine only.' }
         if (-not $NoBrowser) {
-            try { Start-Process -FilePath $url } catch { Write-Warning "Could not open the browser: $($_.Exception.Message). Open $url yourself." }
+            try { Start-Process -FilePath $openUrl } catch { Write-Warning "Could not open the browser: $($_.Exception.Message). Open $openUrl yourself." }
         }
 
         $pending = $listener.GetContextAsync()
