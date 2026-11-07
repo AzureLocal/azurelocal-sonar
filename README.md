@@ -392,8 +392,8 @@ Demo data (example names only); the [tour of the page](docs/tour.md) explains ea
 ## Further reading
 
 - [Tour of the page](docs/tour.md), [Getting started](docs/getting-started.md) and [How it works](docs/how-it-works.md)
-- [Design](docs/design.md): the API, data model and behaviour contract
-- Appendices: [A. Sonar API and commands](docs/appendix/a-sonar-api.md) (every HTTP route, exported command, config key, file, and Azure read) and [B. The Azure Local Configurator app API](docs/appendix/b-configurator-app-api.md) (every operation of the service the Configurator app uses, with how we know each one; not a supported API)
+- [Design](docs/design.md): the data model, the page server and the behaviour contract
+- [What Sonar reads](docs/how-it-works.md#what-sonar-reads): the read-only Azure calls and node reads Sonar makes. The full reference for the Azure, Redfish and Configurator app calls of a ZTP run is in the ZTP docs: [API reference](https://github.com/AzureLocal/azurelocal-ztp/blob/main/docs/appendix/api-reference.md) and [the Configurator app API](https://github.com/AzureLocal/azurelocal-ztp/blob/main/docs/appendix/configurator-app-api.md)
 - [Research](docs/research.md): Microsoft Learn sources and what was verified live
 - [Publishable recordings](docs/reference/publishable-recordings.md) and the [event feed](docs/reference/events.md) (the JSON Lines contract other tools can emit, and how to launch Sonar from a deployment pipeline)
 - Export bundle: `./scripts/Export-SonarBundle.ps1 -Recording <file> -OutDirectory <dir>` writes a timeline JSON and a self-contained HTML report from any recording.

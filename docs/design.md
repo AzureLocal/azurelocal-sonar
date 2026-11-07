@@ -124,7 +124,9 @@ Times with `Z` or an offset are exact. Times without one are node-local and conv
 
 Per phase and identity model: which account reads the node logs, where the logs are, when they exist, and the source. Phases: `provisioning`, `arc-registration`, `validation`, `deployment`, `post-deployment`. Documented sources only; anything not confirmed in a live test is marked `"verified": false` (an `observed` note may say what was seen live short of confirming the entry).
 
-## HTTP API (localhost only, `http://localhost:{port}/`)
+## Page server (localhost only, `http://localhost:{port}/`)
+
+These routes only feed Sonar's own page. They are internal, not an interface for other tools: they can change with the page, and Sonar does not document or support them as an API. (Tools that feed Sonar do it the other way round, through the [event feed](./reference/events.md).)
 
 | Route | Returns |
 | --- | --- |

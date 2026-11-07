@@ -27,14 +27,7 @@ export default defineConfig({
       { text: 'How it works', link: '/how-it-works' },
       { text: 'Design', link: '/design' },
       { text: 'Research and live findings', link: '/research' },
-      { text: 'Plan', link: '/plan' },
-      {
-        text: 'Appendix',
-        items: [
-          { text: 'A. Sonar API and commands', link: '/appendix/a-sonar-api' },
-          { text: 'B. Configurator app API', link: '/appendix/b-configurator-app-api' }
-        ]
-      }
+      { text: 'Plan', link: '/plan' }
     ],
     socialLinks: [
       { icon: 'github', link: 'https://github.com/AzureLocal/azurelocal-sonar' }
