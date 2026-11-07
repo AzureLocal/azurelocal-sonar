@@ -170,7 +170,7 @@ Describe 'ZTP Device and Network stage events (Add-AzlSonarZtpStageEvent, Conver
             $queued = ConvertTo-AzlSonarZtpStageStep -Stage Network -Events @(
                 (& $ev 'NetworkJobSubmitted' '2026-11-06T03:00:00Z' 'NIC1 (00-11-22-33-44-55) ApplyConfiguration apply: Static'),
                 (& $ev 'NetworkJobStatus' '2026-11-06T03:00:30Z' 'NIC1 ApplyConfiguration: Job is not yet triggered as other jobs are still running')) -Now $now
-            $ok = foreach ($s in 'ManagementAddressSet', 'ManagementAddressAlreadySet', 'ManagementAddressReported') { (ConvertTo-AzlSonarZtpStageStep -Stage Network -Events @((& $ev $s '2026-11-06T03:00:00Z' 'x')) -Now $now).status }
+            $ok = foreach ($s in 'ManagementAddressSet', 'ManagementAddressAlreadySet', 'ManagementAddressReported', 'ManagementAddressDeferredToOsConfiguration') { (ConvertTo-AzlSonarZtpStageStep -Stage Network -Events @((& $ev $s '2026-11-06T03:00:00Z' 'x')) -Now $now).status }
             $released = ConvertTo-AzlSonarZtpStageStep -Stage Network -Events @((& $ev 'ManagementAddressReleased' '2026-11-06T03:00:00Z' 'released from SLOT 3')) -Now $now
             $failed = ConvertTo-AzlSonarZtpStageStep -Stage Network -Events @((& $ev 'NetworkJobSubmitted' '2026-11-06T03:00:00Z' ''), (& $ev 'ManagementAddressFailed' '2026-11-06T03:30:00Z' 'ApplyConfiguration failed')) -Now $now
             [pscustomobject]@{
@@ -185,7 +185,7 @@ Describe 'ZTP Device and Network stage events (Add-AzlSonarZtpStageEvent, Conver
         $r.QueuedErrors | Should -Be 0
         $r.QueuedChildErrors | Should -Be 0
         $r.QueuedMessage | Should -Match 'Job is not yet triggered'
-        $r.Ok | Should -Be @('success', 'success', 'success')
+        $r.Ok | Should -Be @('success', 'success', 'success', 'success')
         $r.Released | Should -Be 'running'
         $r.Failed | Should -Be 'error'
         $r.FailedMessage | Should -Be 'ApplyConfiguration failed'

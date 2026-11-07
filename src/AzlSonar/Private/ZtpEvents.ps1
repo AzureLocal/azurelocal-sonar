@@ -140,14 +140,17 @@ $script:AzlSonarZtpStage = [ordered]@{
     }
     Network = @{
         Name        = 'Management address on the management NIC'
-        Description = 'azurelocal-ztp Network: the management address moved to the adapter with the management MAC through the edge machine''s networkAdapters API, after the OS install'
+        Description = 'azurelocal-ztp Network: checks the management address on the adapter with the management MAC after the OS install (verify-only). A static address the OS install reset to DHCP is deferred: OS configuration sets it by MAC afterwards, so ZTP itself is done'
         Id          = 'ztp.network'
-        Success     = @('ManagementAddressSet', 'ManagementAddressAlreadySet', 'ManagementAddressReported')
+        # ManagementAddressDeferredToOsConfiguration: ZTP verified the port and recorded what OS configuration must set. ZTP's
+        # part is finished, so it counts as done; the message says which address is still to be set.
+        Success     = @('ManagementAddressSet', 'ManagementAddressAlreadySet', 'ManagementAddressReported', 'ManagementAddressDeferredToOsConfiguration')
         Failed      = @('ManagementAddressFailed')
         Waiting     = 'Waiting for the Network stage'
         NotApplicable = 'Not applicable'
         Labels      = @{
             ManagementAddressReported   = 'Address reported, not changed'
+            ManagementAddressDeferredToOsConfiguration = 'Checked; OS configuration sets the address'
             ManagementAddressAlreadySet = 'Address already set'
             NetworkJobSubmitted         = 'ApplyConfiguration job sent'
             NetworkJobStatus            = 'Job status'
