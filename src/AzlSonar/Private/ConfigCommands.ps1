@@ -385,11 +385,24 @@ To only replay a recording: ./Start-AzlSonar.ps1 -Replay ./recordings/<file>.jso
 '@
 }
 
+function Test-AzlSonarNonInteractiveSwitch {
+    # True when the command line has pwsh's -NonInteractive switch (or an abbreviation down to -noni). Read-Host throws in
+    # such a session even when the console is a real terminal, so Sonar must not prompt.
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([string[]]$Arguments = [Environment]::GetCommandLineArgs())
+
+    foreach ($argument in $Arguments) {
+        if ($argument -match '^[-/](?i:noni\w*)$') { return $true }
+    }
+    return $false
+}
+
 function Test-AzlSonarInteractiveSession {
     [CmdletBinding()]
     [OutputType([bool])]
     param()
-    return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected)
+    return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not (Test-AzlSonarNonInteractiveSwitch))
 }
 
 function Invoke-AzlSonarNoConfigGuide {

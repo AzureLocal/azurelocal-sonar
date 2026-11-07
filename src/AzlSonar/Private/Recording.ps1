@@ -840,6 +840,9 @@ function Get-AzlSonarRecordingStateAt {
     )
 
     $events = $Recording.Events
+    # Event times are UTC. A local or unspecified -Time (for example [datetime]'2026-10-11T08:00:09Z', which PowerShell turns
+    # into local time) must be compared as UTC, or the answer depends on the machine's time zone.
+    $Time = $Time.ToUniversalTime()
     $target = -1
     for ($i = 0; $i -lt $events.Count; $i++) {
         if ($events[$i].T -gt $Time) { break }

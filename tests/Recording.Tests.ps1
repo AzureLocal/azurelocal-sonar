@@ -347,7 +347,9 @@ Describe 'Recording: read and seek (Read-AzlSonarRecording, Get-AzlSonarRecordin
         $r.Invalid | Should -Be 4
         $r.Ignored | Should -Be 1
         @($r.Events.Kind) | Should -Be @('session', 'state', 'state')
-        InModuleScope AzlSonar -Parameters @{ R = $r } { param($R) Get-AzlSonarRecordingStateAt -Recording $R -Time ([datetime]'2026-10-11T08:00:09Z') } | Should -Be '{"a":2}'
+        InModuleScope AzlSonar -Parameters @{ R = $r; At = (T '08:00:09') } { param($R, $At) Get-AzlSonarRecordingStateAt -Recording $R -Time $At } | Should -Be '{"a":2}'
+        # A local-kind time (what [datetime]'...Z' gives) is the same instant: the answer must not depend on the time zone.
+        InModuleScope AzlSonar -Parameters @{ R = $r; At = (T '08:00:09').ToLocalTime() } { param($R, $At) Get-AzlSonarRecordingStateAt -Recording $R -Time $At } | Should -Be '{"a":2}'
     }
 }
 

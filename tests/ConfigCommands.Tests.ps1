@@ -115,6 +115,15 @@ Describe 'Starting with no arguments' {
         $text | Should -Match 'sonar\.config\.commented\.jsonc'
     }
 
+    It 'treats pwsh -NonInteractive as non-interactive even on a real console (Read-Host would throw there): <Arguments>' -TestCases @(
+        @{ Arguments = @('pwsh', '-NoProfile', '-NonInteractive', '-File', 'x.ps1'); Expected = $true }
+        @{ Arguments = @('pwsh', '-noni', '-File', 'x.ps1'); Expected = $true }
+        @{ Arguments = @('pwsh', '-NoProfile', '-File', 'x.ps1'); Expected = $false }
+        @{ Arguments = @('pwsh', '-File', 'x.ps1', '-NoBrowser'); Expected = $false }
+    ) {
+        InModuleScope AzlSonar -Parameters @{ A = $Arguments } { param($A) Test-AzlSonarNonInteractiveSwitch -Arguments $A } | Should -Be $Expected
+    }
+
     It 'prints it and returns nothing in a non-interactive session (no prompt, no failure)' {
         Mock -ModuleName AzlSonar Test-AzlSonarInteractiveSession { $false }
         $out = InModuleScope AzlSonar { Invoke-AzlSonarNoConfigGuide 6>&1 }
