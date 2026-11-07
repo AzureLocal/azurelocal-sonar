@@ -122,18 +122,94 @@ Describe 'ZTP Device and Network stage events (Add-AzlSonarZtpStageEvent, Conver
         $out.Device2 | Should -Be @('DeviceConfigurationSkipped')
     }
 
-    It 'clears a stage on every node when the orchestrator starts it again, and keeps the other stage' {
+    It 'a run-wide StageStarted never erases another node: a later run that covers only some nodes leaves the others as they were' {
         $out = InModuleScope AzlSonar {
             $store = [hashtable]::Synchronized(@{})
             foreach ($l in @(
                     '{"timestamp":"2026-11-06T01:00:00Z","node":"node-01","state":"DeviceAddressSet","evidence":"NIC1","stage":"Device"}',
                     '{"timestamp":"2026-11-06T03:00:00Z","node":"node-01","state":"ManagementAddressFailed","evidence":"timed out","level":"Error","stage":"Network"}',
+                    '{"timestamp":"2026-11-06T03:00:00Z","node":"node-02","state":"DeviceAddressSet","evidence":"NIC1","stage":"Device"}',
                     '{"timestamp":"2026-11-06T03:00:00Z","node":"node-02","state":"NetworkJobSubmitted","evidence":"NIC1","stage":"Network"}',
-                    '{"timestamp":"2026-11-06T04:00:00Z","node":"*","state":"StageStarted","evidence":"stage Network","stage":"Network"}')) { Add-AzlSonarZtpStageEvent -Store $store -Line $l }
+                    '{"timestamp":"2026-11-06T04:00:00Z","node":"*","state":"StageStarted","evidence":"stage Network","stage":"Network"}',
+                    '{"timestamp":"2026-11-06T04:00:00Z","node":"*","state":"StageStarted","evidence":"stage Device","stage":"Device"}')) { Add-AzlSonarZtpStageEvent -Store $store -Line $l }
+            [pscustomobject]@{ One = @($store['node-01'].Keys | Sort-Object); Two = @($store['node-02'].Keys | Sort-Object) }
+        }
+        $out.One | Should -Be @('Device', 'Network')
+        $out.Two | Should -Be @('Device', 'Network')
+    }
+
+    It 'a node that reports again after the stage was started again begins a new attempt; a node that does not keeps its result' {
+        $out = InModuleScope AzlSonar {
+            $store = [hashtable]::Synchronized(@{})
+            foreach ($l in @(
+                    '{"timestamp":"2026-11-06T03:00:00Z","node":"node-01","state":"NetworkJobSubmitted","evidence":"old attempt","stage":"Network"}',
+                    '{"timestamp":"2026-11-06T03:00:00Z","node":"node-02","state":"ManagementAddressSet","evidence":"done","stage":"Network"}',
+                    '{"timestamp":"2026-11-06T04:00:00Z","node":"*","state":"StageStarted","evidence":"stage Network","stage":"Network"}',
+                    '{"timestamp":"2026-11-06T04:01:00Z","node":"node-01","state":"NetworkJobSubmitted","evidence":"new attempt","stage":"Network"}')) { Add-AzlSonarZtpStageEvent -Store $store -Line $l }
+            [pscustomobject]@{
+                One = @($store['node-01']['Network'] | ForEach-Object { $_['evidence'] })
+                Two = @($store['node-02']['Network'] | ForEach-Object { $_['state'] })
+            }
+        }
+        $out.One | Should -Be @('new attempt')
+        $out.Two | Should -Be @('ManagementAddressSet')
+    }
+
+    It 'the order of the lines decides, not the clock: events with the very same timestamp still split into attempts' {
+        $out = InModuleScope AzlSonar {
+            $store = [hashtable]::Synchronized(@{})
+            foreach ($l in @(
+                    '{"timestamp":"2026-11-06T04:00:00Z","node":"node-01","state":"NetworkJobSubmitted","evidence":"old","stage":"Network"}',
+                    '{"timestamp":"2026-11-06T04:00:00Z","node":"*","state":"StageStarted","evidence":"stage Network","stage":"Network"}',
+                    '{"timestamp":"2026-11-06T04:00:00Z","node":"node-01","state":"NetworkJobSubmitted","evidence":"new","stage":"Network"}',
+                    '{"timestamp":"2026-11-06T04:00:00Z","node":"node-01","state":"NetworkJobStatus","evidence":"new again","stage":"Network"}')) { Add-AzlSonarZtpStageEvent -Store $store -Line $l }
+            @($store['node-01']['Network'] | ForEach-Object { $_['evidence'] })
+        }
+        $out | Should -Be @('new', 'new again')
+    }
+
+    It 'a StageStarted that lists its nodes clears exactly those nodes at once, so a covered node that never reports keeps no old success' {
+        $out = InModuleScope AzlSonar {
+            $store = [hashtable]::Synchronized(@{})
+            foreach ($l in @(
+                    '{"timestamp":"2026-11-06T03:00:00Z","node":"node-01","state":"ManagementAddressSet","evidence":"ok","stage":"Network"}',
+                    '{"timestamp":"2026-11-06T03:00:00Z","node":"node-02","state":"ManagementAddressSet","evidence":"ok","stage":"Network"}',
+                    '{"timestamp":"2026-11-06T04:00:00Z","node":"*","state":"StageStarted","evidence":"stage Network","stage":"Network","nodes":["node-01"]}')) { Add-AzlSonarZtpStageEvent -Store $store -Line $l }
             [pscustomobject]@{ One = @($store['node-01'].Keys); Two = @($store['node-02'].Keys) }
         }
-        $out.One | Should -Be @('Device')
-        @($out.Two).Count | Should -Be 0
+        @($out.One).Count | Should -Be 0
+        $out.Two | Should -Be @('Network')
+    }
+
+    It 'a nodes list can never touch the run entry: "*", empty and blank names are ignored, a single name works' {
+        $out = InModuleScope AzlSonar {
+            $store = [hashtable]::Synchronized(@{})
+            foreach ($l in @(
+                    '{"timestamp":"2026-11-06T03:00:00Z","node":"node-01","state":"ManagementAddressSet","evidence":"ok","stage":"Network"}',
+                    '{"timestamp":"2026-11-06T03:30:00Z","node":"*","state":"StageCompleted","evidence":"stage Restore","stage":"Restore"}',
+                    '{"timestamp":"2026-11-06T04:00:00Z","node":"*","state":"StageStarted","evidence":"stage Network","stage":"Network","nodes":["*","", "  "]}',
+                    '{"timestamp":"2026-11-06T04:01:00Z","node":"*","state":"StageStarted","evidence":"stage Network","stage":"Network","nodes":"node-01"}')) { Add-AzlSonarZtpStageEvent -Store $store -Line $l }
+            [pscustomobject]@{ RestoreOver = [bool]$store['*']['Restore']; Epoch = [int]$store['*']['EpochNetwork']; NodeOne = @($store['node-01'].Keys) }
+        }
+        $out.RestoreOver | Should -BeTrue -Because 'the run entry survives a nodes list that names "*"'
+        $out.Epoch | Should -Be 2
+        @($out.NodeOne).Count | Should -Be 0 -Because 'the single-name nodes value cleared node-01'
+    }
+
+    It 'keeps a UTC round-trip timestamp whether the JSON time is read as text or as a date, in any culture' {
+        $out = InModuleScope AzlSonar {
+            $old = [System.Threading.Thread]::CurrentThread.CurrentCulture
+            try {
+                [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('de-DE')
+                $store = [hashtable]::Synchronized(@{})
+                Add-AzlSonarZtpStageEvent -Store $store -Line '{"timestamp":"2026-11-06T04:00:00+01:00","node":"node-01","state":"DeviceAddressSet","evidence":"x","stage":"Device"}'
+                $t = [string]$store['node-01']['Device'][0]['timestamp']
+                [pscustomobject]@{ Text = $t; Parsed = [datetime]::Parse($t, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind) }
+            }
+            finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $old }
+        }
+        $out.Parsed.ToUniversalTime().ToString('s') | Should -Be '2026-11-06T03:00:00'
+        $out.Text | Should -Match 'Z$'
     }
 
     It 'Device: notstarted, running, success on each success state, error on DeviceConfigurationFailed' {
@@ -233,7 +309,7 @@ Describe 'ZTP Device and Network stage events (Add-AzlSonarZtpStageEvent, Conver
             [pscustomobject]@{ Seen = @($seen); RestoreKept = $restoreKept; Nodes = @($store.Keys | Where-Object { $_ -ne '*' }) }
         }
         $out.Seen | Should -Be @($false, $true, $false, $true)
-        $out.RestoreKept | Should -BeFalse
+        $out.RestoreKept | Should -BeTrue -Because 'a run-wide StageStarted does not erase a node; the node keeps its result until it reports again'
         $out.Nodes | Should -Be @('node-01')
     }
 

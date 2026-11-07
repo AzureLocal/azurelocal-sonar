@@ -254,28 +254,51 @@ function Add-AzlSonarZtpStageEvent {
     $spec = $script:AzlSonarZtpStage[$stage]
     if ($node -eq '*') {
         if ($state -eq 'StageStarted') {
-            # Clears the stage on every node, and for Restore the run's 'Restore is over' too.
-            foreach ($key in @($Store.Keys)) {
-                $copy = @{}
-                foreach ($s in $Store[$key].Keys) { if ($s -ne $stage) { $copy[$s] = $Store[$key][$s] } }
-                $Store[$key] = $copy
+            # The event is run-wide and does not say which nodes the run covers: a later run can cover only some of them (a
+            # third machine added after the first two finished). So it must never erase another node's result. It records
+            # when the stage started; a node's older attempt is replaced by that node's own next event (below). For Restore
+            # it also re-opens the run's 'Restore is over' flag.
+            # No clock is compared: the stage keeps a counter that goes up on every StageStarted, each node record carries the
+            # counter value it was written under, and a node's attempt is older when its last record has a lower value.
+            $run = @{}
+            if ($Store.Contains($runKey) -and $null -ne $Store[$runKey]) { foreach ($k in $Store[$runKey].Keys) { if ($k -ne 'Restore' -or $stage -ne 'Restore') { $run[$k] = $Store[$runKey][$k] } } }
+            $run["Epoch$stage"] = 1 + [int]$(if ($run.ContainsKey("Epoch$stage")) { $run["Epoch$stage"] } else { 0 })
+            $Store[$runKey] = $run
+            # A StageStarted that names the nodes it covers (a 'nodes' list) clears exactly those nodes now, so a covered node
+            # that never reports cannot keep an old success.
+            $covered = @(Get-AzlSonarMember $entry 'nodes' @() | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() -and $_ -ne $runKey })
+            foreach ($name in $covered) {
+                if ($Store.Contains([string]$name) -and $null -ne $Store[[string]$name]) {
+                    $copy = @{}
+                    foreach ($s in $Store[[string]$name].Keys) { if ($s -ne $stage) { $copy[$s] = $Store[[string]$name][$s] } }
+                    $Store[[string]$name] = $copy
+                }
             }
         }
         elseif ($state -eq 'StageCompleted' -and $stage -eq 'Restore') { & $closeRestore }
         return
     }
+    # PowerShell 7 turns an ISO-8601 JSON string into a [datetime]; keep it as a UTC round-trip string so nothing depends on
+    # the host's culture or time zone.
+    $rawTime = Get-AzlSonarMember $entry 'timestamp' ''
+    $timeText = if ($rawTime -is [datetime]) { $rawTime.ToUniversalTime().ToString('o', [System.Globalization.CultureInfo]::InvariantCulture) } else { [string]$rawTime }
+    $epoch = 0
+    if ($Store.Contains($runKey) -and $null -ne $Store[$runKey] -and $Store[$runKey].ContainsKey("Epoch$stage")) { $epoch = [int]$Store[$runKey]["Epoch$stage"] }
     $record = [ordered]@{
         state     = $state
-        timestamp = [string](Get-AzlSonarMember $entry 'timestamp' '')
+        timestamp = $timeText
         evidence  = [string](Get-AzlSonarMember $entry 'evidence' '')
         level     = [string](Get-AzlSonarMember $entry 'level' 'Info')
+        epoch     = $epoch
     }
     $stages = @{}
     if ($Store.Contains($node) -and $null -ne $Store[$node]) { foreach ($s in $Store[$node].Keys) { $stages[$s] = $Store[$node][$s] } }
     $list = [System.Collections.ArrayList]::new()
     $previous = @($(if ($stages.ContainsKey($stage)) { $stages[$stage] }) | Where-Object { $null -ne $_ })
     $finished = $previous.Count -gt 0 -and [string]$previous[-1]['state'] -in (@($spec.Success) + @($spec.Failed))
-    if (-not $finished) { foreach ($p in $previous) { $null = $list.Add($p) } }
+    # This node's attempt is also over when the stage was started again after its last record (a rerun that covers this node).
+    $stale = $previous.Count -gt 0 -and $previous[-1].Contains('epoch') -and [int]$previous[-1]['epoch'] -lt $epoch
+    if (-not $finished -and -not $stale) { foreach ($p in $previous) { $null = $list.Add($p) } }
     $null = $list.Add($record)
     $stages[$stage] = $list
     $Store[$node] = $stages
