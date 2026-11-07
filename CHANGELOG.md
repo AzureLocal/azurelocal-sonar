@@ -18,6 +18,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 * **provisioning:** the simplified route no longer says **Ready for Validate**. After ZTP comes OS configuration (OEM drivers, `C:\SBE`, DHCP off, DNS and time, the deployment admin; azurelocal-toolkit Phase 03), then Validate. `provisioning.readyForValidate` stays in the state; it is always false on the simplified route. The OEM image route is unchanged.
 * **provisioning:** the **Prepare for Validate** step and the per-machine `prepare` field are removed: azurelocal-ztp no longer has a Prepare stage. Prepare events in older event files still show in the log pane.
 
+## [0.5.0](https://github.com/AzureLocal/azurelocal-sonar/compare/v0.4.0...v0.5.0) (2026-11-07)
+
+
+### Features
+
+* **provisioning:** ZTP Device, Network and Restore steps; ZTP complete hands over to OS configuration ([f776a23](https://github.com/AzureLocal/azurelocal-sonar/commit/f776a2362a8e63b35fb974e88d8143e7f2310ba5))
+
+
+### Bug Fixes
+
+* **dashboard:** use the Azure Local family icon for the favicon and page logo ([d7dfef5](https://github.com/AzureLocal/azurelocal-sonar/commit/d7dfef5086ed366ce1b7d44b6b95bc4b0e2bec09))
+* **dashboard:** use the Azure Local family icon for the favicon and page logo ([aac5d52](https://github.com/AzureLocal/azurelocal-sonar/commit/aac5d52c02ce0680d804de215bd73b6a4bde7149))
+
 ## [0.4.0](https://github.com/AzureLocal/azurelocal-sonar/compare/v0.3.0...v0.4.0) (2026-11-06)
 
 
