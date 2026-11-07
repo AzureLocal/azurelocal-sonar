@@ -54,7 +54,7 @@ Three ZTP stages work on each machine, and their events become steps in that mac
 
 | Step | ZTP stage (`stage`) | Where it sits | What it does |
 | --- | --- | --- | --- |
-| **Management address (maintenance environment)** | `Device`, `Set-ZtpDeviceConfiguration.ps1` | First, before the lifecycle stages. Shown before the edge machine exists, too. | Before the Azure claim, in the maintenance environment, through the Configurator service on port 20001: sets the static management address and the host name on the port with the management MAC. |
+| **Management address (maintenance environment)** | `Device`, `Set-ZtpDeviceConfiguration.ps1` | First, before the lifecycle stages. Shown before the edge machine exists, too. | Before the Azure claim, in the maintenance environment, through the Configurator service on port 20001: sets the static management address on the port with the management MAC. It sends no host name: the Azure claim sets the host name (see [Appendix B](./appendix/b-configurator-app-api.md#the-host-name-and-the-arc-resource-name)). |
 | **Management address on the management NIC** | `Network`, `Set-ZtpManagementAddress.ps1` | After the `ProvisionOs` job | After the OS install, through the edge machine's per-NIC API (`networkAdapters`, `jobs/ApplyConfiguration`): moves the management address to the adapter with the management MAC, after releasing it from any other adapter. |
 | **BIOS restored** | `Restore` | Last | Where ZTP set temporary BIOS values for the install (for example, the FC HBA off), it puts back the final ones: a Redfish PATCH, a restart, then a wait until Arc reconnects. |
 

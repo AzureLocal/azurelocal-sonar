@@ -22,10 +22,13 @@ Live Sonar routes that need Azure (`/api/events`, `/api/export`) were not called
 
 - [HTTP routes](#http-routes)
   - [Rules that apply to every route](#rules-that-apply-to-every-route)
+  - [Authentication and request checks](#authentication-and-request-checks)
   - [GET / and the static files](#get-and-the-static-files)
   - [GET /api/config](#get-api-config)
   - [GET /api/state](#get-api-state)
   - [GET /api/guidance](#get-api-guidance)
+  - [GET /api/about](#get-api-about)
+  - [GET /api/details](#get-api-details)
   - [GET /api/logs](#get-api-logs)
   - [GET /api/events](#get-api-events)
   - [GET /api/export](#get-api-export)
@@ -46,13 +49,15 @@ Live Sonar routes that need Azure (`/api/events`, `/api/export`) were not called
 
 ## HTTP routes
 
-Sonar serves one local web server (`http://localhost:<Port>/`, default port 8642). There are **7 API routes** plus the static page. All are `GET`.
+Sonar serves one local web server (`http://localhost:<Port>/`, default port 8642). There are **9 API routes** plus the static page. All are `GET`. Every request needs the per-start [access token](#authentication-and-request-checks) unless it was switched off.
 
 | Route | Live | Replay | Returns | Used by the page |
 | --- | --- | --- | --- | --- |
 | `GET /api/config` | yes | yes | The public config (no secrets) | yes |
 | `GET /api/state` | yes | yes | The latest deployment state | yes |
 | `GET /api/guidance` | yes | yes | Which account reads which logs, where and when | yes |
+| `GET /api/about` | yes | yes | Sonar's version and the documentation links the Help box shows | yes |
+| `GET /api/details` | yes | yes | What Sonar collected and uses, each value with where it came from | yes |
 | `GET /api/logs?since=<seq>` | yes | yes | Log lines after a sequence number, plus tailer status | yes |
 | `GET /api/events` | yes | 404 | Server-Sent Events stream | yes |
 | `GET /api/export` | yes | 404 | One JSON file: config, timeline, latest state, logs | yes (Export button) |
@@ -63,12 +68,53 @@ Source: `Invoke-AzlSonarHttpRequest` in `src/AzlSonar/Private/Server.ps1`. **Fro
 ### Rules that apply to every route
 
 - **Read-only.** Any method other than `GET` gets `405 Only GET is supported.` with `Allow: GET`. No route writes to Azure, a node or a file. Tested: `tests/Server.Tests.ps1` ("`<Method> /api/state is a 405 with Allow: GET`"). **Verified live**: a `POST` to `/api/state` returned `HTTP/1.1 405 Method Not Allowed`, `Allow: GET`.
-- **This machine only.** The listener binds `http://localhost:<Port>/`, and the handler refuses any request whose remote address is not loopback with `403 AzL Sonar only answers requests from this machine.` There is no authentication, because nothing leaves the machine. Do not publish the port through a proxy or tunnel.
-- **No caching.** API responses carry `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
-- **Errors are JSON.** An unknown `/api/...` path is `404 {"error":"Unknown API route: /api/nope"}` (**Verified live**). A bad `since` is `400 {"error":"since must be a whole number."}` (**Verified live**). An internal failure is `500 {"error":"Internal error."}`.
+- **This machine only.** The listener binds `http://localhost:<Port>/` and `http://127.0.0.1:<Port>/`, and the handler refuses any request whose remote address is not loopback with `403 AzL Sonar only answers requests from this machine.` Access on this machine is controlled by the access token (next section). Do not publish the port through a proxy or tunnel.
+- **Security headers on every response** (the page, the API, errors and the stream): `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and a `Content-Security-Policy` that allows only this origin's own files (`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`). **Verified live** on a 401, a 302 and a 405. JSON bodies never carry a raw `<`, `>` or `&` (they are written as `\u003c`, `\u003e`, `\u0026`; a JSON parser reads them unchanged). **From the source** (`Set-AzlSonarSecurityHeader`, `ConvertTo-AzlSonarSafeJsonText`).
+- **Errors are JSON.** An unknown `/api/...` path is `404 {"error":"Unknown API route: /api/nope"}` (**Verified live**). A bad `since` is `400 {"error":"since must be a whole number from 0."}` (**Verified live**). An internal failure is `500 {"error":"Internal error."}`.
 - **Replay mode.** In replay mode `/api/events` and `/api/export` return `404 {"error":"Replay mode: /api/export is not available; the page plays /api/replay."}` (**Verified live**) and `/api/replay` is served. In live mode `/api/replay` returns `404 {"error":"Not replaying. Start Sonar with -Replay <recording> to play a recording."}`.
 - **Secrets.** Secrets are masked in node text (`Shared.Redact`) and never serialized. Config secret names and node addresses are not in `/api/config` (see below).
 
+<a id="authentication-and-request-checks"></a>
+
+### Authentication and request checks
+
+Each start of Sonar makes a new **access token** (32 hex characters from the system's cryptographic random generator). It is printed in the URL Sonar writes at start and the browser is opened on that URL (`http://localhost:<Port>/?t=<token>`). The token is masked like a password in everything Sonar stores, serves or records. **From the source** (`Invoke-AzlSonarHttpRequest`, `New-AzlSonarAccessToken`, `Test-AzlSonarTokenEqual`); the behaviour below was **Verified live** on a replay on a spare port unless said otherwise. Replay mode uses a token too.
+
+The checks run in this order, before any route:
+
+| Order | Check | Failure |
+| --- | --- | --- |
+| 1 | The peer is loopback | `403` text `AzL Sonar only answers requests from this machine.` |
+| 2 | The `Host` header is `localhost`, `127.0.0.1` or `[::1]` followed by the port the request came in on (blocks DNS rebinding) | `400`, empty body (**Verified live** with a foreign Host) |
+| 3 | An `Origin` header, if present, is `http://localhost:<Port>` or `http://127.0.0.1:<Port>` | `403`, empty body (**Verified live** with a foreign Origin) |
+| 4 | The access token (if it is on): a `sonar_t` cookie equal to the token (constant-time comparison), else a `?t=` query value equal to it | `401 Open the URL Sonar printed.` (**Verified live**) |
+| 5 | The method is `GET` | `405`, `Allow: GET` |
+
+**How a client authenticates.**
+
+1. Make one request with `?t=<token>`. Sonar answers `302 Found` with `Location` set to the same path and query without `t`, and `Set-Cookie: sonar_t=<token>; HttpOnly; SameSite=Strict; Path=/` (**Verified live**; no `Secure` flag, because the service is plain HTTP on loopback).
+2. Send that cookie on every later request. A cookie jar does it for you.
+3. A wrong or missing token gives `401`; the token is not accepted in a header.
+
+**Turning it off.** `-NoAccessToken` on `Start-AzlSonar.ps1` / `Start-AzlSonarServer`, or `accessToken: false` in the config. Then no cookie or `?t=` is needed, and Sonar warns: "The access token is off: any account on this machine can read this page." Use that on a single-user machine only: without the token any local account or program can read the cluster's state and logs. **From the source.**
+
+**Worked example** (PowerShell 7; **Verified live** against a replay: it printed the cookie name `sonar_t`, the phase, the version, then `401` for the request without the cookie):
+
+```powershell
+$base  = 'http://localhost:8642'
+$token = Read-Host -Prompt 'Token from the URL Sonar printed (after ?t=)'
+
+# 1. Present the token once. Sonar answers 302 with Set-Cookie; do not follow the redirect, but keep the session.
+try   { $null = Invoke-WebRequest -Uri "$base/api/config?t=$token" -SessionVariable sonar -MaximumRedirection 0 -ErrorAction Stop }
+catch [Microsoft.PowerShell.Commands.HttpResponseException] { if ([int]$_.Exception.Response.StatusCode -ne 302) { throw } }
+
+# 2. Every later call sends the cookie from $sonar.
+(Invoke-RestMethod -Uri "$base/api/state"   -WebSession $sonar).phase
+(Invoke-RestMethod -Uri "$base/api/about"   -WebSession $sonar).version
+(Invoke-RestMethod -Uri "$base/api/logs?since=0" -WebSession $sonar).lines | Select-Object -Last 5
+```
+
+With `curl.exe`: `curl.exe -c jar.txt "http://localhost:8642/api/config?t=<token>"` once, then `curl.exe -b jar.txt http://localhost:8642/api/state`. The examples in the route sections below assume the `$sonar` session from this example (or the token switched off).
 <a id="get-and-the-static-files"></a>
 
 ### GET / and the static files
@@ -94,7 +140,7 @@ Serves `index.html` for `/`, and the files under `src/AzlSonar/web/` by name (`a
 **Read-only:** yes.
 
 ```powershell
-Invoke-RestMethod -Uri 'http://localhost:8642/api/config'
+Invoke-RestMethod -Uri 'http://localhost:8642/api/config' -WebSession $sonar
 ```
 
 <a id="get-api-state"></a>
@@ -116,7 +162,7 @@ Invoke-RestMethod -Uri 'http://localhost:8642/api/config'
 **Read-only:** yes.
 
 ```powershell
-(Invoke-RestMethod -Uri 'http://localhost:8642/api/state').phase
+(Invoke-RestMethod -Uri 'http://localhost:8642/api/state' -WebSession $sonar).phase
 ```
 
 <a id="get-api-guidance"></a>
@@ -137,6 +183,50 @@ Invoke-RestMethod -Uri 'http://localhost:8642/api/config'
 
 **Read-only:** yes.
 
+<a id="get-api-about"></a>
+
+### GET /api/about
+
+**For:** Sonar's version (from the module manifest) and the documentation links the page's Help box shows (the page's files carry no web address of their own, so the links come from here). **Query parameters:** none. **Response:** `{ name, version, summary, links[] }` with `links[]` entries `{ id, label, url }`. **From the source** (`Get-AzlSonarAbout` in `Details.ps1`). **Read-only:** yes.
+
+**Verified live** (replay; the links are trimmed here):
+
+```json
+{"name":"AzL Sonar","version":"0.4.0","summary":"Watches an Azure Local build from provisioning to deployment.","links":[{"id":"docs","label":"Documentation","url":"https://azurelocal.cloud/azurelocal-sonar/"},{"id":"run","label":"Running Sonar for each purpose","url":"https://azurelocal.cloud/azurelocal-sonar/run"},{"id":"github","label":"Release notes and source on GitHub","url":"https://github.com/AzureLocal/azurelocal-sonar"}]}
+```
+
+```powershell
+(Invoke-RestMethod -Uri 'http://localhost:8642/api/about' -WebSession $sonar).links.url
+```
+
+<a id="get-api-details"></a>
+
+### GET /api/details
+
+**For:** the page's Details view: what Sonar collected and is using, each value with where it came from and when. **Query parameters:** none. **From the source** (`Get-AzlSonarDetail`, `New-AzlSonarDetailFact`, `New-AzlSonarReplayDetailFact` in `Details.ps1`). **Read-only:** yes.
+
+**Response:**
+
+| Field | Meaning |
+| --- | --- |
+| `generatedAt`, `mode` | When the answer was built; `live` or `replay`. |
+| `target` | `cluster`, `resourceGroup`, `subscription` (**first 8 characters only**, with a note) and `region`; each `{ value, source }`, where `source` names the config key the value came from (or says it is from the recording). |
+| `route`, `identity` | `{ value, label, source }`; `identity` also has a plain-language `meaning`. |
+| `nodes[]` | `{ name, address, seed }`. In a live run this carries the node addresses from your config, so it is the one route that does; a recording has none. |
+| `sources` | The state of each input: `azure` (`pollSeconds`, `lastAnswerAt`, `ok`, `message`), `ztpEvents` (`configured`, `file` (file name only), `fileFound`, `events`, `lastEventAt`), `nodeLogs` (`state`, `node`, `credential`, `transport`, `reason`, `lastLineAt`). |
+| `config` | `readFrom`, `file`, `sourceKind`, `readAt`, `checkedAt`, `checkEverySeconds`, `lastChangeAt`, `lastChangeNote`, `notSet[]` (settings left at their defaults), `version`. |
+
+Free text in it is cut to a file name for paths, has secrets masked and is length-capped (`ConvertTo-AzlSonarSafeText`).
+
+**Verified live** (replay of the sample recording; a recording keeps no subscription, region or addresses, so those are empty):
+
+```json
+{"generatedAt":"2026-11-07T21:29:19Z","mode":"replay","target":{"cluster":{"value":"clus01","source":"from the recording"},"resourceGroup":{"value":"rg-example-azl","source":"from the recording"},"subscription":{"value":"","source":"from the recording","note":"first 8 characters only"},"region":{"value":"","source":"from the recording"}},"route":{"value":"oem-image","label":"OEM image + Arc registration","source":"from the recording"},"identity":{"value":"LocalIdentity","label":"Local identity","meaning":"Machines stay in a workgroup (local identity); Sonar reads the logs with the local administrator account.","source":"from the recording"},"nodes":[{"name":"node01","address":"","seed":true},{"name":"node02","address":"","seed":false}],"sources":{"azure":{"pollSeconds":20,"lastAnswerAt":"2026-10-11T08:00:01Z","ok":true,"message":""},"ztpEvents":{"configured":false,"file":"","fileFound":false,"events":0,"lastEventAt":null},"nodeLogs":{"state":"unknown","node":"","credential":"","transport":"","reason":"","lastLineAt":null}},"config":{"readFrom":"the recording","file":"","sourceKind":"config","readAt":"2026-10-11T08:00:00Z","checkedAt":null,"checkEverySeconds":null,"lastChangeAt":null,"lastChangeNote":"","notSet":[],"version":"0.4.0"}}
+```
+
+```powershell
+(Invoke-RestMethod -Uri 'http://localhost:8642/api/details' -WebSession $sonar).sources
+```
 <a id="get-api-logs"></a>
 
 ### GET /api/logs
@@ -147,11 +237,13 @@ Invoke-RestMethod -Uri 'http://localhost:8642/api/config'
 
 | Parameter | Type | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `since` | integer (whole number) | no | `0` | Return lines with `seq` greater than this. Not a whole number: `400`. |
+| `since` | integer, digits only, 1 to 15 digits | no | `0` | Return lines with `seq` greater than this. Anything else (a sign, a space, text, a longer number): `400 {"error":"since must be a whole number from 0."}`. A value past the last sequence number given out is cut back to it. |
 
-**Response:** `{ server, lastSeq, tailer, files[], lines[] }`. `server` is this Sonar instance's id (new on every start). `lastSeq` is the last sequence number given out when the lines were read, the page's catch-up cursor. `tailer` is the tailer status object (`state`, `reason`, `node`, `activeFiles[]`, and `transport`, `computer` when connected), `files` the files being followed, `lines[]` the lines, each `{ seq, time, received, timeSource, file, level, text }` with `level` one of `info`, `warning`, `error`.
+**Caps (the page's answers are limited; the export is not).** One answer holds at most **2000 lines** and about **2 MB** of line text (2,097,152 bytes). When more is waiting, `truncated` is `true` and `lastSeq` stops at the last line sent, so the client asks again with `since=<lastSeq>` for the rest. **From the source** (`Get-AzlSonarLogsJson`).
 
-**Verified live** (replay, which has no tailer): `{"server":"f93fda188af6491c9683e131d22b8ba8","lastSeq":0,"tailer":null,"files":[],"lines":[]}`. A line, from the sample recording:
+**Response:** `{ server, lastSeq, truncated, tailer, files[], lines[] }`. `server` is this Sonar instance's id (new on every start). `lastSeq` is the last sequence number given out when the lines were read, the page's catch-up cursor. `tailer` is the tailer status object (`state`, `reason`, `node`, `activeFiles[]`, and `transport`, `computer` when connected), `files` the files being followed, `lines[]` the lines, each `{ seq, time, received, timeSource, file, level, text }` with `level` one of `info`, `warning`, `error`.
+
+**Verified live** (replay, which has no tailer): `{"server":"3ddc57badd58458cb3e7aae04a7410a9","lastSeq":0,"truncated":false,"tailer":null,"files":[],"lines":[]}`. A line, from the sample recording:
 
 ```json
 {"seq":1,"time":"2026-10-11T08:00:01.000Z","received":"2026-10-11T08:00:01.000Z","timeSource":"received","file":"C:\\Windows\\System32\\Bootstrap\\Logs\\setup.log","level":"info","text":"Bootstrap started on node01."}
@@ -160,7 +252,7 @@ Invoke-RestMethod -Uri 'http://localhost:8642/api/config'
 **Read-only:** yes.
 
 ```powershell
-(Invoke-RestMethod -Uri 'http://localhost:8642/api/logs?since=0').lines | Select-Object -Last 5
+(Invoke-RestMethod -Uri 'http://localhost:8642/api/logs?since=0' -WebSession $sonar).lines | Select-Object -Last 5
 ```
 
 <a id="get-api-events"></a>
@@ -199,13 +291,13 @@ data: {"server":"f93fda188af6491c9683e131d22b8ba8","lines":[ ...up to 1000 lines
 | `log` | When there are new log lines | `{ server, lines[] }`, at most 1000 lines per event |
 | comment `: ping` | Every 15 seconds | None (keeps the connection alive) |
 
-**Limits:** at most **10** streams at once; the eleventh gets `503` with `Retry-After: 30` (the page polls meanwhile). A client is dropped when a write fails or stays in flight over 15 seconds, when more than 4 MiB is queued for it, or when the log lines it still needs have left the ring buffer. The page reconnects and catches up through `/api/logs`.
+**Limits:** at most **`maxEventStreams`** streams at once (config key, 1 to 50, **default 4**); one more gets `429` with `Retry-After: 30` and the text "AzL Sonar serves at most N live streams at once. Close another Sonar tab; this page polls meanwhile." Earlier builds used 10 and `503`. A client is dropped when a write fails or stays in flight over 15 seconds, when more than 4 MiB is queued for it, or when the log lines it still needs have left the ring buffer. The page reconnects and catches up through `/api/logs`.
 
 **Read-only:** yes.
 
 ```powershell
 # Prints the raw stream until you press Ctrl+C.
-curl.exe -N http://localhost:8642/api/events
+curl.exe -N -b jar.txt http://localhost:8642/api/events
 ```
 
 <a id="get-api-export"></a>
@@ -228,7 +320,7 @@ An export made without `-Publishable` still holds the cluster's identifiers. **F
 **Read-only:** yes.
 
 ```powershell
-Invoke-RestMethod -Uri 'http://localhost:8642/api/export' | ConvertTo-Json -Depth 50 | Set-Content ./sonar-export.json
+Invoke-RestMethod -Uri 'http://localhost:8642/api/export' -WebSession $sonar | ConvertTo-Json -Depth 50 | Set-Content ./sonar-export.json
 ```
 
 <a id="get-api-replay"></a>
@@ -247,11 +339,11 @@ Invoke-RestMethod -Uri 'http://localhost:8642/api/export' | ConvertTo-Json -Dept
 
 ### Health check
 
-There is **no dedicated health route**. To check that Sonar is up, request `GET /api/config`: a `200` with a `serverId` and `startedAt` means the listener is serving. The poller and tailer can be unhealthy while the listener is fine; their problems show in `/api/state` (`pollError`, `warnings`) and `/api/logs` (`tailer.state`, `tailer.reason`). A worker that stops unexpectedly is reported on the console as a warning (checked every 5 seconds). **From the source.**
+There is **no dedicated health route**. To check that Sonar is up, request `GET /api/config` with the cookie: a `200` with a `serverId` and `startedAt` means the listener is serving. The poller and tailer can be unhealthy while the listener is fine; their problems show in `/api/state` (`pollError`, `warnings`) and `/api/logs` (`tailer.state`, `tailer.reason`). A worker that stops unexpectedly is reported on the console as a warning (checked every 5 seconds). **From the source.**
 
 ### Which routes the page uses
 
-`src/AzlSonar/web/app.js` calls `/api/config`, `/api/guidance`, `/api/state`, `/api/logs`, `/api/events`, `/api/export` (live) and `/api/replay` (replay). Every route in this appendix is used by the page. Nothing else on the server is reachable from the page.
+`src/AzlSonar/web/app.js` calls `/api/config`, `/api/guidance`, `/api/state`, `/api/logs`, `/api/events`, `/api/export` (live), `/api/replay` (replay), `/api/about` and `/api/details`. Every route in this appendix is used by the page. Nothing else on the server is reachable from the page.
 
 ## PowerShell commands
 
@@ -283,6 +375,7 @@ The normal way to start Sonar. Imports the module, builds the configuration, che
 | `-Speed` | double, 0.1 to 3600 | no | `60` | Replay | Starting replay speed (recorded seconds per real second). |
 | `-StartAt` | string | no | | Replay | Where to start: an offset (`1:42:10`, `90m`, `1h30m`), a UTC time in the recording, or a phase (`arc-registration`, `validation`, `deployment`). |
 | `-Autoplay` | switch | no | off | Replay | Start playing at once instead of paused. |
+| `-NoAccessToken` | switch | no | off | both | Turn the per-start access token off (also `accessToken: false`). Single-user machines only. |
 
 ```powershell
 Connect-AzAccount
@@ -294,7 +387,7 @@ Connect-AzAccount
 
 ### Start-AzlSonarServer
 
-The function behind the script. It has the same parameters as `Start-AzlSonar.ps1` minus the guided setup, and `-Port` and `-NoBrowser` apply to both sets. Use the script for normal work; call the function when you want to embed Sonar.
+The function behind the script. It has the same parameters as `Start-AzlSonar.ps1` (including `-NoAccessToken`) minus the guided setup, and `-Port` and `-NoBrowser` apply to both sets. Use the script for normal work; call the function when you want to embed Sonar.
 
 ```powershell
 Start-AzlSonarServer -Replay ./recordings/clus01.jsonl -Speed 240 -StartAt deployment -NoBrowser
@@ -562,6 +655,8 @@ One table, abbreviated. [Configuration](../config.md) is the authority: it has t
 | `clusterName` | string | yes | |
 | `identityModel` | `LocalIdentity` or `ActiveDirectory` | yes | |
 | `provisioningRoute` | `auto`, `simplified`, `oem-image` | no | `auto` |
+| `accessToken` | boolean | no | `true` |
+| `maxEventStreams` | integer 1 to 50 | no | `4` |
 | `pollSeconds` | integer 5 to 3600 | no | `20` |
 | `nodes[]` | list (one or more) | yes | |
 | `nodes[].name` | string, unique | yes | |
