@@ -2,6 +2,9 @@ Set-StrictMode -Version Latest
 
 # Microsoft.HybridCompute machines and machines/extensions: the current GA version on Microsoft Learn (no property changes since 2024-07-10).
 $script:AzlSonarArcApiVersion = '2026-07-15'
+
+# After ZTP (simplified route): the OS configuration guide (azurelocal-toolkit Phase 03), linked by the page.
+$script:AzlSonarOsConfigurationGuide = 'https://azurelocal.cloud'
 # The mandatory Arc extensions of an Azure Local machine (extension resource names on the Arc machine).
 $script:AzlSonarMandatoryExtensions = @('AzureEdgeDeviceManagement', 'AzureEdgeLifecycleManager', 'AzureEdgeRemoteSupport', 'AzureEdgeTelemetryAndDiagnostics')
 # An Arc machine resource id Sonar will GET (ids read from Azure are checked against it before use).
@@ -517,6 +520,12 @@ function ConvertTo-AzlSonarSimplifiedNode {
         one 'ProvisionOs job' node whose children are the job's steps (CreatedTargetArcMachine ... DeleteUnusedArcMachine)
         with their exception[] text; the job's properties.error is the job node's error. Every tree node has the
         ConvertTo-AzlSonarStepTree shape.
+        With -ZtpTracked (the config follows a ZTP event file) the tree also has azurelocal-ztp's per-node steps:
+        'Management address (maintenance environment)' (Device, before the claim) first, and 'Management address on the
+        management NIC' (Network, after the OS install) and 'BIOS restored' (Restore) last. The machine is then done
+        (ztp.complete) only when Azure
+        reports it Provisioned and its Network step succeeded; until then a Provisioned machine is running at 95%.
+        A failed Device or Network step is a machine error. Before the edge machine exists the Device step is shown alone.
     #>
     [CmdletBinding()]
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
@@ -525,8 +534,12 @@ function ConvertTo-AzlSonarSimplifiedNode {
         [AllowNull()][object]$Edge,
         [AllowNull()][object]$Arc,
         [datetime]$Now = [datetime]::UtcNow,
-        [switch]$PrepareTracked,
-        [AllowNull()][AllowEmptyCollection()][object[]]$PrepareEvents = @()
+        [switch]$ZtpTracked,
+        [AllowNull()][AllowEmptyCollection()][object[]]$DeviceEvents = @(),
+        [AllowNull()][AllowEmptyCollection()][object[]]$NetworkEvents = @(),
+        [AllowNull()][AllowEmptyCollection()][object[]]$RestoreEvents = @(),
+        # The Restore stage is over for the run (StageCompleted or Handoff): a node without Restore events needs none.
+        [switch]$RestoreOver
     )
 
     $entry = [ordered]@{
@@ -552,13 +565,40 @@ function ConvertTo-AzlSonarSimplifiedNode {
         end                  = $null
         errors               = @()
         previousErrors       = @()
-        prepare              = $null
+        ztp                  = $null
         tree                 = @()
     }
-    if ($null -eq $Edge) { return $entry }
+    $device = $null
+    $network = $null
+    $restore = $null
+    if ($ZtpTracked) {
+        $device = ConvertTo-AzlSonarZtpStageStep -Stage Device -Events $DeviceEvents -Now $Now
+        $network = ConvertTo-AzlSonarZtpStageStep -Stage Network -Events $NetworkEvents -Now $Now
+        $restore = ConvertTo-AzlSonarZtpStageStep -Stage Restore -Events $RestoreEvents -Now $Now -NotApplicable:$RestoreOver
+        $entry.ztp = [ordered]@{
+            complete = $false
+            device   = [ordered]@{ status = $device.status; state = $device.state; message = $device.message }
+            network  = [ordered]@{ status = $network.status; state = $network.state; message = $network.message }
+            restore  = [ordered]@{ status = $restore.status; state = $restore.state; message = $restore.message }
+        }
+    }
+    if ($null -eq $Edge) {
+        # The Device stage runs before the claim creates the edge machine: show its progress already.
+        if ($null -ne $device -and $device.status -ne 'notstarted') {
+            $entry.tree = @($device.node)
+            $entry.start = $device.node['start']
+            if ($device.status -eq 'error') {
+                $entry.status = 'error'
+                $entry.errors = @("Management address (maintenance environment): $($device.message)")
+            }
+            else { $entry.status = 'running' }
+        }
+        return $entry
+    }
 
     $job = $Edge.provisionOsJob
     $tree = [System.Collections.Generic.List[object]]::new()
+    if ($null -ne $device) { $tree.Add($device.node) }
     $stages = ConvertTo-AzlSonarArray $Edge.lifecycleStages
     for ($i = 0; $i -lt $stages.Count; $i++) {
         $raw = ConvertTo-AzlSonarIndexedStep -Step $stages[$i] -Id "lifecycle.$i" -ChildKey 'subStages'
@@ -613,14 +653,17 @@ function ConvertTo-AzlSonarSimplifiedNode {
     if ($failures.Count -gt 0 -or $jobStatus -eq 'error' -or (Get-AzlSonarTreeHasStatus -Tree $tree.ToArray() -Status 'error')) { $status = 'error' }
     elseif ($lifecycle -eq 'Provisioned' -and ($null -eq $jobNode -or $jobStatus -eq 'success')) { $status = 'success' }
 
-    # azurelocal-ztp's Prepare stage runs after Azure reports Provisioned: OEM drivers, static address, gateway, C:\SBE.
-    # When the run is followed, the machine isn't done until Prepare reports ReadyForValidate.
-    $prepare = $null
-    if ($PrepareTracked) {
-        $prepare = ConvertTo-AzlSonarPrepareStage -Events $PrepareEvents -Now $Now
-        $tree.Add($prepare.node)
-        if ($prepare.status -eq 'error') { $failures.Add("Prepare for Validate: $($prepare.message)"); $status = 'error' }
-        elseif ($status -eq 'success' -and $prepare.status -ne 'success') { $status = 'running' }
+    # azurelocal-ztp's Network stage runs after Azure reports Provisioned: it moves the management address to the port
+    # with the management MAC; Restore then puts back the final BIOS values where the install needed temporary ones. When
+    # the run is followed, the machine isn't done until Network succeeded and Restore succeeded or is not applicable.
+    $provisioned = $status -eq 'success'
+    if ($null -ne $device) {
+        $tree.Add($network.node)
+        if ($device.status -eq 'error') { $failures.Add("Management address (maintenance environment): $($device.message)"); $status = 'error' }
+        if ($network.status -eq 'error') { $failures.Add("Management address on the management NIC: $($network.message)"); $status = 'error' }
+        $tree.Add($restore.node)
+        if ($restore.status -eq 'error') { $failures.Add("BIOS restored: $($restore.message)"); $status = 'error' }
+        if ($status -eq 'success' -and ($network.status -ne 'success' -or $restore.status -notin 'success', 'skipped')) { $status = 'running' }
     }
 
     $starts = @($tree | ForEach-Object { ConvertTo-AzlSonarUtcDate $_['start'] } | Where-Object { $null -ne $_ } | Sort-Object)
@@ -647,9 +690,9 @@ function ConvertTo-AzlSonarSimplifiedNode {
     $entry.start = if ($starts.Count) { Format-AzlSonarDate $starts[0] } else { $null }
     $entry.end = if ($status -in 'success', 'error' -and $ends.Count) { Format-AzlSonarDate $ends[-1] } else { $null }
     $entry.errors = $failures.ToArray()
-    if ($null -ne $prepare) {
-        $entry.prepare = [ordered]@{ status = $prepare.status; state = $prepare.state; message = $prepare.message }
-        if ($prepare.status -ne 'success' -and $null -ne $entry.percent -and $entry.percent -ge 100) { $entry.percent = 95 }
+    if ($null -ne $network) {
+        $entry.ztp.complete = $provisioned -and $status -eq 'success' -and $network.status -eq 'success' -and $restore.status -in 'success', 'skipped'
+        if (-not $entry.ztp.complete -and $null -ne $entry.percent -and $entry.percent -ge 100) { $entry.percent = 95 }
     }
     $entry.previousErrors = $previousErrors.ToArray()
     $entry.tree = $tree.ToArray()
@@ -1084,7 +1127,7 @@ function Get-AzlSonarInitialState {
         provisioningState = $null
         phase             = $phase
         activePhase       = $phase
-        provisioning      = [ordered]@{ route = $route; routeSource = $(if ($route) { 'config' } else { 'auto' }); phase = $phase; status = 'notstarted'; readyForValidate = $false; nodes = @() }
+        provisioning      = [ordered]@{ route = $route; routeSource = $(if ($route) { 'config' } else { 'auto' }); phase = $phase; status = 'notstarted'; readyForValidate = $false; ztpComplete = $false; nextStep = $null; nodes = @() }
         extensions        = [ordered]@{ shown = $false; status = 'notstarted'; nodes = @() }
         validation        = [ordered]@{ status = 'notstarted'; tree = @(); counts = $emptyCounts }
         deployment        = [ordered]@{ status = 'notstarted'; tree = @(); counts = (Measure-AzlSonarStepTree -Tree @()) }
@@ -1113,7 +1156,13 @@ function Get-AzlSonarDeploymentState {
         The route: provisioningRoute simplified or oem-image as configured; auto picks simplified when edge machines
         for the configured nodes exist, else oem-image. The phase: deployment > validation > provisioning (simplified)
         or arc-registration (OEM image). On the OEM image route provisioning.readyForValidate is true when every node
-        is Registered and no validation has started yet.
+        is Registered and no validation has started yet; it is always false on the simplified route. There, with a ZTP
+        event file, provisioning.ztpComplete is true when every machine is Provisioned, its ZTP Network step succeeded
+        and its Restore step succeeded or is not applicable: ZTP is done and OS configuration comes next, named in
+        provisioning.nextStep { name, guide }.
+    .PARAMETER ZtpStages
+        Simplified route with ztpEventsPath: the Device and Network events per node (Shared.ZtpStages,
+        Add-AzlSonarZtpStageEvent).
     .PARAMETER Config
         A config object from Read-AzlSonarConfig.
     .PARAMETER ConfigPath
@@ -1128,7 +1177,7 @@ function Get-AzlSonarDeploymentState {
         Get-AzlSonarDeploymentState -ConfigPath ./config/clus01.json | ConvertTo-Json -Depth 20
     .OUTPUTS
         Ordered dictionary: cluster, resourceGroup, mode, provisioningState, phase, activePhase,
-        provisioning{route,routeSource,phase,status,readyForValidate,nodes[]}, extensions{shown,status,nodes[]},
+        provisioning{route,routeSource,phase,status,readyForValidate,ztpComplete,nextStep,nodes[]}, extensions{shown,status,nodes[]},
         validation{status,tree,counts},
         deployment{status,tree,counts}, nodes[], edgeMachines[], current{phase,stepPath(ids),stepNames,stepName,stepId,status},
         warnings[], pollError, polledAt.
@@ -1147,9 +1196,9 @@ function Get-AzlSonarDeploymentState {
         [AllowNull()]
         [System.Collections.IDictionary]$NodeProbe,
 
-        # azurelocal-ztp Prepare events per node (Add-AzlSonarZtpPrepareEvent). Used when the config follows a ZTP event file.
+        # azurelocal-ztp Device and Network events per node (Add-AzlSonarZtpStageEvent). Used when the config follows a ZTP event file.
         [AllowNull()]
-        [System.Collections.IDictionary]$ZtpPrepare,
+        [System.Collections.IDictionary]$ZtpStages,
 
         [AllowNull()]
         [AllowEmptyCollection()]
@@ -1215,16 +1264,21 @@ function Get-AzlSonarDeploymentState {
     $targets = @(Resolve-AzlSonarArcTarget -Config $Config -Route $route -EdgeMachines $edgeMachines)
     $nodes = @(Get-AzlSonarArcMachineStatus -Config $Config -Target $targets -Warnings $warnings)
 
-    # With a ZTP event file, a simplified-route machine is ready for Validate only after azurelocal-ztp's Prepare stage.
-    $prepareTracked = [bool][string](Get-AzlSonarMember $Config 'ztpEventsPath' '')
+    # With a ZTP event file, a simplified-route machine is done only after azurelocal-ztp's Network and Restore stages.
+    $ztpTracked = [bool][string](Get-AzlSonarMember $Config 'ztpEventsPath' '')
+    $runFacts = if ($null -ne $ZtpStages -and $ZtpStages.Contains($script:AzlSonarZtpRunKey)) { $ZtpStages[$script:AzlSonarZtpRunKey] } else { $null }
+    $restoreOver = $null -ne $runFacts -and $runFacts.Contains('Restore') -and [bool]$runFacts['Restore']
     $provisioningNodes = foreach ($node in $Config.nodes) {
         $arc = $null
         foreach ($n in $nodes) { if ($n.name -eq $node.name) { $arc = $n; break } }
         if ($route -eq 'simplified') {
             $edge = $null
             foreach ($machine in $edgeMachines) { if ($machine.node -eq $node.name) { $edge = $machine; break } }
-            $events = if ($null -ne $ZtpPrepare -and $ZtpPrepare.Contains($node.name)) { @($ZtpPrepare[$node.name]) } else { @() }
-            ConvertTo-AzlSonarSimplifiedNode -Node $node -Edge $edge -Arc $arc -Now $Now -PrepareTracked:$prepareTracked -PrepareEvents $events
+            $stages = if ($null -ne $ZtpStages -and $ZtpStages.Contains($node.name)) { $ZtpStages[$node.name] } else { $null }
+            $deviceEvents = if ($null -ne $stages -and $stages.Contains('Device')) { @($stages['Device']) } else { @() }
+            $networkEvents = if ($null -ne $stages -and $stages.Contains('Network')) { @($stages['Network']) } else { @() }
+            $restoreEvents = if ($null -ne $stages -and $stages.Contains('Restore')) { @($stages['Restore']) } else { @() }
+            ConvertTo-AzlSonarSimplifiedNode -Node $node -Edge $edge -Arc $arc -Now $Now -ZtpTracked:$ztpTracked -DeviceEvents $deviceEvents -NetworkEvents $networkEvents -RestoreEvents $restoreEvents -RestoreOver:$restoreOver
         }
         else {
             $probe = if ($null -ne $NodeProbe -and $NodeProbe.Contains($node.name)) { $NodeProbe[$node.name] } else { $null }
@@ -1234,8 +1288,13 @@ function Get-AzlSonarDeploymentState {
     $provisioningNodes = @($provisioningNodes)
     $provisioningStatus = Get-AzlSonarProvisioningRollup -Nodes $provisioningNodes
     $clusterStarted = $validationTree.Count -gt 0 -or $deploymentTree.Count -gt 0
-    $allPrepared = $prepareTracked -and $provisioningNodes.Count -gt 0 -and @($provisioningNodes | Where-Object { $null -ne $_['prepare'] -and $_['prepare'].status -eq 'success' }).Count -eq $provisioningNodes.Count
-    $readyForValidate = ($route -eq 'oem-image' -or ($route -eq 'simplified' -and $allPrepared)) -and $provisioningStatus -eq 'success' -and -not $clusterStarted
+    # ztpComplete: every machine Provisioned with its management address on the management NIC and its final BIOS values
+    # (restored, or none to restore). The next step is OS configuration, not Validate, so readyForValidate stays false on
+    # the simplified route (OEM image route only). The page links nextStep.guide; the URL comes from here because the web
+    # files carry no URL.
+    $ztpComplete = $route -eq 'simplified' -and $ztpTracked -and $provisioningNodes.Count -gt 0 -and @($provisioningNodes | Where-Object { $null -ne $_['ztp'] -and $_['ztp'].complete }).Count -eq $provisioningNodes.Count
+    $nextStep = if ($ztpComplete) { [ordered]@{ name = 'OS configuration'; guide = $script:AzlSonarOsConfigurationGuide } } else { $null }
+    $readyForValidate = $route -eq 'oem-image' -and $provisioningStatus -eq 'success' -and -not $clusterStarted
 
     # OEM image route: the mandatory extensions install during cluster Validate, so they are read only from then on.
     $extensionsSection = [ordered]@{ shown = $false; status = 'notstarted'; nodes = @() }
@@ -1325,7 +1384,7 @@ function Get-AzlSonarDeploymentState {
         provisioningState = $provisioningStateValue
         phase             = $phaseOut
         activePhase       = $activeOut
-        provisioning      = [ordered]@{ route = $route; routeSource = $routeSource; phase = $provisioningPhase; status = $provisioningStatus; readyForValidate = $readyForValidate; nodes = $provisioningNodes }
+        provisioning      = [ordered]@{ route = $route; routeSource = $routeSource; phase = $provisioningPhase; status = $provisioningStatus; readyForValidate = $readyForValidate; ztpComplete = $ztpComplete; nextStep = $nextStep; nodes = $provisioningNodes }
         extensions        = $extensionsSection
         validation        = [ordered]@{ status = $validationStatus; tree = $validationTree; counts = (Measure-AzlSonarStepTree -Tree $validationTree) }
         deployment        = [ordered]@{ status = $deploymentStatus; tree = $deploymentTree; counts = (Measure-AzlSonarStepTree -Tree $deploymentTree) }
@@ -1404,8 +1463,8 @@ function Invoke-AzlSonarPollerLoop {
             $probe = if ($Shared.Contains('NodeProbe')) { $Shared['NodeProbe'] } else { $null }
             $secret = if ($Shared.Contains('Redact')) { [string[]]@($Shared['Redact'] | Where-Object { $_ }) } else { [string[]]@() }
             $hint = try { Get-AzlSonarLogHint -Shared $Shared } catch { $null }
-            $prepare = if ($Shared.Contains('ZtpPrepare')) { $Shared['ZtpPrepare'] } else { $null }
-            $state = Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpPrepare $prepare
+            $ztpStages = if ($Shared.Contains('ZtpStages')) { $Shared['ZtpStages'] } else { $null }
+            $state = Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages
             Publish-AzlSonarState -Shared $Shared -State $state
         }
         catch {

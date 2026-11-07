@@ -2,7 +2,7 @@
 
 > What Sonar reads while [azurelocal-ztp](https://github.com/AzureLocal/azurelocal-ztp) provisions machines with Microsoft's simplified machine provisioning (preview), how it decides that a machine is running, ready or failed, and how to start it for a ZTP run.
 
-A ZTP run takes bare machines to "ready for Validate": it boots each machine from a virtual USB over its BMC, reads the ownership voucher back, claims the machine in Azure as an edge machine, and waits for the OS install. Sonar follows two sources at once during that time: the event file the ZTP scripts write, and the edge machines in Azure. Once the cluster exists, it follows Validate and Deploy as usual.
+A ZTP run takes bare machines to "ready for OS configuration". It boots each machine from a virtual USB over its BMC, reads the ownership voucher back, sets the management address in the maintenance environment, claims the machine in Azure as an edge machine, and waits for the OS install. Then it moves the management address to the management NIC and puts back the final BIOS values. OS configuration (drivers, `C:\SBE`, DHCP off, DNS, time, the deployment admin) follows. Validate comes after that. Sonar follows two sources at once during that time: the event file the ZTP scripts write, and the edge machines in Azure. Once the cluster exists, it follows Validate and Deploy as usual.
 
 The ZTP side, with what each ZTP stage checks, is in the ZTP docs: [Monitoring a run](https://azurelocal.cloud/azurelocal-ztp/monitoring). The full state contract is in [design.md](./design.md).
 
@@ -46,27 +46,40 @@ Each event becomes a log line in the log pane, from the file `ztp-events`:
 
 The line starts with the event's own UTC time, so the log pane orders it by event time. An event with level `Error` or `Warning` ends with `(error)` or `(warning)` when its text has no such word, so the pane colours it. The worker reads the whole file the first time, so it shows the events of earlier runs in the same file too, each at its own time.
 
-The event file covers the ZTP stages before Azure knows the machines: the boot from the virtual USB and the voucher (`Mounted`, `Booting`, `MaintenanceEnvironmentRunning`, `VoucherWritten`, `ReadyForPortal`, and the failure states), plus `StageStarted`, `StageCompleted` and `StageFailed` for every ZTP stage. Sonar doesn't interpret the states: they are log lines. Machine status comes from Azure only.
+The event file covers the ZTP stages before Azure knows the machines: the boot from the virtual USB and the voucher (`Mounted`, `Booting`, `MaintenanceEnvironmentRunning`, `VoucherWritten`, `ReadyForPortal`, and the failure states), plus `StageStarted`, `StageCompleted` and `StageFailed` for every ZTP stage (Resolve, Media, Boot, Bootstrap, Vouchers, Device, Azure, Ready, Network, Restore, Handoff). Sonar doesn't interpret these states: they are log lines. The per-node Device, Network and Restore events are the exception: they become steps, as the next section describes.
 
-### The Prepare stage: drivers and network after Provisioned
+### The per-node ZTP steps: management address and BIOS
 
-azurelocal-ztp keeps working after Azure reports a machine **Provisioned**. Its Prepare stage installs the OEM network drivers from the Solution Builder Extension, sets the static management address and one default gateway, restarts the machine if a driver asks, and checks it. It writes one event per gate to the same event file, with `stage` `Prepare`:
+Three ZTP stages work on each machine, and their events become steps in that machine's tree. Each event is a child step; the last one runs until the next event arrives. The ZTP run ends with these stages: Handoff, after them, only writes files.
 
-| `state` | Meaning |
-| --- | --- |
-| `PrepareStarted` | Azure reports ready to cluster; the run is signing in. A new one replaces any earlier attempt. |
-| `PrepareDriversInstalled` | The drivers and network settings are applied. The evidence lists them. |
-| `PrepareRestarting`, `PrepareRestarted` | The restart a driver asked for, and the new boot time. |
-| `ReadyForValidate` | Every check passed. |
-| `PrepareFailed` | A gate failed; the evidence holds the reason. |
+| Step | ZTP stage (`stage`) | Where it sits | What it does |
+| --- | --- | --- | --- |
+| **Management address (maintenance environment)** | `Device`, `Set-ZtpDeviceConfiguration.ps1` | First, before the lifecycle stages. Shown before the edge machine exists, too. | Before the Azure claim, in the maintenance environment, through the Configurator service on port 20001: sets the static management address and the host name on the port with the management MAC. |
+| **Management address on the management NIC** | `Network`, `Set-ZtpManagementAddress.ps1` | After the `ProvisionOs` job | After the OS install, through the edge machine's per-NIC API (`networkAdapters`, `jobs/ApplyConfiguration`): moves the management address to the adapter with the management MAC, after releasing it from any other adapter. |
+| **BIOS restored** | `Restore` | Last | Where ZTP set temporary BIOS values for the install (for example, the FC HBA off), it puts back the final ones: a Redfish PATCH, a restart, then a wait until Arc reconnects. |
 
-The ZTP event worker keeps each machine's latest Prepare attempt. Each machine gets a **Prepare for Validate** stage in its step tree, with these events as child steps. When the config has `ztpEvents.path`:
+| Step | Succeeded | Failed | Running |
+| --- | --- | --- | --- |
+| Device | `DeviceAddressSet`, `DeviceAddressAlreadySet`, `DeviceAddressReported` (DHCP, DHCP reservation or preconfigured: reported, not changed), `DeviceConfigurationSkipped` (no maintenance address; Network sets the address later) | `DeviceConfigurationFailed` | `DeviceConfigurationSubmitted`, `DeviceConfigurationStatus` |
+| Network | `ManagementAddressSet`, `ManagementAddressAlreadySet`, `ManagementAddressReported` | `ManagementAddressFailed` | `NetworkJobSubmitted`, `NetworkJobStatus`, `ManagementAddressReleased` |
+| Restore | `BiosRestored` | `BiosRestoreFailed` | `BiosRestoreStarted` |
 
-- a machine that Azure reports Provisioned stays **running** until its Prepare stage reports `ReadyForValidate`;
-- `PrepareFailed` makes the machine an error, with the reason in its errors;
-- `provisioning.readyForValidate` is true only when every machine passed Prepare and no cluster deployment has started.
+With no events, a step is **not started**. Only a failed state is an error. Sonar never reads one from the evidence text, so a Network job that waits with "Job is not yet triggered as other jobs are still running" shows as running.
 
-Without `ztpEvents.path`, a Provisioned machine is done, as before.
+A run with no temporary BIOS values writes no Restore event. Once the Restore stage is over (the orchestrator's `StageCompleted` for `Restore`, or any `Handoff` event), a machine with no Restore events shows the step as **skipped** (not applicable) instead of waiting.
+
+The ZTP event worker keeps each machine's latest attempt of each stage. An event after a finished attempt (succeeded or failed) starts a new attempt. The orchestrator's `StageStarted` for a stage clears that stage on every machine, so a rerun replaces the earlier attempt.
+
+When the config has `ztpEvents.path`:
+
+- A machine that Azure reports Provisioned stays **running**, at 95%, until its Network step succeeds and its Restore step succeeds or is not applicable. Then it's done (`ztp.complete` on the machine).
+- A failed Device, Network or Restore step makes the machine an error, with the reason in its errors.
+- `provisioning.ztpComplete` is true when every machine is done. The phase chip then reads **ZTP complete**, and the status reads "ZTP complete: 2 of 2 machines provisioned. OS configuration next". A note under the header links the OS configuration guide named in `provisioning.nextStep` ([azurelocal.cloud](https://azurelocal.cloud)).
+- `provisioning.readyForValidate` stays false on this route. After ZTP comes **OS configuration**, not Validate: the OEM drivers, `C:\SBE`, DHCP off, DNS and time, and the deployment admin (azurelocal-toolkit Phase 03). Validate follows that.
+
+Without `ztpEvents.path`, a Provisioned machine is done, as before, and none of these steps is shown.
+
+Event files from older ZTP runs can hold `Prepare` events (`PrepareStarted` … `ReadyForValidate`). ZTP no longer has that stage, and Sonar now shows those events only as log lines.
 ## How Sonar maps machines
 
 On the simplified route, three names belong to one machine:
@@ -101,15 +114,15 @@ For each node, from its edge machine and its job:
 | Status | When |
 | --- | --- |
 | Not started | No edge machine for the node yet. The lifecycle reads `NotCreated`: "No edge machine for this node in the resource group yet." |
-| Failed | The lifecycle status contains `Fail`; the edge machine's `provisioningState` or `machineState` is `Failed`; the job's `provisioningState` is `Failed`; the job's status maps to failed; or any lifecycle stage, sub-stage or job step is in error. The job's `error` counts only while the job itself reports failure. |
-| Succeeded | The lifecycle is `Provisioned` and the job succeeded (`DeploymentSuccess`), or there's no job to read |
+| Failed | A ZTP Device, Network or Restore step failed (with `ztpEvents.path`); the lifecycle status contains `Fail`; the edge machine's `provisioningState` or `machineState` is `Failed`; the job's `provisioningState` is `Failed`; the job's status maps to failed; or any lifecycle stage, sub-stage or job step is in error. The job's `error` counts only while the job itself reports failure. |
+| Succeeded | The lifecycle is `Provisioned` and the job succeeded (`DeploymentSuccess`), or there's no job to read. With `ztpEvents.path`, the Network step must have succeeded too, and the Restore step must have succeeded or be not applicable. |
 | Running | Anything else |
 
 **`previousErrors`.** After a `ProvisionOs` job is resubmitted, Azure keeps the earlier attempt's error in the job's `properties.error`, while the new attempt runs and after it succeeds. Sonar treats that error as current only while the job reports failure: its `provisioningState` is `Failed`, or its status maps to failed. Otherwise the error goes into the node's `previousErrors` as "ProvisionOs, earlier attempt (the job was resubmitted): `<error>`", and the node stays running. `previousErrors` is in `/api/state`, the export and a recording. The page doesn't draw it.
 
 On the live ZTP runs (two Dell AX-760 nodes, iDRAC 7.30, build `12.2690.1003.15`), each node's first install attempt failed at the step `SetupHybridComputeRP` with error 5901, and ZTP's single automatic resubmit passed it in about 2 minutes. By the rules above, the node shows as failed while the job reports the failure, until the resubmitted job starts. After that the 5901 error is in `previousErrors`, and the node is running again.
 
-**The progress bar** is Sonar's estimate: `Creating` 0, `AwaitingConnection` 5, `Provisioning` 15, `ReadyForOs` 25, `InstallingOs` 25 plus 70 times the share of finished job steps (at most 95), `Provisioned` 100. The job's own `percentComplete` is kept as `reportedPercent` but not drawn: recorded responses showed 50 both mid-run and after success.
+**The progress bar** is Sonar's estimate: `Creating` 0, `AwaitingConnection` 5, `Provisioning` 15, `ReadyForOs` 25, `InstallingOs` 25 plus 70 times the share of finished job steps (at most 95), `Provisioned` 100. With `ztpEvents.path`, a Provisioned machine stays at 95 until it is ZTP-complete. The job's own `percentComplete` is kept as `reportedPercent` but not drawn: recorded responses showed 50 both mid-run and after success.
 
 **The phase.** The machines roll up: failed if any node failed, succeeded when all did, running when any runs or is done. The phase is **Provisioning** until Azure reports validation steps for the cluster, then **Validation**, then **Deployment**, then **Done**. A failure in the active phase shows as **Failed:** and the phase.
 
@@ -180,8 +193,8 @@ Open `http://localhost:8642/` (or the `-Port` you chose).
 
 | Part | During a ZTP run |
 | --- | --- |
-| Header | The cluster name, the phase chip **Provisioning**, the overall status (for example "Provisioning: 1 of 2 machines ready, 1 failed"), elapsed time, last poll, and one chip per node with its Arc status. The chip's tooltip names the resolved Arc machine and where its name came from. |
-| Provisioning panel | The route pill **Simplified machine provisioning (preview)**, then one item per node: lifecycle chip, progress bar, Arc machine, extension count, lifecycle message. Expanded: the lifecycle stages and sub-stages, then a **ProvisionOs job** item with the job's steps, live timers and errors inline. It collapses once validation starts. |
+| Header | The cluster name, the phase chip **Provisioning** (**ZTP complete** once every machine is done), the overall status (for example "Provisioning: 1 of 2 machines ready, 1 failed"), elapsed time, last poll, and one chip per node with its Arc status. The chip's tooltip names the resolved Arc machine and where its name came from. |
+| Provisioning panel | The route pill **Simplified machine provisioning (preview)**, then one item per node: lifecycle chip, progress bar, Arc machine, extension count, lifecycle message. Expanded: with `ztpEvents.path` first **Management address (maintenance environment)**, then the lifecycle stages and sub-stages, a **ProvisionOs job** item with the job's steps, then **Management address on the management NIC** and **BIOS restored**, with live timers and errors inline. It collapses once validation starts. |
 | Live logs | The `[ztp]` event lines, ordered by their time, coloured by level. Choose `ztp-events` in the file filter to see only them. The seed node's logs join them once the node answers. |
 | Steps | Validation and deployment, once Azure reports them |
 | Log access | The account, folders and timing for each phase |

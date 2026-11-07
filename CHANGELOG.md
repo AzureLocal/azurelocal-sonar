@@ -4,6 +4,20 @@ All notable changes to AzL Sonar are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Features
+
+* **provisioning:** azurelocal-ztp's per-machine stages are steps of each machine. **Management address (maintenance environment)** (stage Device, before the claim) comes first and shows before the edge machine exists. **Management address on the management NIC** (Network, after the OS install) and **BIOS restored** (Restore: the final BIOS values after temporary install values) come last. Only a failed state is an error, so a Network job queued behind other jobs shows as running.
+* **provisioning:** with the ZTP event file, a machine is done when Azure reports it Provisioned, its Network step succeeded, and its Restore step succeeded or is not applicable. Restore is not applicable when the stage ends (its `StageCompleted`, or Handoff) with no events for the machine. Until then the machine stays running at 95%.
+* **provisioning:** `provisioning.ztpComplete` (all machines done) and `provisioning.nextStep` (`OS configuration` and its guide, https://azurelocal.cloud). Each machine has a `ztp` entry with its Device, Network and Restore step status.
+* **web:** when ZTP is complete, the phase chip reads **ZTP complete**, the status reads "ZTP complete: N of N machines provisioned. OS configuration next", and a note under the header links the OS configuration guide.
+
+### Changed
+
+* **provisioning:** the simplified route no longer says **Ready for Validate**. After ZTP comes OS configuration (OEM drivers, `C:\SBE`, DHCP off, DNS and time, the deployment admin; azurelocal-toolkit Phase 03), then Validate. `provisioning.readyForValidate` stays in the state; it is always false on the simplified route. The OEM image route is unchanged.
+* **provisioning:** the **Prepare for Validate** step and the per-machine `prepare` field are removed: azurelocal-ztp no longer has a Prepare stage. Prepare events in older event files still show in the log pane.
+
 ## [0.4.0](https://github.com/AzureLocal/azurelocal-sonar/compare/v0.3.0...v0.4.0) (2026-11-06)
 
 

@@ -360,8 +360,10 @@
     if (p === 'unknown') return 'unknown';
     var active = str(state.activePhase).toLowerCase();
     if (p === 'failed' && active && active !== 'failed') return 'Failed: ' + phaseLabel(active);
-    // Every machine is done and no cluster deployment has started yet: say so instead of the phase name.
+    // Every machine is done and no cluster deployment has started yet: say so instead of the phase name. On the
+    // simplified route ZTP hands over to OS configuration, not to Validate.
     if ((p === 'provisioning' || p === 'arc-registration') && readyForValidate(state)) return 'Ready for Validate';
+    if (p === 'provisioning' && ztpComplete(state)) return 'ZTP complete';
     return phaseLabel(p);
   }
 
@@ -433,6 +435,12 @@
   // OEM image route: every machine registered and no validation yet.
   function readyForValidate(state) {
     return isObj(state) && isObj(state.provisioning) && state.provisioning.readyForValidate === true;
+  }
+
+  // Simplified route with the ZTP event file: every machine provisioned, its management address on the management NIC
+  // (ZTP Network stage) and its final BIOS values back (Restore, or none to restore). ZTP is done; OS configuration is next.
+  function ztpComplete(state) {
+    return isObj(state) && isObj(state.provisioning) && state.provisioning.ztpComplete === true;
   }
 
   // Machines by status for the section head: { total, ready, failed, running, waiting }.
@@ -547,6 +555,15 @@
       var what = up.active && up.active.version ? ' ' + str(up.active.version) : '';
       out.push({ kind: 'update', text: 'Update' + what + ': ' + str(up.phase) + '. This track is built from the Microsoft Learn REST reference and is unverified against a live run.' });
     }
+    if (normPhase(s.phase) === 'provisioning' && ztpComplete(s)) {
+      // The guide's URL comes from the back end (provisioning.nextStep.guide): the web files carry no URL.
+      var next = isObj(s.provisioning.nextStep) ? s.provisioning.nextStep : {};
+      var guide = /^https:\/\/[^\s]+$/i.test(str(next.guide)) ? str(next.guide) : '';
+      var note = { kind: 'ztp', text: 'ZTP is complete: every machine is provisioned, with its management address on the management NIC and its final BIOS values. ' +
+        'Next: OS configuration (OEM drivers, C:\\SBE, DHCP off, DNS and time, the deployment admin), then Validate.' + (guide ? ' Guide: ' : '') };
+      if (guide) { note.href = guide; note.linkText = guide.replace(/^https:\/\//i, '').replace(/\/$/, ''); }
+      out.push(note);
+    }
     var tr = str(s.track).toLowerCase();
     if (tr === 'add-node' || tr === 'repair') {
       out.push({ kind: 'track', text: phaseLabel(tr) + ' (set in the config): Sonar shows the Arc machines and the node log; the steps are not reported by Azure. Unverified against a live run.' });
@@ -561,7 +578,9 @@
     host.textContent = '';
     host.hidden = !notes.length;
     notes.forEach(function (n) {
-      host.appendChild(el('li', { class: 'live-note live-note-' + n.kind, text: n.text }));
+      var li = el('li', { class: 'live-note live-note-' + n.kind, text: n.text });
+      if (n.href) li.appendChild(el('a', { href: n.href, target: '_blank', rel: 'noopener noreferrer', text: n.linkText || n.href }));
+      host.appendChild(li);
     });
   }
 
@@ -961,7 +980,7 @@
       normStatus: normStatus, phaseLabel: phaseLabel, phaseChipText: phaseChipText, provisioningTreeOf: provisioningTreeOf,
       provisioningSummary: provisioningSummary, provisioningCollapse: provisioningCollapse, arcSourceText: arcSourceText,
       lifecycleLabel: lifecycleLabel, stepGroupOf: stepGroupOf, probeNote: probeNote, extensionsTreeOf: extensionsTreeOf,
-      readyForValidate: readyForValidate, liveNotes: liveNotes, guidanceSummary: guidanceSummary,
+      readyForValidate: readyForValidate, ztpComplete: ztpComplete, liveNotes: liveNotes, guidanceSummary: guidanceSummary,
       replayDiff: replayDiff, replayApplyOps: replayApplyOps, replayParseLines: replayParseLines, replayLoad: replayLoad,
       replayStateIndexAt: replayStateIndexAt, replayStateAt: replayStateAt, replayLogCountAt: replayLogCountAt,
       replayTailerIndexAt: replayTailerIndexAt, replayPosition: replayPosition, fmtOffset: fmtOffset, mainSteps: mainSteps,
@@ -1280,7 +1299,11 @@
       var sum = provisioningSummary(app.provTree);
       if (readyForValidate(s)) {
         return { key: 'success', label: 'Ready for Validate: ' + sum.ready + ' of ' + sum.total + ' machine' + (sum.total === 1 ? '' : 's') +
-          (str(s.provisioning.route) === 'oem-image' ? ' registered' : ' provisioned and prepared') };
+          (str(s.provisioning.route) === 'oem-image' ? ' registered' : ' provisioned') };
+      }
+      if (ztpComplete(s)) {
+        return { key: 'success', label: 'ZTP complete: ' + sum.ready + ' of ' + sum.total + ' machine' + (sum.total === 1 ? '' : 's') +
+          ' provisioned. OS configuration next' };
       }
       var pk = normStatus(s.provisioning.status);
       var what = phaseLabel(s.provisioning.phase || phase);
@@ -2903,7 +2926,7 @@
     var state = {
       cluster: 'clus01', mode: null, provisioningState: null,
       phase: simplified ? 'failed' : phase, activePhase: phase,
-      provisioning: { route: route, routeSource: 'auto', phase: phase, status: provStatus, readyForValidate: false, nodes: provNodes },
+      provisioning: { route: route, routeSource: 'auto', phase: phase, status: provStatus, readyForValidate: false, ztpComplete: false, nodes: provNodes },
       extensions: { shown: false, status: 'notstarted', nodes: [] },
       validation: { status: 'notstarted', tree: [], counts: {} },
       deployment: { status: 'notstarted', tree: [], counts: {} },

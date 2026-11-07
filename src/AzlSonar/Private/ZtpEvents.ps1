@@ -4,7 +4,8 @@ Set-StrictMode -Version Latest
 # provisioning scripts write one JSON object per line to an event file: { timestamp, node, state, evidence, nextAction,
 # level, stage }. Sonar follows that file (local, read-only) and shows each event in the log pane, so the ZTP stages
 # (Mounted, Booting, MaintenanceEnvironmentRunning, VoucherWritten, ReadyForPortal, and the failure states) sit next to the
-# edge machine progress it already reads from Azure.
+# edge machine progress it already reads from Azure. The per-node Device and Network stages also become steps of each
+# machine (Add-AzlSonarZtpStageEvent, ConvertTo-AzlSonarZtpStageStep).
 
 function ConvertFrom-AzlSonarZtpEvent {
     <#
@@ -104,22 +105,91 @@ function Invoke-AzlSonarZtpEventLoop {
             $offset = [long]$chunk.Offset
             $lines = foreach ($raw in $chunk.Lines) { ConvertFrom-AzlSonarZtpEvent -Line $raw }
             if (@($lines).Count -gt 0) { Add-AzlSonarLogLine -Shared $Shared -Line @($lines) }
-            if ($Shared.Contains('ZtpPrepare')) { foreach ($raw in $chunk.Lines) { Add-AzlSonarZtpPrepareEvent -Store $Shared['ZtpPrepare'] -Line $raw } }
+            if ($Shared.Contains('ZtpStages')) { foreach ($raw in $chunk.Lines) { Add-AzlSonarZtpStageEvent -Store $Shared['ZtpStages'] -Line $raw } }
         }
         catch { Write-Verbose "ZTP event file poll failed: $($_.Exception.Message)" }
         Wait-AzlSonarInterval -Shared $Shared -Seconds $PollSeconds
     }
 }
 
-function Add-AzlSonarZtpPrepareEvent {
+# The per-node azurelocal-ztp stages Sonar draws as steps. Device runs in the maintenance environment before the Azure
+# claim (Set-ZtpDeviceConfiguration.ps1, the Configurator service on port 20001); Network runs after the OS install,
+# through the edge machine's per-NIC API (Set-ZtpManagementAddress.ps1); Restore, after Network, puts back the final BIOS
+# values where the install needed temporary ones (Redfish PATCH, restart, Arc connected again). ZTP ends there (Handoff
+# writes files only): the OEM drivers, C:\SBE, DHCP off, DNS, time and the deployment admin are OS configuration, the
+# step after ZTP.
+# Success and Failed states end an attempt; any other state means the stage is still running.
+$script:AzlSonarZtpStage = [ordered]@{
+    Device  = @{
+        Name        = 'Management address (maintenance environment)'
+        Description = 'azurelocal-ztp Device: the static management address and host name on the port with the management MAC, set in the maintenance environment before the Azure claim'
+        Id          = 'ztp.device'
+        Success     = @('DeviceAddressSet', 'DeviceAddressAlreadySet', 'DeviceAddressReported', 'DeviceConfigurationSkipped')
+        Failed      = @('DeviceConfigurationFailed')
+        Waiting     = 'Waiting for the Device stage'
+        NotApplicable = 'Not applicable'
+        Labels      = @{
+            DeviceConfigurationSkipped   = 'Skipped (no maintenance address; the Network stage sets the address after the OS install)'
+            DeviceAddressReported        = 'Address reported, not changed'
+            DeviceAddressAlreadySet      = 'Address already set'
+            DeviceConfigurationSubmitted = 'Configuration sent to the maintenance environment'
+            DeviceConfigurationStatus    = 'Configuration status'
+            DeviceAddressSet             = 'Address set'
+            DeviceConfigurationFailed    = 'Device configuration failed'
+        }
+    }
+    Network = @{
+        Name        = 'Management address on the management NIC'
+        Description = 'azurelocal-ztp Network: the management address moved to the adapter with the management MAC through the edge machine''s networkAdapters API, after the OS install'
+        Id          = 'ztp.network'
+        Success     = @('ManagementAddressSet', 'ManagementAddressAlreadySet', 'ManagementAddressReported')
+        Failed      = @('ManagementAddressFailed')
+        Waiting     = 'Waiting for the Network stage'
+        NotApplicable = 'Not applicable'
+        Labels      = @{
+            ManagementAddressReported   = 'Address reported, not changed'
+            ManagementAddressAlreadySet = 'Address already set'
+            NetworkJobSubmitted         = 'ApplyConfiguration job sent'
+            NetworkJobStatus            = 'Job status'
+            ManagementAddressReleased   = 'Address released from another adapter'
+            ManagementAddressSet        = 'Address set on the management NIC'
+            ManagementAddressFailed     = 'Management address failed'
+        }
+    }
+    Restore = @{
+        Name        = 'BIOS restored'
+        Description = 'azurelocal-ztp Restore: the final BIOS values put back over Redfish after the temporary install values (for example the FC HBA off), a restart, then Arc connected again'
+        Id          = 'ztp.restore'
+        Success     = @('BiosRestored')
+        Failed      = @('BiosRestoreFailed')
+        Waiting     = 'Waiting for the Restore stage'
+        NotApplicable = 'Not applicable: the run set no temporary BIOS values'
+        Labels      = @{
+            BiosRestoreStarted = 'Restoring the final BIOS values'
+            BiosRestored       = 'BIOS restored and Arc connected again'
+            BiosRestoreFailed  = 'BIOS restore failed'
+        }
+    }
+}
+
+# Store key of the run-wide ZTP facts (no node is named '*': ZTP uses it for events about every node).
+$script:AzlSonarZtpRunKey = '*'
+
+function Add-AzlSonarZtpStageEvent {
     <#
     .SYNOPSIS
-        Records one ZTP event line in the per-node Prepare store when it belongs to the Prepare stage.
+        Records one ZTP event line in the per-node stage store when it belongs to the Device, Network or Restore stage.
     .DESCRIPTION
-        azurelocal-ztp's Prepare stage (Initialize-ZtpNode.ps1) writes one event per gate with stage 'Prepare':
-        PrepareStarted, PrepareDriversInstalled, PrepareRestarting, PrepareRestarted, then ReadyForValidate or
-        PrepareFailed. The store maps node name to the events of its latest attempt: PrepareStarted begins a new list,
-        so a rerun replaces the earlier attempt. Other stages and malformed lines are ignored.
+        The store maps node name to { Device = events[], Network = events[], Restore = events[] }: the events of the
+        latest attempt of each stage. An event after a finished attempt (a Success or Failed state) begins a new attempt,
+        and the orchestrator's StageStarted (node '*') for the stage clears it on every node, so a rerun replaces the
+        earlier attempt. Each change stores new lists rather than changing the stored ones, so the poller never reads a
+        list being written.
+        A run with no temporary BIOS values writes no Restore event for a node. So the run entry (key '*') records
+        Restore = $true once the Restore stage is over: the orchestrator's StageCompleted for Restore, or any Handoff
+        event. A node without Restore events is then 'not applicable' rather than waiting. StageStarted for Restore
+        clears that again.
+        Other stages (Prepare from older ZTP runs included), other orchestrator events and malformed lines are ignored.
     #>
     [CmdletBinding()]
     param(
@@ -134,74 +204,106 @@ function Add-AzlSonarZtpPrepareEvent {
     if ([string]::IsNullOrWhiteSpace($Line)) { return }
     try { $entry = ConvertFrom-Json -InputObject $Line -Depth 8 } catch { return }
     if ($entry -isnot [pscustomobject]) { return }
-    if ([string](Get-AzlSonarMember $entry 'stage' '') -ne 'Prepare') { return }
+    $stage = [string](Get-AzlSonarMember $entry 'stage' '')
     $node = [string](Get-AzlSonarMember $entry 'node' '')
     $state = [string](Get-AzlSonarMember $entry 'state' '')
-    if (-not $node -or $node -eq '*' -or -not $state) { return }
+    if (-not $node -or -not $state) { return }
+    $runKey = $script:AzlSonarZtpRunKey
+    $closeRestore = {
+        $run = @{}
+        if ($Store.Contains($runKey) -and $null -ne $Store[$runKey]) { foreach ($k in $Store[$runKey].Keys) { $run[$k] = $Store[$runKey][$k] } }
+        $run['Restore'] = $true
+        $Store[$runKey] = $run
+    }
+    if ($stage -eq 'Handoff') { & $closeRestore; return }
+    if (-not $script:AzlSonarZtpStage.Contains($stage)) { return }
+    $stage = @($script:AzlSonarZtpStage.Keys | Where-Object { $_ -eq $stage })[0]
+    $spec = $script:AzlSonarZtpStage[$stage]
+    if ($node -eq '*') {
+        if ($state -eq 'StageStarted') {
+            # Clears the stage on every node, and for Restore the run's 'Restore is over' too.
+            foreach ($key in @($Store.Keys)) {
+                $copy = @{}
+                foreach ($s in $Store[$key].Keys) { if ($s -ne $stage) { $copy[$s] = $Store[$key][$s] } }
+                $Store[$key] = $copy
+            }
+        }
+        elseif ($state -eq 'StageCompleted' -and $stage -eq 'Restore') { & $closeRestore }
+        return
+    }
     $record = [ordered]@{
         state     = $state
         timestamp = [string](Get-AzlSonarMember $entry 'timestamp' '')
         evidence  = [string](Get-AzlSonarMember $entry 'evidence' '')
         level     = [string](Get-AzlSonarMember $entry 'level' 'Info')
     }
-    # Direct assignment: an if-expression would unroll the stored list.
-    $list = $null
-    if ($Store.Contains($node)) { $list = $Store[$node] }
-    if ($null -eq $list -or $state -eq 'PrepareStarted') { $list = [System.Collections.ArrayList]::new() }
+    $stages = @{}
+    if ($Store.Contains($node) -and $null -ne $Store[$node]) { foreach ($s in $Store[$node].Keys) { $stages[$s] = $Store[$node][$s] } }
+    $list = [System.Collections.ArrayList]::new()
+    $previous = @($(if ($stages.ContainsKey($stage)) { $stages[$stage] }) | Where-Object { $null -ne $_ })
+    $finished = $previous.Count -gt 0 -and [string]$previous[-1]['state'] -in (@($spec.Success) + @($spec.Failed))
+    if (-not $finished) { foreach ($p in $previous) { $null = $list.Add($p) } }
     $null = $list.Add($record)
-    $Store[$node] = $list
+    $stages[$stage] = $list
+    $Store[$node] = $stages
 }
 
-function ConvertTo-AzlSonarPrepareStage {
+function ConvertTo-AzlSonarZtpStageStep {
     <#
     .SYNOPSIS
-        The 'Prepare for Validate' step for one node, from its Prepare events: { node (step tree node), status, state, message }.
+        The step of one per-node ZTP stage (Device, Network or Restore), from its events: { node (step tree node), status, state, message }.
     .DESCRIPTION
-        status is success after ReadyForValidate, error after PrepareFailed, running while events arrive, notstarted with
-        none. Each event becomes a child step; the last one runs until the next event or the end.
+        status is success after a Success state of the stage (Device: DeviceAddressSet, DeviceAddressAlreadySet,
+        DeviceAddressReported, DeviceConfigurationSkipped; Network: ManagementAddressSet, ManagementAddressAlreadySet,
+        ManagementAddressReported; Restore: BiosRestored), error after its Failed state (DeviceConfigurationFailed,
+        ManagementAddressFailed, BiosRestoreFailed), running while other events arrive (a queued ApplyConfiguration job,
+        BiosRestoreStarted) and notstarted with none; skipped (not applicable) with none and -NotApplicable. Each event
+        becomes a child step; the last one runs until the next event or the end. Only a Failed state is an error: the
+        evidence of a status event is never read for one.
     #>
     [CmdletBinding()]
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
     param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Device', 'Network', 'Restore')]
+        [string]$Stage,
+
         [AllowNull()]
         [AllowEmptyCollection()]
         [object[]]$Events = @(),
 
-        [datetime]$Now = [datetime]::UtcNow
+        [datetime]$Now = [datetime]::UtcNow,
+
+        # No events and the stage is over (Restore on a run without temporary BIOS values): skipped, not waiting.
+        [switch]$NotApplicable
     )
 
-    $labels = @{
-        PrepareStarted          = 'Azure reports Ready to cluster; signed in to the node'
-        PrepareDriversInstalled = 'OEM network drivers and network settings applied'
-        PrepareRestarting       = 'Restarting for the drivers'
-        PrepareRestarted        = 'Back with a new boot time'
-        ReadyForValidate        = 'All checks passed: ready for Validate'
-        PrepareFailed           = 'Prepare failed'
-    }
+    $spec = $script:AzlSonarZtpStage[$Stage]
     $list = @($Events | Where-Object { $null -ne $_ })
     $last = if ($list.Count) { $list[-1] } else { $null }
     $lastState = if ($null -ne $last) { [string]$last['state'] } else { '' }
-    $status = if ($null -eq $last) { 'NotStarted' } elseif ($lastState -eq 'ReadyForValidate') { 'Success' } elseif ($lastState -eq 'PrepareFailed') { 'Failed' } else { 'InProgress' }
+    $status = if ($null -eq $last -and $NotApplicable) { 'Skipped' } elseif ($null -eq $last) { 'NotStarted' } elseif ($lastState -in $spec.Success) { 'Success' } elseif ($lastState -in $spec.Failed) { 'Failed' } else { 'InProgress' }
     $steps = for ($i = 0; $i -lt $list.Count; $i++) {
         $e = $list[$i]
         $state = [string]$e['state']
-        $stepStatus = if ($state -eq 'PrepareFailed') { 'Failed' } elseif ($i -eq $list.Count - 1 -and $status -eq 'InProgress') { 'InProgress' } else { 'Success' }
+        $isFailure = $state -in $spec.Failed
+        $stepStatus = if ($isFailure) { 'Failed' } elseif ($i -eq $list.Count - 1 -and $status -eq 'InProgress') { 'InProgress' } else { 'Success' }
         $end = if ($i + 1 -lt $list.Count) { $list[$i + 1]['timestamp'] } elseif ($stepStatus -ne 'InProgress') { $e['timestamp'] } else { $null }
-        $label = if ($labels.ContainsKey($state)) { $labels[$state] } else { $state }
+        $label = if ($spec.Labels.ContainsKey($state)) { $spec.Labels[$state] } else { $state }
         [pscustomobject]@{
             name          = $state
-            description   = $(if ($e['evidence'] -and $state -ne 'PrepareFailed') { "${label}: $($e['evidence'])" } else { $label })
-            fullStepIndex = "prepare.$i"
+            description   = $(if ($e['evidence'] -and -not $isFailure) { "${label}: $($e['evidence'])" } else { $label })
+            fullStepIndex = "$($spec.Id).$i"
             startTimeUtc  = $e['timestamp']
             endTimeUtc    = $end
             status        = $stepStatus
-            exception     = @($(if ($state -eq 'PrepareFailed') { [string]$e['evidence'] }) | Where-Object { $_ })
+            exception     = @($(if ($isFailure) { [string]$e['evidence'] }) | Where-Object { $_ })
         }
     }
     $raw = [pscustomobject]@{
-        name          = 'Prepare for Validate'
-        description   = 'azurelocal-ztp Prepare: OEM network drivers, static management address, one default gateway, DNS, time, C:\SBE'
-        fullStepIndex = 'prepare'
+        name          = $spec.Name
+        description   = $(if ($status -eq 'Skipped') { $spec.NotApplicable } else { $spec.Description })
+        fullStepIndex = $spec.Id
         startTimeUtc  = $(if ($list.Count) { $list[0]['timestamp'] } else { $null })
         endTimeUtc    = $(if ($status -in 'Success', 'Failed') { $last['timestamp'] } else { $null })
         status        = $status
@@ -213,6 +315,6 @@ function ConvertTo-AzlSonarPrepareStage {
         node    = $node
         status  = [string]$node['status']
         state   = $lastState
-        message = $(if ($null -ne $last -and $last['evidence']) { [string]$last['evidence'] } elseif ($null -ne $last) { $lastState } else { 'Waiting for the Prepare stage' })
+        message = $(if ($null -ne $last -and $last['evidence']) { [string]$last['evidence'] } elseif ($null -ne $last) { $lastState } elseif ($status -eq 'Skipped') { $spec.NotApplicable } else { $spec.Waiting })
     }
 }

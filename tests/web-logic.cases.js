@@ -362,6 +362,33 @@ test('Ready for Validate only when the back end says every machine is registered
   eq(m.readyForValidate({ phase: 'validation' }), false);
 });
 
+test('ZTP complete (simplified route): the chip says so, never Ready for Validate, and a note links the OS configuration guide', function () {
+  var s = provState('provisioning', 'provisioning', 'simplified', []);
+  eq(m.ztpComplete(s), false, 'no flag');
+  eq(m.liveNotes(s), [], 'no note before ZTP is complete');
+  s.provisioning.ztpComplete = true;
+  s.provisioning.readyForValidate = false;
+  eq(m.ztpComplete(s), true);
+  eq(m.readyForValidate(s), false);
+  eq(m.phaseChipText(s), 'ZTP complete');
+  var bare = m.liveNotes(s);
+  eq(bare.length, 1, 'the note without a guide from the back end');
+  eq(bare[0].href, undefined, 'no link without a guide');
+  s.provisioning.nextStep = { name: 'OS configuration', guide: 'https://azurelocal.cloud' };
+  var notes = m.liveNotes(s);
+  eq(notes.length, 1);
+  eq(notes[0].kind, 'ztp');
+  eq(notes[0].href, 'https://azurelocal.cloud', 'the guide the back end names');
+  eq(notes[0].linkText, 'azurelocal.cloud');
+  eq(/OS configuration/.test(notes[0].text), true, 'names the next step');
+  eq(/Ready for Validate/.test(notes[0].text), false);
+  s.provisioning.nextStep = { guide: 'javascript:alert(1)' };
+  eq(m.liveNotes(s)[0].href, undefined, 'only an https guide is linked');
+  eq(m.phaseChipText({ phase: 'validation', provisioning: { ztpComplete: true } }), 'Validation', 'Validate started: the phase again');
+  eq(m.liveNotes({ phase: 'validation', provisioning: { ztpComplete: true } }), [], 'no note once Validate started');
+  eq(m.ztpComplete({ phase: 'provisioning' }), false, 'older back ends without the field');
+});
+
 test('extensionsTreeOf: the mandatory extensions appear only once the back end shows them (Validate started)', function () {
   eq(m.extensionsTreeOf({ extensions: { shown: false, nodes: [{ name: 'node01' }] } }), []);
   eq(m.extensionsTreeOf({ phase: 'arc-registration' }), [], 'older back ends without the group');

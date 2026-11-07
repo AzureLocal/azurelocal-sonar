@@ -310,6 +310,7 @@ a { color: var(--accent); }
 }
 .live-note-lag { border-left-color: var(--warn); background: var(--warn-soft); }
 .live-note-update, .live-note-track { border-left-color: var(--muted); }
+.live-note-ztp { border-left-color: var(--ok); background: var(--ok-soft); }
 @media (max-width: 720px) { .live-notes { margin: 10px 16px 0; } }
 
 /* ---------- Layout ---------- */

@@ -282,7 +282,7 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
         $node.status | Should -Be 'error'
     }
 
-    It 'provisioning with a ZTP event file: Provisioned machines wait for Prepare, and ready for Validate needs every ReadyForValidate' {
+    It 'provisioning with a ZTP event file: Device step first, Network and Restore last; ZTP complete needs Network success and Restore success or not applicable' {
         $configObject = New-SonarConfigObject
         $configObject | Add-Member -NotePropertyName ztpEvents -NotePropertyValue ([pscustomobject]@{ path = 'C:\example\ztp-events.jsonl' }) -Force
         $cfg = Read-AzlSonarConfig -Json (ConvertTo-SonarConfigJson $configObject)
@@ -290,7 +290,9 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
         $edgeList = @{ value = @($names | ForEach-Object {
                     @{ name = $_; id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.AzureStackHCI/edgeMachines/$_"
                         properties = @{ provisioningState = 'Succeeded'; machineState = 'Purposed'; connectivityStatus = 'Connected'; arcMachineResourceId = "/subscriptions/x/resourceGroups/y/providers/Microsoft.HybridCompute/machines/$_"
-                            lifecycleDetails = @{ lifecycleStatus = @{ status = 'Provisioned' } } } } }) }
+                            lifecycleDetails = @{ lifecycleStatus = @{ status = 'Provisioned' }; lifecycleStages = @(
+                                    @{ name = 'ProvisionMachine'; status = 'Completed'; startTimeUtc = '2026-10-10T16:00:00Z'; endTimeUtc = '2026-10-10T16:30:00Z' },
+                                    @{ name = 'InstallOs'; status = 'Completed'; startTimeUtc = '2026-10-10T16:30:00Z'; endTimeUtc = '2026-10-10T17:30:00Z' }) } } } }) }
         $job = @{ properties = @{ status = 'DeploymentSuccess'; provisioningState = 'Succeeded'; reportedProperties = @{ percentComplete = 100; deploymentStatus = @{ status = 'Succeeded'; steps = @(
                             @{ name = 'BootIntoTargetOS'; fullStepIndex = '0'; status = 'Success'; startTimeUtc = '2026-10-10T17:00:00Z'; endTimeUtc = '2026-10-10T17:30:00Z' }) } } } }
         Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 404 @{ error = @{ code = 'ResourceNotFound'; message = 'nope' } })
@@ -298,35 +300,99 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
         Add-ArmRoute 'jobs/ProvisionOs\?' (New-SonarArmResponse 200 $job)
         Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 200 $edgeList)
         $ev = { param($s, $e) [ordered]@{ state = $s; timestamp = '2026-10-10T17:40:00Z'; evidence = $e; level = 'Info' } }
+        $deviceDone = { [System.Collections.ArrayList]@((& $ev 'DeviceConfigurationSubmitted' 'NIC1 static'), (& $ev 'DeviceAddressSet' 'NIC1 static')) }
 
-        # Provisioned in Azure, Prepare not started: not done, not ready for Validate.
+        # Provisioned in Azure, Network not started: running at 95%, not ZTP complete, never ready for Validate.
         $store = [hashtable]::Synchronized(@{})
-        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpPrepare $store
+        foreach ($n in $names) { $store[$n] = @{ Device = (& $deviceDone) } }
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpStages $store
+        $node = $state.provisioning.nodes[0]
+        $node.status | Should -Be 'running'
+        $node.percent | Should -Be 95
+        $node.ztp.complete | Should -BeFalse
+        $node.ztp.device.status | Should -Be 'success'
+        $node.ztp.network.status | Should -Be 'notstarted'
+        $node.ztp.restore.status | Should -Be 'notstarted'
+        $state.provisioning.nextStep | Should -BeNullOrEmpty
+        @($node.tree | ForEach-Object { $_.name }) | Should -Be @('Management address (maintenance environment)', 'ProvisionMachine', 'InstallOs', 'ProvisionOs job', 'Management address on the management NIC', 'BIOS restored')
+        $state.provisioning.ztpComplete | Should -BeFalse
+        $state.provisioning.readyForValidate | Should -BeFalse
+
+        # Network done, the BIOS restore still running: running at 95%, not complete.
+        $store[$names[0]] = @{ Device = (& $deviceDone); Network = [System.Collections.ArrayList]@((& $ev 'ManagementAddressSet' 'NIC1 Static up')); Restore = [System.Collections.ArrayList]@((& $ev 'BiosRestoreStarted' 'FC HBA on')) }
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpStages $store
         $state.provisioning.nodes[0].status | Should -Be 'running'
-        $state.provisioning.nodes[0].prepare.status | Should -Be 'notstarted'
-        ($state.provisioning.nodes[0].tree | Where-Object { $_.name -eq 'Prepare for Validate' }) | Should -Not -BeNullOrEmpty
-        $state.provisioning.readyForValidate | Should -BeFalse
+        $state.provisioning.nodes[0].percent | Should -Be 95
+        $state.provisioning.nodes[0].ztp.restore.status | Should -Be 'running'
 
-        # One machine ready, the other still preparing: still not ready for Validate.
-        $store[$names[0]] = [System.Collections.ArrayList]@((& $ev 'PrepareStarted' ''), (& $ev 'ReadyForValidate' 'all checks passed'))
-        $store[$names[1]] = [System.Collections.ArrayList]@((& $ev 'PrepareStarted' ''), (& $ev 'PrepareRestarting' 'a driver asked for a restart'))
-        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpPrepare $store
+        # One machine's job queued behind other jobs: running, not an error. The other done (BIOS restored).
+        $store[$names[0]] = @{ Device = (& $deviceDone); Network = [System.Collections.ArrayList]@((& $ev 'ManagementAddressSet' 'NIC1 Static up')); Restore = [System.Collections.ArrayList]@((& $ev 'BiosRestoreStarted' 'FC HBA on'), (& $ev 'BiosRestored' 'Arc Connected')) }
+        $store[$names[1]] = @{ Device = (& $deviceDone); Network = [System.Collections.ArrayList]@((& $ev 'NetworkJobSubmitted' 'NIC1 apply'), (& $ev 'NetworkJobStatus' 'NIC1 ApplyConfiguration: Job is not yet triggered as other jobs are still running')) }
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpStages $store
         $state.provisioning.nodes[0].status | Should -Be 'success'
+        $state.provisioning.nodes[0].percent | Should -Be 100
+        $state.provisioning.nodes[0].ztp.complete | Should -BeTrue
         $state.provisioning.nodes[1].status | Should -Be 'running'
-        $state.provisioning.readyForValidate | Should -BeFalse
+        @($state.provisioning.nodes[1].errors).Count | Should -Be 0
+        $state.provisioning.nodes[1].ztp.network.status | Should -Be 'running'
+        $state.provisioning.ztpComplete | Should -BeFalse
 
-        # Both ready: ready for Validate.
-        $store[$names[1]] = [System.Collections.ArrayList]@((& $ev 'PrepareStarted' ''), (& $ev 'ReadyForValidate' 'all checks passed'))
-        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpPrepare $store
+        # The second machine's Network done, no Restore events: waiting while the Restore stage may still come.
+        $store[$names[1]] = @{ Device = [System.Collections.ArrayList]@((& $ev 'DeviceConfigurationSkipped' 'no maintenance_address')); Network = [System.Collections.ArrayList]@((& $ev 'ManagementAddressAlreadySet' 'NIC1 already')) }
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpStages $store
+        $state.provisioning.nodes[1].status | Should -Be 'running'
+        $state.provisioning.ztpComplete | Should -BeFalse
+
+        # The Restore stage is over (Handoff or its StageCompleted) without events for it: not applicable. Both done:
+        # ZTP complete, OS configuration next; still not ready for Validate.
+        $store['*'] = @{ Restore = $true }
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpStages $store
+        $state.provisioning.nodes[1].ztp.restore.status | Should -Be 'skipped'
+        $state.provisioning.nodes[1].ztp.complete | Should -BeTrue
+        $state.provisioning.nextStep.name | Should -Be 'OS configuration'
+        $state.provisioning.nextStep.guide | Should -Be 'https://azurelocal.cloud'
         $state.provisioning.status | Should -Be 'success'
-        $state.provisioning.readyForValidate | Should -BeTrue
-
-        # A Prepare failure is a node error with the reason.
-        $store[$names[1]] = [System.Collections.ArrayList]@((& $ev 'PrepareStarted' ''), (& $ev 'PrepareFailed' 'no sign-in'))
-        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpPrepare $store
-        $state.provisioning.nodes[1].status | Should -Be 'error'
-        @($state.provisioning.nodes[1].errors) -join ' ' | Should -Match 'Prepare for Validate: no sign-in'
+        $state.provisioning.ztpComplete | Should -BeTrue
         $state.provisioning.readyForValidate | Should -BeFalse
+
+        # A Network failure is a node error with the reason.
+        $store[$names[1]] = @{ Device = (& $deviceDone); Network = [System.Collections.ArrayList]@((& $ev 'NetworkJobSubmitted' ''), (& $ev 'ManagementAddressFailed' 'ApplyConfiguration failed')) }
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpStages $store
+        $state.provisioning.nodes[1].status | Should -Be 'error'
+        @($state.provisioning.nodes[1].errors) -join ' ' | Should -Match 'Management address on the management NIC: ApplyConfiguration failed'
+        $state.provisioning.ztpComplete | Should -BeFalse
+
+        # A Device failure is a node error too.
+        $store[$names[1]] = @{ Device = [System.Collections.ArrayList]@((& $ev 'DeviceConfigurationFailed' 'no answer on 20001')) }
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpStages $store
+        $state.provisioning.nodes[1].status | Should -Be 'error'
+        @($state.provisioning.nodes[1].errors) -join ' ' | Should -Match 'Management address \(maintenance environment\): no answer on 20001'
+
+        # A BIOS restore failure is a node error.
+        $store[$names[1]] = @{ Device = (& $deviceDone); Network = [System.Collections.ArrayList]@((& $ev 'ManagementAddressSet' 'NIC1')); Restore = [System.Collections.ArrayList]@((& $ev 'BiosRestoreFailed' 'Arc did not reconnect')) }
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpStages $store
+        $state.provisioning.nodes[1].status | Should -Be 'error'
+        @($state.provisioning.nodes[1].errors) -join ' ' | Should -Match 'BIOS restored: Arc did not reconnect'
+        $state.provisioning.ztpComplete | Should -BeFalse
+    }
+
+    It 'provisioning with a ZTP event file: the Device step shows before the edge machine exists' {
+        $configObject = New-SonarConfigObject
+        $configObject | Add-Member -NotePropertyName ztpEvents -NotePropertyValue ([pscustomobject]@{ path = 'C:\example\ztp-events.jsonl' }) -Force
+        $configObject | Add-Member -NotePropertyName provisioningRoute -NotePropertyValue 'simplified' -Force
+        $cfg = Read-AzlSonarConfig -Json (ConvertTo-SonarConfigJson $configObject)
+        $names = @($cfg.nodes | ForEach-Object { $_.name })
+        Add-ArmRoute 'deploymentSettings/default' (New-SonarArmResponse 404 @{ error = @{ code = 'ResourceNotFound'; message = 'nope' } })
+        Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 404 @{ error = @{ code = 'ResourceNotFound'; message = 'nope' } })
+        Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 200 @{ value = @() })
+        $ev = { param($s, $e) [ordered]@{ state = $s; timestamp = '2026-10-10T15:00:00Z'; evidence = $e; level = 'Info' } }
+        $store = [hashtable]::Synchronized(@{})
+        $store[$names[0]] = @{ Device = [System.Collections.ArrayList]@((& $ev 'DeviceConfigurationSubmitted' 'NIC1 static')) }
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpStages $store
+        $state.provisioning.nodes[0].status | Should -Be 'running'
+        @($state.provisioning.nodes[0].tree | ForEach-Object { $_.name }) | Should -Be @('Management address (maintenance environment)')
+        $state.provisioning.nodes[1].status | Should -Be 'notstarted'
+        @($state.provisioning.nodes[1].tree).Count | Should -Be 0
     }
 
     It 'provisioning without a ZTP event file: a Provisioned machine is done, as before' {
@@ -340,9 +406,11 @@ Describe 'Get-AzlSonarDeploymentState (mocked ARM)' {
         Add-ArmRoute 'HybridCompute/machines/' (New-SonarArmResponse 200 (Get-ArcBody))
         Add-ArmRoute 'jobs/ProvisionOs\?' (New-SonarArmResponse 200 $job)
         Add-ArmRoute 'edgeMachines\?' (New-SonarArmResponse 200 $edgeList)
-        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpPrepare ([hashtable]::Synchronized(@{}))
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now -ZtpStages ([hashtable]::Synchronized(@{}))
         $state.provisioning.nodes[0].status | Should -Be 'success'
-        $state.provisioning.nodes[0].prepare | Should -BeNullOrEmpty
+        $state.provisioning.nodes[0].ztp | Should -BeNullOrEmpty
+        $state.provisioning.ztpComplete | Should -BeFalse
+        $state.provisioning.readyForValidate | Should -BeFalse
     }
 
     It 'throws on an ARM error from deploymentSettings' {
