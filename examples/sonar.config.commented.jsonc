@@ -55,6 +55,12 @@
   // (or the -EventLogPath of Invoke-AzureLocalOsConfiguration.ps1). Relative paths are relative to this file. Without it the
   // OS configuration mode shows no steps and no [osconfig] log lines.
   "osConfigEventsPath": "D:\\Data\\azl-ztp\\example\\evidence\\os-configuration-events.jsonl",
+  // Optional. The folder the toolkit's Invoke-HardwareDiscovery.ps1 wrote with -OutputPath (<ServiceTag>.json per node and discovery-summary.json),
+  // or one of those files. The Discovery stage (before ZTP) shows what it found. Relative paths are relative to this file.
+  // Optional. Which stage to watch: Auto (default, the whole flow) or one of Discovery, Provisioning, OsConfiguration, Validate,
+  // Deployment, Update, AddNode, Repair. A single monitor shows only its tile and reads only what it needs. -Monitor overrides it.
+  "monitor": "Auto",
+  "discoveryPath": "D:\\Data\\azl-ztp\\example\\evidence\\discovery",
   // Optional. Which account reads a node's logs: "local" while it is a workgroup machine, "domain" once the OS configuration has reported
   // DomainJoined and DomainAdminsConfigured. Only names and a keyvault:// reference for the password; a password in the file is refused.
   // The reference is keyvault://<vault>/<secret>, optionally /<version> (32 hex characters) to pin the secret version; an invalid one is

@@ -191,12 +191,14 @@ $script:AzlSonarSettableKeys = [ordered]@{
     'architecture'              = @{ Kind = 'text'; Words = @('hyperconverged', 'disaggregated') }
     'internalDns'               = @{ Kind = 'flag' }
     'track'                     = @{ Kind = 'text'; Words = @('auto', 'deployment', 'update', 'add-node', 'repair') }
+    'monitor'                   = @{ Kind = 'text'; Words = @('Auto', 'Discovery', 'Provisioning', 'OsConfiguration', 'Validate', 'Deployment', 'Update', 'AddNode', 'Repair') }
     'updateTrack'               = @{ Kind = 'text'; Words = @('auto', 'off') }
     'apiVersion'                = @{ Kind = 'text' }
     'apiVersionFallback'        = @{ Kind = 'text' }
     'edgeApiVersion'            = @{ Kind = 'text' }
     'ztpEvents.path'            = @{ Kind = 'text' }
     'osConfigEventsPath'        = @{ Kind = 'text' }
+    'discoveryPath'             = @{ Kind = 'text' }
     'credential.source'         = @{ Kind = 'text'; Words = @('prompt', 'parameter', 'keyvault') }
     'credential.vault'          = @{ Kind = 'text' }
     'credential.usernameSecret' = @{ Kind = 'text' }

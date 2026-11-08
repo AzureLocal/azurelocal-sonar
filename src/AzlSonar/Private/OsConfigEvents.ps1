@@ -159,7 +159,7 @@ function ConvertTo-AzlSonarOsAddressSource {
     $key = $raw.ToLowerInvariant() -replace '[^a-z]', ''
     if ($key -match 'handoff') { return @{ Id = 'handoff'; Label = 'ZTP handoff' } }
     if ($key -match '^(override|nodeaddress|parameter|manual|operator)') { return @{ Id = 'override'; Label = 'Override (-NodeAddress)' } }
-    if ($key -match 'maclookup|neighbo|^arp|layer') { return @{ Id = 'neighbor'; Label = 'Neighbor table (MAC lookup)' } }
+    if ($key -match 'maclookup|neighbo|^arp|layer') { return @{ Id = 'neighbor'; Label = 'Neighbor table, by MAC' } }
     if ($key -match '^arc') { return @{ Id = 'arc'; Label = 'Azure Arc machine' } }
     if ($key -match '^(file|infra|master|config|yml|yaml)') { return @{ Id = 'file'; Label = 'Infrastructure file' } }
     return @{ Id = $raw; Label = "Other ($raw)" }
@@ -304,13 +304,13 @@ function Copy-AzlSonarOsRunEntry {
     return $c
 }
 
-function New-AzlSonarOsRunEntry {
+function Get-AzlSonarOsEmptyRun {
     # An empty run entry for a run that is known only from its events so far.
     [CmdletBinding()]
     [OutputType([hashtable])]
-    param([hashtable]$Event, [string]$RunId, [string[]]$Runs = @(), [int]$Stale = 0)
+    param([hashtable]$Evt, [string]$RunId, [string[]]$Runs = @(), [int]$Stale = 0)
     return @{
-        Events = 0; LastEventAt = $Event.timestamp; Started = $Event.timestamp
+        Events = 0; LastEventAt = $Evt.timestamp; Started = $Evt.timestamp
         RunId = $RunId; Runs = [string[]]@($Runs); Seen = [long[]]@(); Seq = $null; Stale = $Stale
     }
 }
@@ -337,11 +337,11 @@ function Resolve-AzlSonarOsEventRun {
         [System.Collections.IDictionary]$Store,
 
         [Parameter(Mandatory)]
-        [hashtable]$Event
+        [hashtable]$Evt
     )
 
-    $id = [string]$Event.runId
-    $seq = $Event.seq
+    $id = [string]$Evt.runId
+    $seq = $Evt.seq
     if (-not $id -and $null -eq $seq) { return $true }
     $runKey = $script:AzlSonarOsRunKey
     $run = $null
@@ -352,28 +352,28 @@ function Resolve-AzlSonarOsEventRun {
 
     if ($id -and $id -ne $current) {
         $startedAt = if ($null -ne $run -and $run.ContainsKey('Started')) { ConvertTo-AzlSonarUtcDate $run['Started'] } else { $null }
-        $older = $seen -contains $id -or ($current -and $null -ne $startedAt -and $null -ne $Event.when -and $Event.when -lt $startedAt)
+        $older = $seen -contains $id -or ($current -and $null -ne $startedAt -and $null -ne $Evt.when -and $Evt.when -lt $startedAt)
         if ($older) {
             $entry = Copy-AzlSonarOsRunEntry -Run $run
-            if ($null -eq $run) { $entry = New-AzlSonarOsRunEntry -Event $Event -RunId $current }
+            if ($null -eq $run) { $entry = Get-AzlSonarOsEmptyRun -Evt $Evt -RunId $current }
             $entry['Stale'] = $staleCount + 1
             if ($seen -notcontains $id) { $entry['Runs'] = [string[]]@(@($seen) + $id | Select-Object -Last $script:AzlSonarOsMaxRuns) }
             $Store[$runKey] = $entry
             return $false
         }
         foreach ($key in @($Store.Keys)) { if ($key -ne $runKey -and $key -ne $script:AzlSonarOsDomainKey) { $Store.Remove($key) } }
-        $run = New-AzlSonarOsRunEntry -Event $Event -RunId $id -Runs @(@($seen) + $id | Select-Object -Last $script:AzlSonarOsMaxRuns) -Stale $staleCount
+        $run = Get-AzlSonarOsEmptyRun -Evt $Evt -RunId $id -Runs @(@($seen) + $id | Select-Object -Last $script:AzlSonarOsMaxRuns) -Stale $staleCount
         $Store[$runKey] = $run
     }
     elseif ($id -and $null -eq $run) {
-        $run = New-AzlSonarOsRunEntry -Event $Event -RunId $id -Runs @($id)
+        $run = Get-AzlSonarOsEmptyRun -Evt $Evt -RunId $id -Runs @($id)
         $Store[$runKey] = $run
     }
 
     if ($null -ne $seq) {
         $seenSeq = if ($null -ne $run -and $run.ContainsKey('Seen')) { @($run['Seen']) } else { @() }
         if ($seenSeq -contains $seq) { return $false }
-        if ($null -eq $run) { $run = New-AzlSonarOsRunEntry -Event $Event -RunId $current -Runs @($seen) }
+        if ($null -eq $run) { $run = Get-AzlSonarOsEmptyRun -Evt $Evt -RunId $current -Runs @($seen) }
         $entry = Copy-AzlSonarOsRunEntry -Run $run
         $entry['Seen'] = [long[]]@(@($seenSeq) + $seq | Select-Object -Last $script:AzlSonarOsMaxSeen)
         $top = if ($run.ContainsKey('Seq') -and $null -ne $run['Seq']) { [long]$run['Seq'] } else { [long]::MinValue }
@@ -410,7 +410,7 @@ function Add-AzlSonarOsConfigEvent {
 
     $evt = ConvertFrom-AzlSonarOsConfigLine -Line $Line
     if ($null -eq $evt) { return }
-    if (-not (Resolve-AzlSonarOsEventRun -Store $Store -Event $evt)) { return }
+    if (-not (Resolve-AzlSonarOsEventRun -Store $Store -Evt $evt)) { return }
     $runKey = $script:AzlSonarOsRunKey
     $run = $null
     if ($Store.Contains($runKey) -and $null -ne $Store[$runKey]) { $run = $Store[$runKey] }

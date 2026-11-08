@@ -1110,7 +1110,10 @@ function Get-AzlSonarInitialState {
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
     param(
         [Parameter(Mandatory)]
-        [object]$Config
+        [object]$Config,
+
+        [AllowNull()]
+        [System.Collections.IDictionary]$DiscoveryCache
     )
 
     $nodes = foreach ($node in $Config.nodes) {
@@ -1127,7 +1130,9 @@ function Get-AzlSonarInitialState {
         provisioningState = $null
         phase             = $phase
         activePhase       = $phase
-        provisioning      = [ordered]@{ route = $route; routeSource = $(if ($route) { 'config' } else { 'auto' }); phase = $phase; status = 'notstarted'; readyForValidate = $false; ztpComplete = $false; nextStep = $null; nodes = @() }
+        provisioning      = [ordered]@{ manualInstall = [bool](Test-AzlSonarManualInstall -Config $Config -Route $route); route = $route; routeSource = $(if ($route) { 'config' } else { 'auto' }); phase = $phase; status = 'notstarted'; readyForValidate = $false; ztpComplete = $false; nextStep = $null; nodes = @() }
+        monitor           = [string](Get-AzlSonarMember $Config 'monitor' 'Auto')
+        discovery         = Get-AzlSonarDiscoveryState -Config $Config -Cache $DiscoveryCache
         osConfiguration   = Get-AzlSonarOsConfigurationState -Store $null -Config $Config -ExpectedRoute $(if ($route) { $route } else { '' })
         extensions        = [ordered]@{ shown = $false; status = 'notstarted'; nodes = @() }
         validation        = [ordered]@{ status = 'notstarted'; tree = @(); counts = $emptyCounts }
@@ -1181,8 +1186,8 @@ function Get-AzlSonarDeploymentState {
     .EXAMPLE
         Get-AzlSonarDeploymentState -ConfigPath ./config/clus01.json | ConvertTo-Json -Depth 20
     .OUTPUTS
-        Ordered dictionary: cluster, resourceGroup, mode, provisioningState, phase, activePhase,
-        provisioning{route,routeSource,phase,status,readyForValidate,ztpComplete,nextStep,nodes[]}, osConfiguration{configured,status,state,ready,run,nodesTotal,nodesConverged,wipe,nodes[]}, extensions{shown,status,nodes[]},
+        Ordered dictionary: cluster, resourceGroup, mode, provisioningState, phase, activePhase, discovery{configured,status,state,nodes[]},
+        provisioning{manualInstall,route,routeSource,phase,status,readyForValidate,ztpComplete,nextStep,nodes[]}, osConfiguration{configured,status,state,ready,run,nodesTotal,nodesConverged,wipe,nodes[]}, extensions{shown,status,nodes[]},
         validation{status,tree,counts},
         deployment{status,tree,counts}, nodes[], edgeMachines[], current{phase,stepPath(ids),stepNames,stepName,stepId,status},
         warnings[], pollError, polledAt.
@@ -1208,6 +1213,10 @@ function Get-AzlSonarDeploymentState {
         # OS configuration events per node (Shared.OsConfigEvents, Add-AzlSonarOsConfigEvent). Used when the config follows an OS configuration event file.
         [AllowNull()]
         [System.Collections.IDictionary]$OsConfigEvents,
+
+        # Shared.DiscoveryCache: the hardware discovery files already parsed (Get-AzlSonarDiscoveryState).
+        [AllowNull()]
+        [System.Collections.IDictionary]$DiscoveryCache,
 
         # Shared.LogAccount (the nodes that rejected the domain account) and the local account's name, for the account shown per node.
         [AllowNull()]
@@ -1404,7 +1413,9 @@ function Get-AzlSonarDeploymentState {
         provisioningState = $provisioningStateValue
         phase             = $phaseOut
         activePhase       = $activeOut
-        provisioning      = [ordered]@{ route = $route; routeSource = $routeSource; phase = $provisioningPhase; status = $provisioningStatus; readyForValidate = $readyForValidate; ztpComplete = $ztpComplete; nextStep = $nextStep; nodes = $provisioningNodes }
+        provisioning      = [ordered]@{ manualInstall = [bool](Test-AzlSonarManualInstall -Config $Config -Route $route); route = $route; routeSource = $routeSource; phase = $provisioningPhase; status = $provisioningStatus; readyForValidate = $readyForValidate; ztpComplete = $ztpComplete; nextStep = $nextStep; nodes = $provisioningNodes }
+        monitor           = [string](Get-AzlSonarMember $Config 'monitor' 'Auto')
+        discovery         = Get-AzlSonarDiscoveryState -Config $Config -Cache $DiscoveryCache
         osConfiguration   = $osConfiguration
         extensions        = $extensionsSection
         validation        = [ordered]@{ status = $validationStatus; tree = $validationTree; counts = (Measure-AzlSonarStepTree -Tree $validationTree) }
@@ -1488,7 +1499,10 @@ function Invoke-AzlSonarPollerLoop {
             $osEvents = if ($Shared.Contains('OsConfigEvents')) { $Shared['OsConfigEvents'] } else { $null }
             $logAccount = if ($Shared.Contains('LogAccount')) { $Shared['LogAccount'] } else { $null }
             $localName = if ($Shared.Contains('LocalUserName')) { [string]$Shared['LocalUserName'] } else { '' }
-            $state = Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -LogAccount $logAccount -LocalUserName $localName
+            $discoveryCache = if ($Shared.Contains('DiscoveryCache')) { $Shared['DiscoveryCache'] } else { $null }
+            # The Discovery monitor reads the discovery files only: no Azure call, no sign-in, no node.
+            $state = if (-not (Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))).azure) { Get-AzlSonarInitialState -Config $Config -DiscoveryCache $discoveryCache } else {
+            Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -DiscoveryCache $discoveryCache -LogAccount $logAccount -LocalUserName $localName }
             Publish-AzlSonarState -Shared $Shared -State $state
         }
         catch {

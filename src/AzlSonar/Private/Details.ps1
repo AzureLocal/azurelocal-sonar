@@ -42,7 +42,7 @@ function Get-AzlSonarConfigKeyName {
     [OutputType([string])]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('cluster', 'resourceGroup', 'subscription', 'location', 'route', 'identity', 'nodes', 'address', 'ztpEvents', 'osConfigEvents', 'credential', 'pollSeconds')]
+        [ValidateSet('cluster', 'resourceGroup', 'subscription', 'location', 'route', 'identity', 'nodes', 'address', 'ztpEvents', 'osConfigEvents', 'discovery', 'credential', 'pollSeconds')]
         [string]$Setting,
 
         [AllowEmptyString()]
@@ -52,12 +52,12 @@ function Get-AzlSonarConfigKeyName {
     $infrastructure = @{
         cluster = 'cluster.name'; resourceGroup = 'azure.resource_group'; subscription = 'azure.subscription_id'; location = 'azure.location'
         route = 'scenario.os_install'; identity = 'scenario.identity'; nodes = 'nodes[].name'; address = 'nodes[].network_adapters[]'
-        ztpEvents = 'provisioning.simplified.evidence_path'; osConfigEvents = 'provisioning.simplified.evidence_path'; credential = 'credential.source (Sonar config only)'; pollSeconds = '-PollSeconds'
+        ztpEvents = 'provisioning.simplified.evidence_path'; osConfigEvents = 'provisioning.simplified.evidence_path'; discovery = 'provisioning.simplified.evidence_path (the discovery folder inside it)'; credential = 'credential.source (Sonar config only)'; pollSeconds = '-PollSeconds'
     }
     $configFile = @{
         cluster = 'clusterName'; resourceGroup = 'resourceGroup'; subscription = 'subscriptionId'; location = 'location'
         route = 'provisioningRoute'; identity = 'identityModel'; nodes = 'nodes[].name'; address = 'nodes[].address'
-        ztpEvents = 'ztpEvents.path'; osConfigEvents = 'osConfigEventsPath'; credential = 'credential.source'; pollSeconds = 'pollSeconds'
+        ztpEvents = 'ztpEvents.path'; osConfigEvents = 'osConfigEventsPath'; discovery = 'discoveryPath'; credential = 'credential.source'; pollSeconds = 'pollSeconds'
     }
     if ($Kind -eq 'infrastructure') { return $infrastructure[$Setting] }
     return $configFile[$Setting]
@@ -100,6 +100,7 @@ function New-AzlSonarDetailFact {
     $identity = [string](Get-AzlSonarMember $Config 'identityModel' 'LocalIdentity')
     $ztpPath = [string](Get-AzlSonarMember $Config 'ztpEventsPath' '')
     $osConfigPath = [string](Get-AzlSonarMember $Config 'osConfigEventsPath' '')
+    $discoveryPath = [string](Get-AzlSonarMember $Config 'discoveryPath' '')
     $domainAccount = [string](Get-AzlSonarLogAccount -Config $Config -DomainJoined $true -AdminsConfigured $true).domainAccount
     $maxRejections = (Get-AzlSonarBreakerSetting -Config $Config).MaxRejections
 
@@ -115,6 +116,9 @@ function New-AzlSonarDetailFact {
     }
     if (-not $osConfigPath) {
         $notSet.Add([ordered]@{ setting = 'osConfigEvents'; label = 'OS configuration event file'; key = (& $key 'osConfigEvents'); effect = 'The OS configuration mode shows no steps from the toolkit run; the machines show only what Azure reports.' })
+    }
+    if (-not $discoveryPath) {
+        $notSet.Add([ordered]@{ setting = 'discovery'; label = 'Hardware discovery folder'; key = (& $key 'discovery'); effect = 'The Discovery stage shows nothing: the serial numbers, ports and BOSS cards of the machines are not read.' })
     }
     $missingAddress = @($nodes | Where-Object { -not $_.address })
     if ($missingAddress.Count -gt 0) {
@@ -135,6 +139,8 @@ function New-AzlSonarDetailFact {
         ztpEventsPath     = $ztpPath
         osConfigEventsFile = $(if ($osConfigPath) { [System.IO.Path]::GetFileName($osConfigPath) } else { '' })
         osConfigEventsPath = $osConfigPath
+        discoveryFile     = $(if ($discoveryPath) { [System.IO.Path]::GetFileName($discoveryPath.TrimEnd('\', '/')) } else { '' })
+        discoveryPath     = $discoveryPath
         domainAccount     = $domainAccount
         maxRejections     = $maxRejections
         sourceKind        = $kind
@@ -239,7 +245,7 @@ function Get-AzlSonarDetail {
     $osInfo = $shared['OsConfigInfo']
     $osEvents = if ($null -ne $osInfo -and $null -ne $osInfo['Count']) { [long]$osInfo['Count'] } else { 0 }
     $osFileFound = $false
-    if ($null -ne $facts -and $facts.osConfigEventsPath) { $osFileFound = Test-Path -LiteralPath $facts.osConfigEventsPath -PathType Leaf }
+    if ($null -ne $facts -and $facts.osConfigEventsPath) { $osFileFound = @(Resolve-AzlSonarOsConfigEventFile -Path $facts.osConfigEventsPath).Count -gt 0 }
     $lastLine = $null
     if (-not $replaying) {
         $window = Get-AzlSonarLogWindow -Shared $shared -Since ([Math]::Max([long]0, [long]$shared.LogSeq - 1))
@@ -281,6 +287,13 @@ function Get-AzlSonarDetail {
                 fileFound   = [bool]$osFileFound
                 events      = $osEvents
                 lastEventAt = $(if ($null -ne $osInfo -and $osInfo['LastEventAt']) { [string]$osInfo['LastEventAt'] } else { $null })
+            }
+            discovery = [ordered]@{
+                configured  = [bool]($null -ne $facts -and $facts.discoveryFile)
+                location    = $(if ($null -ne $facts) { [string]$facts.discoveryFile } else { '' })
+                found       = [bool]($null -ne $facts -and $facts.discoveryPath -and (Test-Path -LiteralPath $facts.discoveryPath))
+                machines    = [int](Get-AzlSonarMember (Get-AzlSonarMember $state 'discovery') 'nodesDiscovered' 0)
+                state       = [string](Get-AzlSonarMember (Get-AzlSonarMember $state 'discovery') 'state' '')
             }
             nodeLogs  = [ordered]@{
                 state       = [string](Get-AzlSonarMember $tailer 'state' 'unknown')
@@ -346,6 +359,7 @@ function New-AzlSonarReplayDetailFact {
         logs              = [pscustomobject]@{ transport = '' }
         ztpEventsPath     = ''
         osConfigEventsPath = ''
+        discoveryPath     = ''
         sourceKind        = 'config'
         sourcePath        = ''
     }
