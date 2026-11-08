@@ -677,8 +677,10 @@ Describe 'Node probe (Arc registration status read on the node)' {
             Add-AzlSonarOsConfigEvent -Store $shared.OsConfigEvents -Line '{"timestamp":"2026-11-07T19:00:00Z","node":"node-01","step":"DomainJoin","state":"DomainJoined"}'
             Add-AzlSonarOsConfigEvent -Store $shared.OsConfigEvents -Line '{"timestamp":"2026-11-07T19:01:00Z","node":"node-01","step":"DomainJoin","state":"DomainAdminsConfigured"}'
             # the domain account was verified earlier: its credential is cached and the breaker is closed
-            $shared.DomainCredential = [pscredential]::new('IIC\svc-join', (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force))
-            $shared.LogAccount['*breaker'] = New-AzlSonarBreakerRecord -Account 'IIC\svc-join' -Verified $true -SecretVersion 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1'
+            $pw = [securestring]::new()
+            foreach ($ch in 'D0main-Pa55-not-real'.ToCharArray()) { $pw.AppendChar($ch) }
+            $shared.DomainCredential = [pscredential]::new('IIC\svc-join', $pw)
+            $shared.LogAccount['*breaker'] = New-AzlSonarBreakerRecord -Account 'IIC\svc-join' -Verified $true -SecretVersion 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' -VersionCheckedAt ([datetime]::UtcNow)
             Mock Open-AzlSonarNodeConnection { @{ Session = $null; Ssh = $null; Reason = 'WinRM: The operation has timed out. | SSH: Permission denied (publickey,password).' } }
             Mock Close-AzlSonarNodeConnection { }
             Mock Wait-AzlSonarInterval { $Shared.Stop = $true }
@@ -690,6 +692,33 @@ Describe 'Node probe (Arc registration status read on the node)' {
             $b.Failures | Should -Be 1
             $b.LastClass | Should -Be 'rejected'
             Should -Invoke Open-AzlSonarNodeConnection -Times 1 -Exactly -ParameterFilter { $DomainAccount } -Because 'one attempt with the domain account; the retry and the other node use the local account'
+        }
+    }
+
+    It 'N1: the error numbers of the legs count, not only the text (a rejection in another language is still a rejection)' {
+        InModuleScope AzlSonar -Parameters @{ C = $script:ProbeConfig } {
+            param($C)
+            $cfg = $C | Select-Object *
+            $cfg | Add-Member -NotePropertyName identityModel -NotePropertyValue 'ActiveDirectory' -Force
+            $cfg | Add-Member -NotePropertyName logAccounts -NotePropertyValue ([pscustomobject]@{ local = [pscustomobject]@{ username = 'azl-admin' }; domain = [pscustomobject]@{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'keyvault://kv-example/svc-join-password'; maxRejections = 2 } }) -Force
+            $shared = Initialize-AzlSonarSharedState
+            $shared.Stop = $false
+            $shared.State = [ordered]@{ activePhase = 'arc-registration'; provisioning = [ordered]@{ route = 'oem-image' }; nodes = @([ordered]@{ name = 'node-01'; arcStatus = 'NotFound' }) }
+            Add-AzlSonarOsConfigEvent -Store $shared.OsConfigEvents -Line '{"timestamp":"2026-11-07T19:00:00Z","node":"node-01","step":"DomainJoin","state":"DomainJoined"}'
+            Add-AzlSonarOsConfigEvent -Store $shared.OsConfigEvents -Line '{"timestamp":"2026-11-07T19:01:00Z","node":"node-01","step":"DomainJoin","state":"DomainAdminsConfigured"}'
+            $pw = [securestring]::new()
+            foreach ($ch in 'D0main-Pa55-not-real'.ToCharArray()) { $pw.AppendChar($ch) }
+            $shared.DomainCredential = [pscredential]::new('IIC\svc-join', $pw)
+            $shared.LogAccount['*breaker'] = New-AzlSonarBreakerRecord -Account 'IIC\svc-join' -Verified $true -SecretVersion 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' -VersionCheckedAt ([datetime]::UtcNow)
+            Mock Open-AzlSonarNodeConnection { @{ Session = $null; Ssh = $null; Reason = 'WinRM: Anmeldefehler'; Legs = @(@{ Transport = 'winrm'; Exception = [pscustomobject]@{ Message = 'Anmeldefehler'; ErrorCode = 1326; InnerException = $null }; Message = 'Anmeldefehler' }) } }
+            Mock Close-AzlSonarNodeConnection { }
+            Mock Wait-AzlSonarInterval { $Shared.Stop = $true }
+
+            Invoke-AzlSonarNodeProbeLoop -Shared $shared -Config $cfg -Credential $null
+
+            $b = Get-AzlSonarAccountBreaker -Table $shared.LogAccount
+            $b.State | Should -Be 'open'
+            $b.LastClass | Should -Be 'rejected'
         }
     }
 
