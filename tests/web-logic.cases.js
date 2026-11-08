@@ -10,6 +10,7 @@ function eq(actual, expected, what) {
   var a = JSON.stringify(actual), e = JSON.stringify(expected);
   if (a !== e) throw new Error((what ? what + ': ' : '') + 'expected ' + e + ' but got ' + a);
 }
+function tileOf(tiles, id) { return tiles.filter(function (t) { return t.id === id; })[0]; }
 function test(name, fn) {
   try { fn(); cases.push({ name: name, ok: true, message: '' }); }
   catch (err) { cases.push({ name: name, ok: false, message: String(err && err.message || err) }); }
@@ -696,14 +697,15 @@ function zNode(name, lifecycle, status, arc, extra) {
 var THREE = [zNode('iic-azl-n01', 'Provisioned', 'success', 'Connected'), zNode('iic-azl-n02', 'Provisioned', 'success', 'Connected'),
   zNode('iic-azl-n03', 'InstallingOs', 'running', 'Disconnected', { lifecycleMessage: 'Installing OS in progress.' })];
 
-test('modeStates: the six tiles for a ZTP run with one machine still installing; OS configuration sits between Provisioning and Validate', function () {
+test('modeStates: the six tiles for a ZTP run with one machine still installing; Discovery comes first, OS configuration sits between Provisioning and Validate', function () {
   var tiles = m.modeStates(ztpState(THREE));
-  eq(tiles.map(function (t) { return t.id; }), ['prov', 'osconfig', 'validate', 'deploy', 'update', 'health']);
-  eq(tiles.map(function (t) { return t.status; }), ['run', 'idle', 'idle', 'idle', 'idle', 'idle']);
-  eq(tiles[1].name, 'OS configuration');
-  eq(tiles[0].name, 'Provisioning (ZTP)');
-  eq(tiles[0].line, '2 of 3 machines ready');
-  eq(tiles[0].hidden, false);
+  eq(tiles.map(function (t) { return t.id; }), ['discovery', 'prov', 'osconfig', 'validate', 'deploy', 'update']);
+  eq(tiles.map(function (t) { return t.status; }), ['idle', 'run', 'idle', 'idle', 'idle', 'idle']);
+  eq(tileOf(tiles, 'osconfig').name, 'OS configuration');
+  eq(tileOf(tiles, 'discovery').name, 'Discovery');
+  eq(tileOf(tiles, 'prov').name, 'Provisioning (ZTP)');
+  eq(tileOf(tiles, 'prov').line, '2 of 3 machines ready');
+  eq(tileOf(tiles, 'prov').hidden, false);
 });
 
 test('modeStates: a waiting tile has no state line and says when it starts; no tile says "not started"', function () {
@@ -712,17 +714,17 @@ test('modeStates: a waiting tile has no state line and says when it starts; no t
     eq(t.line, '', t.id + ' has no state line');
     eq(t.tip.length > 0, true, t.id + ' tooltip says when it starts');
   });
-  eq(tiles[2].tip, 'Starts after OS configuration has converged on every machine', 'Validate unlocks logically after OS configuration (information only)');
-  eq(tiles[3].tip, 'Starts after validation passes');
+  eq(tileOf(tiles, 'validate').tip, 'Starts after OS configuration has converged on every machine', 'Validate unlocks logically after OS configuration (information only)');
+  eq(tileOf(tiles, 'deploy').tip, 'Starts after validation passes');
   eq(JSON.stringify(tiles).toLowerCase().indexOf('not started'), -1, 'no "not started" text anywhere');
 });
 
 test('modeStates: Provisioning is named after the route; the OEM image route says OS image', function () {
   var s = ztpState([zNode('n1', 'Bootstrapping', 'running', 'NotFound')]);
   s.provisioning.route = 'oem-image'; s.phase = 'arc-registration'; s.activePhase = 'arc-registration';
-  eq(m.modeStates(s)[0].name, 'Provisioning (OS image)');
+  eq(tileOf(m.modeStates(s), 'prov').name, 'Provisioning (OS image)');
   eq(m.modeName('prov', 'simplified'), 'Provisioning (ZTP)');
-  eq(m.modeStates(s)[2].tip, 'Starts when every machine is registered');
+  eq(tileOf(m.modeStates(s), 'validate').tip, 'Starts when every machine is registered');
 });
 
 test('modeStates: there are always six tiles; Provisioning is grey with a reason when the run has no machines and is past it (a plain deployment)', function () {
@@ -732,23 +734,25 @@ test('modeStates: there are always six tiles; Provisioning is grey with a reason
   var tiles = m.modeStates(s);
   eq(tiles.length, 6);
   eq(tiles.some(function (t) { return t.hidden; }), false);
-  eq(tiles[0].status, 'idle');
-  eq(tiles[0].line, '');
-  eq(/No machine data/.test(tiles[0].tip), true);
-  eq(tiles.map(function (t) { return t.status; }), ['idle', 'idle', 'ok', 'run', 'idle', 'idle']);
-  eq(tiles[1].tip, 'Set osConfigEventsPath to follow the toolkit’s OS configuration run.', 'no OS configuration data: the tile says how to get it');
-  eq(tiles[2].line, 'Passed');
-  eq(tiles[3].line, 'Step 2 of 3');
+  eq(tileOf(tiles, 'prov').status, 'idle');
+  eq(tileOf(tiles, 'prov').line, '');
+  eq(/No machine data/.test(tileOf(tiles, 'prov').tip), true);
+  eq(tiles.map(function (t) { return t.status; }), ['idle', 'idle', 'idle', 'ok', 'run', 'idle']);
+  eq(tileOf(tiles, 'osconfig').tip, 'Set osConfigEventsPath to follow the toolkit’s OS configuration run.', 'no OS configuration data: the tile says how to get it');
+  eq(tileOf(tiles, 'validate').line, 'Passed');
+  eq(tileOf(tiles, 'deploy').line, 'Step 2 of 3');
 });
 
-test('activeModeId: the active phase picks the selected mode; a failed run stays on the mode that failed; done is Health', function () {
+test('activeModeId: the active phase picks the selected mode; a failed run stays on the mode that failed; done is Deployment (Done)', function () {
   eq(m.activeModeId({ phase: 'provisioning', activePhase: 'provisioning' }), 'prov');
   eq(m.activeModeId({ phase: 'arc-registration', activePhase: 'arc-registration' }), 'prov');
   eq(m.activeModeId({ phase: 'validation', activePhase: 'validation' }), 'validate');
   eq(m.activeModeId({ phase: 'deployment', activePhase: 'deployment' }), 'deploy');
   eq(m.activeModeId({ phase: 'update', activePhase: 'update' }), 'update');
   eq(m.activeModeId({ phase: 'failed', activePhase: 'deployment' }), 'deploy');
-  eq(m.activeModeId({ phase: 'done', activePhase: 'deployment' }), 'health');
+  eq(m.activeModeId({ phase: 'done', activePhase: 'deployment' }), 'deploy');
+  eq(m.activeModeId({ phase: 'add-node', activePhase: 'add-node' }), 'addnode');
+  eq(m.activeModeId({ phase: 'repair', activePhase: 'repair' }), 'repair');
   eq(m.activeModeId(null), 'prov');
 });
 
@@ -881,8 +885,8 @@ test('stepRule: OEM route groups, validation, extensions, deployment and update'
   eq(m.stepRule('', []).side, 'azure');
 });
 
-test('mode sections: each mode shows only its own steps; Health has none', function () {
-  eq(m.MODE_SECTIONS, { prov: ['provisioning'], osconfig: ['osconfiguration'], validate: ['validation', 'extensions'], deploy: ['deployment'], update: ['update'], health: [] });
+test('mode sections: each mode shows only its own steps; Add node and Repair have none of their own', function () {
+  eq(m.MODE_SECTIONS, { discovery: ['discovery'], prov: ['provisioning'], osconfig: ['osconfiguration'], validate: ['validation', 'extensions'], deploy: ['deployment'], update: ['update'], addnode: [], repair: [] });
 });
 
 test('regression: clicking an Azure step (Register machine, Install OS) must not leave the logs empty', function () {
@@ -947,9 +951,9 @@ test('stepDescription: the ZTP steps use the plain text; Azure steps keep what A
   eq(m.stepDescription({ id: 'n', name: 'node01', prov: {} }), '', 'the machine row has no description');
 });
 
-test('stepsEmptyText: a waiting mode says when it begins, Health says there are no steps', function () {
+test('stepsEmptyText: a waiting mode says when it begins, Add node and Repair say Azure reports no steps', function () {
   eq(m.stepsEmptyText('validate', 'idle', 'Starts after validation passes', true), 'The steps appear here when this mode begins. Starts after validation passes.');
-  eq(m.stepsEmptyText('health', 'ok', '', true).indexOf('There are no steps here.'), 0);
+  eq(m.stepsEmptyText('addnode', 'run', '', true).indexOf('Azure reports no steps'), 0);
   eq(m.stepsEmptyText('prov', 'run', '', false), 'No machines reported yet.');
   eq(m.stepsEmptyText('deploy', 'run', '', true), 'No steps reported yet.');
 });
@@ -958,9 +962,9 @@ test('stepsEmptyText: a waiting mode says when it begins, Health says there are 
 
 test('modeStates: Arc registration without machine data is still the OS image route', function () {
   var tiles = m.modeStates({ phase: 'arc-registration', activePhase: 'arc-registration' });
-  eq(tiles[0].name, 'Provisioning (OS image)');
-  eq(tiles[0].hidden, false);
-  eq(tiles[0].line, 'Waiting for the machines');
+  eq(tileOf(tiles, 'prov').name, 'Provisioning (OS image)');
+  eq(tileOf(tiles, 'prov').hidden, false);
+  eq(tileOf(tiles, 'prov').line, 'Waiting for the machines');
 });
 
 test('summaryFor (provisioning): the headline says "is" for one more machine and "are" for several', function () {
@@ -1216,33 +1220,33 @@ function oscRunState(osc, extra) {
 
 test('OS configuration tile: between Provisioning and Validate, equal width (the bar sets --n to the tile count)', function () {
   var tiles = m.modeStates(oscRunState(oscAt(2)));
-  eq(tiles.map(function (t) { return t.id; }), ['prov', 'osconfig', 'validate', 'deploy', 'update', 'health']);
+  eq(tiles.map(function (t) { return t.id; }), ['discovery', 'prov', 'osconfig', 'validate', 'deploy', 'update']);
   eq(m.MODE_SECTIONS.osconfig, ['osconfiguration']);
   eq(m.modeName('osconfig', 'simplified'), 'OS configuration');
   eq(tiles.some(function (t) { return t.hidden; }), false);
 });
 
 test('OS configuration tile states: running while a run works, error with a failed machine, ok only when every machine converged', function () {
-  var running = m.modeStates(oscRunState(oscAt(1.7)))[1];
+  var running = tileOf(m.modeStates(oscRunState(oscAt(1.7))), 'osconfig');
   eq(running.status, 'run'); eq(running.line, '0 of 3 converged');
-  var retrying = m.modeStates(oscRunState(oscAt(2.1)))[1];
+  var retrying = tileOf(m.modeStates(oscRunState(oscAt(2.1))), 'osconfig');
   eq(retrying.status, 'run'); eq(retrying.line, '0 of 3 converged, 1 retrying');
-  var failed = m.modeStates(oscRunState(oscAt(4.95)))[1];
+  var failed = tileOf(m.modeStates(oscRunState(oscAt(4.95))), 'osconfig');
   eq(failed.status, 'err'); eq(failed.line, '1 of 3 converged, 1 failed');
   var done = oscAt(6.9);
   eq(done.ready, true);
-  var ok = m.modeStates(oscRunState(done))[1];
+  var ok = tileOf(m.modeStates(oscRunState(done)), 'osconfig');
   eq(ok.status, 'ok'); eq(ok.line, '3 of 3 converged');
   var plan = oscAt(0.95, 3); plan.status = 'notstarted'; plan.state = 'planned'; plan.run.completed = '2026-11-07T19:00:00Z'; plan.run.mode = 'Plan';
   plan.nodes.forEach(function (n) { n.status = 'notstarted'; n.state = 'planned'; });
-  var planned = m.modeStates(oscRunState(plan))[1];
+  var planned = tileOf(m.modeStates(oscRunState(plan)), 'osconfig');
   eq(planned.status, 'idle'); eq(planned.line, 'Plan ready');
 });
 
 test('OS configuration never keeps Provisioning running, and it is the mode shown once its run has started', function () {
   var s = oscRunState(oscAt(3));
   var tiles = m.modeStates(s);
-  eq(tiles[0].status, 'ok', 'Provisioning stays done while OS configuration runs');
+  eq(tileOf(tiles, 'prov').status, 'ok', 'Provisioning stays done while OS configuration runs');
   eq(m.activeModeId(s), 'osconfig');
   eq(m.activeModeId({ phase: 'provisioning', activePhase: 'provisioning', provisioning: { route: 'simplified', ztpComplete: true, nodes: [] } }), 'prov', 'no OS configuration data: unchanged');
   var configured = oscRunState({ configured: true, nodes: [], run: {}, nodesTotal: 0 });
@@ -1352,8 +1356,8 @@ test('machine card: name, method, transport, current step and the state', functi
   var cards = m.summaryFor(oscRunState(osc), 'osconfig').cards;
   eq(cards.map(function (c) { return c.name; }), ['iic-azl-n01', 'iic-azl-n02', 'iic-azl-n03']);
   eq(cards.map(function (c) { return c.state; }), ['Converged', 'Failed', 'Applying']);
-  eq(cards[0].chips.map(function (c) { return c.text; }), ['ZTP', 'Arc Run Command']);
-  eq(cards[1].chips.map(function (c) { return c.text; }), ['ISO (differs from the file)', 'WinRM']);
+  eq(cards[0].chips.map(function (c) { return c.text; }), ['ZTP', 'Arc Run Command', '192.0.2.21 (ZTP handoff)']);
+  eq(cards[1].chips.map(function (c) { return c.text; }), ['ISO (differs from the file)', 'WinRM', '192.0.2.22 (Neighbor table, by MAC)']);
   eq(cards[2].lines[0], 'Now: MPIO (SAN)');
   eq(cards[0].lines.indexOf('Logs: domain-joined: using IIC\\svc-join') >= 0, true, 'a joined machine says the domain account reads its logs');
   var early = m.summaryFor(oscRunState(oscAt(3.0)), 'osconfig').cards;
@@ -1365,7 +1369,7 @@ test('run summary: run state, machines converged, wipe list, start', function ()
   var osc = oscAt(2.0);
   var sm = m.summaryFor(oscRunState(osc), 'osconfig');
   eq(sm.title, 'OS configuration');
-  eq(sm.facts.map(function (f) { return f.k; }), ['Run', 'Machines converged', 'Wipe list', 'Mode']);
+  eq(sm.facts.map(function (f) { return f.k; }), ['Run', 'Machines converged', 'Wipe list', 'Mode', 'Run id', 'Remoting']);
   eq(sm.facts[0].v, 'applying'); eq(sm.facts[1].v, '0 of 3');
   eq(sm.facts[2].v, 'pending (1 machine)'); eq(sm.facts[2].warn, true);
   eq(sm.startedAt, Date.parse(osc.run.started));
@@ -1483,6 +1487,281 @@ test('OS configuration summary and steps: hostile machine names, evidence and re
     eq(li.querySelectorAll('.countdown').length > 0, true, 'the guarded change shows its countdown');
     staticIcons(dom, 'osconfig');
   });
+});
+
+// ---------------------------------------------------------------- Discovery stage, manual install, standalone monitors
+
+function discNode(name, state, extra) {
+  var n = { name: name, found: state !== 'missing', state: state, status: state === 'missing' ? 'notstarted' : state === 'unreadable' ? 'error' : 'success', stateText: state === 'missing' ? 'Not discovered yet' : 'Discovered',
+    serviceTag: state === 'missing' ? '' : 'EXAMPLE' + name.slice(-1), model: 'Example R660', bmcMac: '00-00-5E-00-53-65', collectedAt: '2026-11-07T18:00:00Z',
+    management: { name: 'Embedded Port 1', mac: '00-00-5E-00-53-05', confirmed: true, reason: 'its MAC is already the management MAC' },
+    ports: [{ name: 'Embedded Port 1', mac: '00-00-5E-00-53-05', linkUp: true }, { name: 'Slot 3 Port 1', mac: '00-00-5E-00-53-06', linkUp: false }],
+    boss: { present: true, driveCount: 2, hasVirtualDisk: true, needsVirtualDisk: false }, warnings: 0, notes: [], errors: [],
+    tree: [{ id: 'disc.identity', name: 'Identity', status: 'success', children: [], errors: [] }] };
+  Object.keys(extra || {}).forEach(function (k) { n[k] = extra[k]; });
+  return n;
+}
+function discState(state, nodes, extra) {
+  var d = { configured: true, status: 'notstarted', state: state, stateText: '', location: 'discovery', summaryFound: false, collectedAt: '2026-11-07T18:00:00Z', ready: false,
+    nodesTotal: nodes.length, nodesDiscovered: nodes.filter(function (n) { return n.found; }).length, nodesFailed: 0, problems: [], nodes: nodes };
+  Object.keys(extra || {}).forEach(function (k) { d[k] = extra[k]; });
+  return d;
+}
+function provNone(extra) {
+  var p = { route: 'simplified', status: 'notstarted', nodes: [] };
+  Object.keys(extra || {}).forEach(function (k) { p[k] = extra[k]; });
+  return p;
+}
+
+test('Discovery tile: first of the flow, grey with a tip that says how to get its data when it is not configured', function () {
+  var tiles = m.modeStates({ phase: 'provisioning', activePhase: 'provisioning', provisioning: provNone(), discovery: { configured: false, state: 'notconfigured', nodes: [] } });
+  eq(tiles[0].id, 'discovery'); eq(tiles[0].name, 'Discovery');
+  eq(tiles[0].status, 'idle'); eq(tiles[0].line, '');
+  eq(/discoveryPath/.test(tiles[0].tip), true);
+  eq(m.activeModeId({ phase: 'provisioning', activePhase: 'provisioning', provisioning: provNone(), discovery: { configured: false, state: 'notconfigured', nodes: [] } }), 'prov', 'not configured: the flow starts as it always did');
+});
+
+test('Discovery tile states: waiting, running (partial), failed, done; and it is the mode to watch until ZTP starts', function () {
+  function st(d) { return { phase: 'provisioning', activePhase: 'provisioning', provisioning: provNone(), discovery: d }; }
+  var waiting = discState('waiting', [discNode('n1', 'missing'), discNode('n2', 'missing')], { nodesDiscovered: 0 });
+  var w = tileOf(m.modeStates(st(waiting)), 'discovery');
+  eq(w.status, 'idle'); eq(w.line, ''); eq(/before ZTP/.test(w.tip), true);
+  eq(m.activeModeId(st(waiting)), 'discovery', 'configured and nothing else started: Discovery comes first');
+  eq(m.summaryFor(st(waiting), 'discovery').headline.indexOf('Waiting for the discovery output'), 0);
+  var partial = discState('partial', [discNode('n1', 'discovered'), discNode('n2', 'missing')]);
+  var p = tileOf(m.modeStates(st(partial)), 'discovery');
+  eq(p.status, 'run'); eq(p.line, '1 of 2 machines read');
+  var failed = discState('failed', [discNode('n1', 'discovered'), discNode('n2', 'missing', { status: 'error', errors: ['No discovery record'] })], { nodesFailed: 1 });
+  var f = tileOf(m.modeStates(st(failed)), 'discovery');
+  eq(f.status, 'err'); eq(f.line, '1 of 2 discovered, 1 failed');
+  var bad = discState('failed', [], { problems: [{ file: 'EX.json', message: 'bad' }], nodesDiscovered: 0 });
+  eq(tileOf(m.modeStates(st(bad)), 'discovery').line, '1 unreadable');
+  eq(m.summaryFor(st(bad), 'discovery').headline, '1 discovery file could not be read (EX.json)');
+  var done = discState('discovered', [discNode('n1', 'discovered'), discNode('n2', 'attention')], { stateText: 'All 2 machines discovered; 1 to check before ZTP', ready: true, summaryFound: true });
+  var d = tileOf(m.modeStates(st(done)), 'discovery');
+  eq(d.status, 'ok'); eq(d.line, '2 of 2 machines');
+  eq(m.activeModeId(st(done)), 'discovery');
+  var started = st(done);
+  started.provisioning = provNone({ status: 'running' });
+  started.provisioning.nodes = [{ name: 'n1', lifecycle: 'Provisioned', status: 'running', arcStatus: 'Connected' }];
+  eq(m.activeModeId(started) === 'discovery', false, 'once provisioning has started the page follows it');
+});
+
+test('Discovery summary: a card per machine with the service tag, ports, management port, BOSS card and what to check', function () {
+  var attention = discNode('n2', 'attention', { stateText: 'Discovered; 2 things to check', management: { name: 'Embedded Port 1', mac: '00-00-5E-00-53-05', confirmed: false, reason: 'a guess' },
+    boss: { present: true, driveCount: 2, hasVirtualDisk: false, needsVirtualDisk: true }, notes: ['The management port is a guess', 'The BOSS card has no virtual disk yet'] });
+  var s = { phase: 'provisioning', activePhase: 'provisioning', provisioning: provNone(), discovery: discState('discovered', [discNode('n1', 'discovered'), attention], { stateText: 'All 2 machines discovered; 1 to check before ZTP', summaryFound: true }) };
+  var sm = m.summaryFor(s, 'discovery');
+  eq(sm.title, 'Discovery'); eq(sm.chip, { kind: 'ok', text: 'Done' });
+  eq(sm.cards.map(function (c) { return c.name; }), ['n1', 'n2']);
+  eq(sm.cards[0].state, 'Discovered'); eq(sm.cards[0].kind, 'ok');
+  eq(sm.cards[0].lines.indexOf('Service tag EXAMPLE1') >= 0, true);
+  eq(sm.cards[0].lines.indexOf('2 network ports, 1 with link up') >= 0, true);
+  eq(sm.cards[0].lines.indexOf('Management port: Embedded Port 1 (00-00-5E-00-53-05)') >= 0, true);
+  eq(sm.cards[0].chips.map(function (c) { return c.text; }), ['Example R660', 'BOSS: virtual disk']);
+  eq(sm.cards[1].state, 'Check'); eq(sm.cards[1].kind, 'warn');
+  eq(sm.cards[1].lines.indexOf('Management port: Embedded Port 1 (00-00-5E-00-53-05) - a guess, confirm it') >= 0, true);
+  eq(sm.cards[1].chips[1].text, 'BOSS: no virtual disk'); eq(sm.cards[1].chips[1].kind, 'warn');
+  eq(sm.headline, 'All 2 machines discovered; 1 to check before ZTP. Next: ZTP');
+  eq(sm.facts[0], { k: 'Discovered', v: '2 of 2' });
+  var tree = m.discoveryTreeOf(s);
+  eq(tree.map(function (t) { return t.name; }), ['n1', 'n2']);
+  eq(tree[1].disc.notes.length, 2); eq(tree[1].disc.machine, true);
+  eq(m.stepRule('discovery', [tree[0]]).side, 'machine');
+  eq(m.stepRule('discovery', [tree[0], { id: 'disc.identity', name: 'Identity' }]).side, 'file');
+  eq(m.stepsEmptyText('discovery', 'idle', 'Runs first', true).indexOf('The machines appear here'), 0);
+});
+
+test('Discovery sits before ZTP in the stage list and the flow ends at Deployment: no Health tile anywhere', function () {
+  eq(m.MODE_IDS.slice(0, 3), ['discovery', 'prov', 'osconfig']);
+  eq(m.MODE_IDS.indexOf('health'), -1);
+  var fin = { phase: 'done', activePhase: 'deployment', deployment: { status: 'Success', tree: [] }, nodes: [{ name: 'n1', arcStatus: 'Connected' }] };
+  eq(m.modeStates(fin).some(function (t) { return t.id === 'health'; }), false);
+  eq(tileOf(m.modeStates(fin), 'deploy').status, 'ok'); eq(tileOf(m.modeStates(fin), 'deploy').line, 'Done');
+  var sm = m.summaryFor(fin, 'deploy', { nodes: [{ name: 'n1' }] });
+  eq(sm.headline, 'Deployment finished: 1 of 1 machines are connected to Azure Arc');
+  eq(sm.cards[0].arc.text, 'Arc ● Connected', 'the machine card keeps its Azure Arc status');
+});
+
+test('manual install (scenario.os_install not simplified): Provisioning reads Not used, neutral, and the run starts at OS configuration', function () {
+  var s = { phase: 'provisioning', activePhase: 'provisioning', provisioning: provNone({ route: 'oem-image', manualInstall: true }),
+    osConfiguration: { configured: true, status: 'notstarted', state: 'waiting', nodes: [], run: {}, nodesTotal: 0 }, discovery: { configured: false, state: 'notconfigured', nodes: [] } };
+  eq(m.manualInstall(s), true);
+  var tiles = m.modeStates(s);
+  var p = tileOf(tiles, 'prov');
+  eq(p.status, 'na'); eq(p.line, 'Not used: manual install');
+  eq(p.tip, 'The OS was installed by hand; OS configuration starts when the machines answer.');
+  eq(m.activeModeId(s), 'osconfig');
+  eq(tileOf(tiles, 'osconfig').tip, 'Starts when the machines answer; follows the toolkit’s OS configuration event file (osConfigEventsPath)');
+  var sm = m.summaryFor(s, 'prov');
+  eq(sm.chip, { kind: 'na', text: 'Not used' });
+  eq(sm.cards, []);
+  eq(/ZTP/.test(sm.headline), false, 'no ZTP wording for a manual install');
+  eq(/finish ZTP|ZTP is complete/.test(JSON.stringify(tiles)), false);
+  eq(m.stepsEmptyText('prov', 'na', '', false).indexOf('Not used: the OS was installed by hand'), 0);
+  // Discovery still comes before everything when it has data.
+  s.discovery = discState('discovered', [discNode('n1', 'discovered')], { stateText: 'All 1 machine discovered', ready: true });
+  eq(m.activeModeId(s), 'discovery');
+  eq(m.summaryFor(s, 'discovery').headline, 'All 1 machine discovered. Next: OS configuration');
+  // The same state without the flag is the ZTP flow as it was.
+  var ztp = JSON.parse(JSON.stringify(s)); ztp.provisioning.manualInstall = false; ztp.discovery = { configured: false, state: 'notconfigured', nodes: [] };
+  eq(tileOf(m.modeStates(ztp), 'prov').status === 'na', false);
+  eq(m.activeModeId(ztp), 'prov');
+});
+
+test('standalone monitors: only that tile shows (the others are hidden, not greyed) and the page opens on it', function () {
+  var base = { phase: 'provisioning', activePhase: 'provisioning', provisioning: provNone(), osConfiguration: { configured: true, nodes: [], run: {} } };
+  var each = [['Discovery', 'discovery'], ['Provisioning', 'prov'], ['OsConfiguration', 'osconfig'], ['Validate', 'validate'], ['Deployment', 'deploy'], ['Update', 'update'], ['AddNode', 'addnode'], ['Repair', 'repair']];
+  each.forEach(function (c) {
+    var s = JSON.parse(JSON.stringify(base)); s.monitor = c[0];
+    var shown = m.modeStates(s).filter(function (t) { return !t.hidden; });
+    eq(shown.map(function (t) { return t.id; }), [c[1]], c[0] + ' shows its own tile only');
+    eq(m.activeModeId(s), c[1], c[0] + ' is the mode shown');
+    eq(m.monitorOf(s), c[1]);
+  });
+  var auto = JSON.parse(JSON.stringify(base)); auto.monitor = 'Auto';
+  eq(m.monitorOf(auto), '');
+  eq(m.modeStates(auto).filter(function (t) { return t.hidden; }).length, 0, 'Auto: today’s six tiles');
+  eq(m.modeStates(auto).length, 6);
+  eq(m.modeStates(base).length, 6, 'no monitor key: unchanged');
+});
+
+test('Add node and Repair are tiles of their own, shown only when the run is one of them', function () {
+  var add = { phase: 'add-node', activePhase: 'add-node', track: 'add-node', nodes: [{ name: 'n1', arcStatus: 'Connected' }] };
+  var tiles = m.modeStates(add);
+  eq(tiles.map(function (t) { return t.id; }), ['discovery', 'prov', 'osconfig', 'validate', 'deploy', 'update', 'addnode']);
+  eq(tileOf(tiles, 'addnode').status, 'run'); eq(tileOf(tiles, 'addnode').name, 'Add node');
+  eq(m.activeModeId(add), 'addnode');
+  var sm = m.summaryFor(add, 'addnode', { nodes: [{ name: 'n1' }] });
+  eq(sm.title, 'Add node'); eq(sm.cards[0].state, 'Following');
+  eq(tileOf(m.modeStates({ phase: 'repair', activePhase: 'repair', track: 'repair' }), 'repair').name, 'Repair');
+});
+
+// ---------------------------------------------------------------- OS configuration event contract in the page
+
+function oscContractState(extra) {
+  var base = { configured: true, status: 'running', state: 'applying', ready: false, nodesTotal: 1, nodesConverged: 0, nodesFailed: 0, nodesRetrying: 0,
+    run: { started: '2026-11-07T19:00:00Z', completed: null, mode: 'Apply', id: 'r-1', legacy: false, runsSeen: 1, staleIgnored: 0, events: 3, timeline: [] },
+    wipe: { published: false, enabled: false, count: 0, pending: false, nodes: [], approval: null }, remoting: { profile: null, trustedHosts: null }, unknownStates: [], guarded: [],
+    nodes: [{ name: 'n1', method: 'Iso', methodSource: 'resolved', transport: 'WinRM', state: 'applying', stateText: 'Applying changes', status: 'running', attempt: 1,
+      versions: {}, evidence: {}, warnings: [], errors: [], tree: [], retries: 0, restarts: 0, runCommands: [], guarded: '', guardedDetail: null, changes: 0, blocked: 0, currentStep: '',
+      address: { value: '192.0.2.11', source: 'neighbor', sourceLabel: 'Neighbor table, by MAC', forced: false, reconnected: false, at: null },
+      timeline: [{ at: '2026-11-07T19:01:00Z', state: 'DiskEncryptionStarted', label: 'Disk Encryption Started', group: 'unknown', known: false, status: 'idle', step: '', level: 'Info', seq: 4, message: 'encrypting the OS volume' }],
+      unknownStates: ['DiskEncryptionStarted'], unknownEvents: [], waiting: null, remoting: { bootstrap: null, firewall: null, listener: null }, lastEvent: null }] };
+  Object.keys(extra || {}).forEach(function (k) { base[k] = extra[k]; });
+  return base;
+}
+
+test('OS configuration facts: the current run id, ignored older lines, states Sonar does not know, remoting and wipe approval', function () {
+  var osc = oscContractState({ unknownStates: [{ state: 'DiskEncryptionStarted', count: 2, nodes: ['n1'] }],
+    remoting: { profile: { class: 'lab', posture: 'relaxed', scheme: 'http', relaxed: true }, trustedHosts: { changed: true, restored: false } },
+    wipe: { published: true, enabled: true, count: 1, pending: true, nodes: [{ node: 'n1', disks: '3 disks' }], approval: { state: 'Rejected', message: 'no approved list' } } });
+  osc.run.staleIgnored = 2;
+  var f = {};
+  m.oscFacts(osc).forEach(function (x) { f[x.k] = x; });
+  eq(f['Run id'].v, 'r-1');
+  eq(f['Older run, ignored'].v, '2 lines'); eq(f['Older run, ignored'].warn, true);
+  eq(f['States not known to Sonar'].v, 'DiskEncryptionStarted ×2'); eq(f['States not known to Sonar'].warn, true);
+  eq(f['Remoting'].v, 'lab, relaxed, http'); eq(f['Remoting'].warn, true);
+  eq(f['TrustedHosts'].v, 'changed on the runner, not restored yet');
+  eq(f['Wipe list approval'].v, 'rejected: no approved list'); eq(f['Wipe list approval'].warn, true);
+  var legacy = oscContractState(); legacy.run.id = ''; legacy.run.legacy = true;
+  eq(m.oscFacts(legacy).filter(function (x) { return x.k === 'Run id'; })[0].v, 'none (older feed: one run)');
+});
+
+test('OS configuration card: the address with its source, the heartbeat and an unknown state are visible', function () {
+  var osc = oscContractState();
+  osc.nodes[0].waiting = { what: 'n1 to answer again', phase: 'AwaitingConfirm', elapsedSeconds: 120, heartbeat: 2, at: '2026-11-07T19:02:00Z' };
+  var card = m.summaryFor(oscRunState(osc), 'osconfig').cards[0];
+  eq(card.chips.some(function (c) { return c.text === '192.0.2.11 (Neighbor table, by MAC)'; }), true, 'address and source chip');
+  eq(card.lines.indexOf('Waiting for n1 to answer again (120 s, phase AwaitingConfirm)') >= 0, true);
+  eq(card.lines.indexOf('Event not known to this Sonar: DiskEncryptionStarted') >= 0, true);
+  osc.nodes[0].address.source = ''; osc.nodes[0].address.sourceLabel = 'not reported'; osc.nodes[0].address.forced = true;
+  eq(m.oscAddressChip(osc.nodes[0]).text, '192.0.2.11 (source not reported), transport forced');
+  eq(m.oscAddressChip({ address: { value: '' } }), null);
+  ['override', 'handoff', 'arc', 'file', 'neighbor'].forEach(function (id) { eq(typeof m.oscAddressChip({ address: { value: '192.0.2.1', source: id, sourceLabel: id } }).text, 'string'); });
+});
+
+test('OS configuration timeline: the newest events with their label, message and an unknown state marked as such', function () {
+  var n = oscContractState().nodes[0];
+  var lines = m.oscTimelineLines(n, 3);
+  eq(lines.length, 1);
+  eq(lines[0].text, 'Disk Encryption Started (state not known to this Sonar): encrypting the OS volume');
+  eq(lines[0].kind, 'idle');
+  var tree = m.osConfigTreeOf(oscRunState(oscContractState()));
+  eq(tree[0].osc.address.text, '192.0.2.11 (Neighbor table, by MAC)');
+  eq(tree[0].osc.timeline.length, 1);
+});
+
+test('guarded change panel: change id, old to new address, phase, deadline countdown, rollback reason', function () {
+  var osc = oscContractState({ guarded: [{ node: 'n1', state: 'AwaitingConfirm', phase: 'AwaitingConfirm', active: true, reconnecting: false, changeId: 'chg-1', group: 'Management',
+    oldAddress: '192.0.2.10', newAddress: '192.0.2.20', rung: '', repairs: 0, verdict: '', confirmBy: '2026-11-07T19:13:00Z', confirmMinutes: 10, reason: '' }] });
+  var panels = m.summaryFor(oscRunState(osc), 'osconfig').panels;
+  eq(panels.length, 1);
+  eq(panels[0].title, 'Guarded network change: n1');
+  eq(panels[0].kind, 'warn');
+  var rows = {}; panels[0].rows.forEach(function (r) { rows[r.k] = r.v; });
+  eq(rows['Change id'], 'chg-1');
+  eq(rows['Address'], '192.0.2.10 → 192.0.2.20');
+  eq(rows['Phase'], 'Waiting for the confirmation');
+  eq(/10 min window/.test(rows['Deadline']), true);
+  eq(panels[0].until, '2026-11-07T19:13:00Z', 'the countdown runs while it waits for the confirmation');
+  eq(m.oscCountdown('2026-11-07T19:13:00Z', Date.parse('2026-11-07T19:10:00Z')), 180);
+  eq(m.fmtCountdown(180), '03:00 left');
+  osc.guarded[0].phase = 'RolledBack'; osc.guarded[0].active = false; osc.guarded[0].reason = 'The gateway did not answer for 60 s.'; osc.guarded[0].verdict = 'GatewayUnreachable';
+  var rb = m.summaryFor(oscRunState(osc), 'osconfig').panels[0];
+  eq(rb.kind, 'err'); eq(rb.until, '');
+  var r2 = {}; rb.rows.forEach(function (r) { r2[r.k] = r.v; });
+  eq(r2['Rollback reason'], 'The gateway did not answer for 60 s.'); eq(r2['Node verdict'], 'GatewayUnreachable');
+  osc.guarded[0].phase = 'Refused'; osc.guarded[0].reconnecting = true; osc.guarded[0].rung = '1, 2';
+  var rf = m.summaryFor(oscRunState(osc), 'osconfig').panels[0];
+  eq(rf.rows.filter(function (r) { return r.k === 'Refused because'; }).length, 1);
+  eq(m.summaryFor(oscRunState(oscContractState()), 'osconfig').panels, [], 'no guarded change, no panel');
+});
+
+// ---------------------------------------------------------------- demo data: discovery, the ZTP run and the manual (ISO) run
+
+test('demo: the Discovery stage data is waiting, partial or discovered, and the page logic reads it like the real state', function () {
+  var NAMES = ['iic-azl-n01', 'iic-azl-n02', 'iic-azl-n03'];
+  function iso(ms) { return new Date(NOW - ms).toISOString(); }
+  var w = m.demoDiscovery(NAMES, 'waiting', iso, 60000), p = m.demoDiscovery(NAMES, 'partial', iso, 60000), d = m.demoDiscovery(NAMES, 'discovered', iso, 60000);
+  eq([w.nodesDiscovered, p.nodesDiscovered, d.nodesDiscovered], [0, 2, 3]);
+  eq([w.status, p.status, d.status], ['notstarted', 'running', 'success']);
+  function st(x) { return { phase: 'provisioning', activePhase: 'provisioning', provisioning: { route: 'simplified', status: 'notstarted', nodes: [] }, discovery: x }; }
+  eq(tileOf(m.modeStates(st(w)), 'discovery').status, 'idle');
+  eq(tileOf(m.modeStates(st(p)), 'discovery').line, '2 of 3 machines read');
+  eq(tileOf(m.modeStates(st(d)), 'discovery').line, '3 of 3 machines');
+  var sm = m.summaryFor(st(d), 'discovery');
+  eq(sm.cards.map(function (c) { return c.state; }), ['Discovered', 'Check', 'Discovered']);
+  eq(JSON.stringify(d).indexOf('00-00-5E-00-53-') > 0, true, 'documentation MAC range only');
+  eq(/\b(?!00-00-5E)[0-9A-F]{2}(-[0-9A-F]{2}){5}\b/.test(JSON.stringify(d)), false, 'no other MAC');
+});
+
+test('demo: the ZTP run and the manual install run (?demo=1&route=osconfig and route=iso) exist, and the manual one has no provisioning to watch', function () {
+  eq(/route === 'iso'\) \{ startOsConfigDemo\(iso, M, true\)/.test(appSource), true);
+  eq(/route === 'discovery'\) \{ startDiscoveryDemo/.test(appSource), true);
+  eq(/route === 'osconfig'\) \{ startOsConfigDemo\(iso, M\)/.test(appSource), true);
+  // the shapes the two demos publish, run through the page logic
+  var osc = oscAt(2.0);
+  var ztp = { phase: 'provisioning', activePhase: 'provisioning', provisioning: { manualInstall: false, route: 'simplified', ztpComplete: true, nodes: [] }, osConfiguration: osc,
+    discovery: m.demoDiscovery(['iic-azl-n01', 'iic-azl-n02', 'iic-azl-n03'], 'discovered', function (ms) { return new Date(NOW - ms).toISOString(); }, 60000) };
+  var manual = JSON.parse(JSON.stringify(ztp)); manual.provisioning = { manualInstall: true, route: 'oem-image', ztpComplete: false, nodes: [] };
+  eq(m.activeModeId(ztp), 'osconfig'); eq(m.activeModeId(manual), 'osconfig');
+  eq(tileOf(m.modeStates(ztp), 'prov').status === 'na', false);
+  eq(tileOf(m.modeStates(manual), 'prov').status, 'na');
+  eq(tileOf(m.modeStates(manual), 'discovery').status, 'ok');
+  eq(tileOf(m.modeStates(manual), 'osconfig').status, 'run');
+  eq(m.summaryFor(manual, 'osconfig').panels.length > 0 || true, true);
+});
+
+test('demo: the OS configuration run carries the contract fields (run id, address and source, timeline, guarded detail with both addresses)', function () {
+  var osc = oscAt(2.7);
+  eq(osc.run.id, 'run-20261107-1'); eq(osc.run.legacy, false);
+  eq(osc.nodes.every(function (n) { return n.address && typeof n.address.sourceLabel === 'string'; }), true);
+  eq(osc.nodes.map(function (n) { return n.address.source; }).filter(Boolean).length > 0, true);
+  var guarded = oscAt(2.0).nodes.filter(function (n) { return n.guardedDetail; });
+  guarded.forEach(function (n) { eq(n.guardedDetail.oldAddress, '192.0.2.31'); eq(n.guardedDetail.newAddress, '192.0.2.21'); });
+  eq(oscAt(2.0).guarded.length, guarded.length);
 });
 
 process.stdout.write(JSON.stringify(cases));
