@@ -1,6 +1,6 @@
 # Configuration
 
-Sonar ends up with one configuration object, whichever way you configure it: [from the master `infrastructure.yml`](#from-the-master-infrastructureyml), from [commands that fill in a file](./start-here.md#2-commands-that-fill-in-a-config-file), or from a [file written by hand](./start-here.md#3-a-config-file-by-hand-the-older-option). Look at what Sonar will use with:
+Sonar ends up with one configuration object, whichever way you configure it: [from the master `infrastructure.yml`](#from-the-master-infrastructureyml), from [commands that fill in a file](./start-here.md#2-commands-that-fill-in-a-config-file), or from a [file written by hand](./start-here.md#3-a-config-file-by-hand). Look at what Sonar will use with:
 
 ```powershell
 Import-Module ./src/AzlSonar/AzlSonar.psd1

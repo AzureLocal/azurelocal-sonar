@@ -4573,7 +4573,7 @@
     var arm = { configured: true, hasData: r >= 0.3, status: 'notstarted', state: 'waiting', activePhase: '', awaitingApproval: false,
       run: { runId: 'a1b2c3d4e5f6', mode: 'ValidateAndDeploy', cluster: 'iic-azl-c01', started: at(0.3), completed: null, exitCode: null, state: '', finalState: '', template: 'create-cluster',
         parameterHash: 'afe7afd61584', schemaVersion: '5.6.0', lastEventAt: at(Math.min(r, 4.9)), events: 0, message: '', nextAction: '', failed: false, planned: false, offline: false, approval: null },
-      validation: v, deployment: d, hints: [], warnings: [], guide: 'https://azurelocal.cloud' };
+      validation: v, deployment: d, hints: [], warnings: [] };
     if (r < 0.3) return arm;
 
     // checks: arrive one every 0.03 minutes from r 0.3
