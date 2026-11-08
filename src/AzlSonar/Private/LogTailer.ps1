@@ -1204,13 +1204,19 @@ function Invoke-AzlSonarTailerLoop {
             if ($hasOpen -and ($pick.Probe -or ($accountKind -and $accountKind -ne $pick.Account.kind))) {
                 # The account changed (the node just joined the domain), or this connection is the probe of the domain account
                 # and must prove the current password with a new session: reconnect.
-                if ($null -ne $session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
-                if ($null -ne $ssh) { $null = Remove-SSHSession -SSHSession $ssh -ErrorAction SilentlyContinue }
-                $session = $null; $ssh = $null; $firstRun = $true; $forceDiscovery = $true
+                $reconnect = $true
                 if (-not $pick.Probe -and $pick.Account.kind -eq 'domain') {
-                    # a new connection with the domain account is an attempt: ask again, so that it is counted
+                    # A new connection with the domain account is an attempt: ask again, so that it is counted. If the cap is full
+                    # (or the account is paused) the answer is local: keep the working connection and ask at the next poll,
+                    # instead of tearing it down and rebuilding it on every poll.
                     $pick = Select-AzlSonarNodeAccount -Shared $Shared -Config $Config -Node $seed.name -Local $Credential -Connect $true
                     $useCredential = $pick.Credential
+                    if ($pick.Account.kind -ne 'domain') { $reconnect = $false }
+                }
+                if ($reconnect) {
+                    if ($null -ne $session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+                    if ($null -ne $ssh) { $null = Remove-SSHSession -SSHSession $ssh -ErrorAction SilentlyContinue }
+                    $session = $null; $ssh = $null; $firstRun = $true; $forceDiscovery = $true
                 }
             }
             $accountKind = [string]$pick.Account.kind
