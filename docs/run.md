@@ -2,7 +2,7 @@
 
 One section per purpose. Each lists the commands, what Sonar shows, what to expect and do, and the access it needs. Sonar only reads: it never changes Azure or the machines. Every section assumes PowerShell 7.4 or later and the repository cloned (see [Getting started](./getting-started.md)).
 
-In every command, `-InfrastructureFile ./infrastructure.yml` (the master file, the default way) can be replaced by `-ConfigPath ./config/clus01.json` (the older option). How the two are configured: [Start here](./start-here.md#three-ways-to-configure-sonar).
+In every command, `-InfrastructureFile ./infrastructure.yml` (the master file, the default way) can be replaced by `-ConfigPath ./config/clus01.json`. How the two are configured: [Start here](./start-here.md#three-ways-to-configure-sonar).
 
 The ZTP run has a page of its own for each stage (Boot, Bootstrap, Vouchers and the claim, Install OS, Device, Network, Restore, Handoff): [Running Sonar, stage by stage](./stages.md); the Log access window (which account and folders for each phase) is explained in [Log access](./log-access.md). Access for each purpose is summarised in its section. The full picture, which roles and network paths a run needs, is in the toolkit's [access and connectivity](https://github.com/AzureLocal/azurelocal-toolkit/blob/main/docs/access-and-connectivity.md) page.
 

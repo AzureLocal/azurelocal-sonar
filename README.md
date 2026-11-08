@@ -35,7 +35,7 @@ Sonar needs to know which cluster to watch. There are three ways, and all three 
 
    To keep a config file you can commit or edit: `ConvertTo-AzlSonarConfig -InfrastructureFile ./infrastructure.yml -OutFile ./config/clus01.json`.
 2. **Commands that fill in a config file.** `New-AzlSonarConfig -Path ./config/clus01.json -Interactive` asks for each value (and offers your subscriptions when you are signed in to Azure); `Add-AzlSonarNode`, `Remove-AzlSonarNode`, `Set-AzlSonarConfig` (any one key, checked before it is written), `Test-AzlSonarConfig` and `Get-AzlSonarConfig` edit and check the file. No password is asked for or stored.
-3. **A config file by hand (the older option).** Copy [`examples/sonar.config.commented.jsonc`](examples/sonar.config.commented.jsonc) (every key explained) and start with `-ConfigPath`.
+3. **A config file by hand.** Copy [`examples/sonar.config.commented.jsonc`](examples/sonar.config.commented.jsonc) (every key explained) and start with `-ConfigPath`.
 
 `./Start-AzlSonar.ps1` with no arguments prints these three ways with the exact commands and offers to run the guided setup.
 
@@ -96,7 +96,7 @@ There is nothing to install: no service, no database, no build step.
    Set-AzContext -Subscription '<subscription id>'
    ```
 
-2. Easiest: skip the config file and use `-InfrastructureFile ./infrastructure.yml` in step 4 (see [Start here](#start-here)). The older option is a config file; copy the example and fill in your values (one file per cluster, kept outside the repo; `New-AzlSonarConfig -Interactive` can write it for you):
+2. Easiest: skip the config file and use `-InfrastructureFile ./infrastructure.yml` in step 4 (see [Start here](#start-here)). Or write a config file: copy the example and fill in your values (one file per cluster, kept outside the repo; `New-AzlSonarConfig -Interactive` can write it for you):
 
    ```powershell
    New-Item -ItemType Directory -Force ./config | Out-Null   # git-ignored
@@ -130,7 +130,7 @@ There is nothing to install: no service, no database, no build step.
 
    ```powershell
    ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml   # the master file
-   ./Start-AzlSonar.ps1 -ConfigPath ./config/clus01.json          # the older option
+   ./Start-AzlSonar.ps1 -ConfigPath ./config/clus01.json
    ```
 
    It asks for the account that reads the logs (`credential.source: prompt`), starts the back end and opens the browser on the URL it prints, `http://localhost:8642/?t=<token>` (the token is new at every start; the page keeps it in a cookie and the address bar loses it). Press Ctrl+C to stop.
@@ -138,7 +138,7 @@ There is nothing to install: no service, no database, no build step.
 | Parameter | Default | Meaning |
 | --- | --- | --- |
 | `-InfrastructureFile` | (none) | The master `infrastructure.yml` (schema 5). Sonar builds the configuration from it and tells you (log notice) when its node set changes. |
-| `-ConfigPath` | (none) | The cluster's config file (the older option). Give this or `-InfrastructureFile`; with neither, Sonar explains the options. |
+| `-ConfigPath` | (none) | The cluster's config file. Give this or `-InfrastructureFile`; with neither, Sonar explains the options. |
 | `-PollSeconds` | `20` | Seconds between Azure polls (5 to 3600). Overrides the file. |
 | `-Port` | `8642` | Local port. Pick another if 8642 is taken (Sonar says so). |
 | `-Credential` | (none) | The log account; overrides `credential.source`. |

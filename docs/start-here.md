@@ -66,7 +66,7 @@ Get-AzlSonarConfig  -Path ./config/clus01.json     # the configuration Sonar wil
 
 The guided setup never asks for or stores a password.
 
-### 3. A config file by hand (the older option)
+### 3. A config file by hand
 
 Copy [`examples/sonar.config.commented.jsonc`](https://github.com/AzureLocal/azurelocal-sonar/blob/main/examples/sonar.config.commented.jsonc): every key is explained in it, with which are required and the defaults. Then `./Start-AzlSonar.ps1 -ConfigPath ./config/clus01.json`. `-ConfigPath` works exactly as before.
 
