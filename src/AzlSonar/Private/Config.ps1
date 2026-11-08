@@ -129,6 +129,11 @@ function Test-AzlSonarConfig {
         $problems.Add('osConfigEventsPath must be the path of the OS configuration event file (JSON Lines written by the toolkit''s Invoke-AzureLocalOsConfiguration.ps1), for example ./os-configuration-events.jsonl.')
     }
 
+    $armEventsPath = Get-AzlSonarMember $Config 'armEventsPath'
+    if ($null -ne $armEventsPath -and ($armEventsPath -isnot [string] -or [string]::IsNullOrWhiteSpace($armEventsPath))) {
+        $problems.Add('armEventsPath must be the path of the ARM deployment event file (JSON Lines written by the toolkit''s Invoke-AzureLocalArmDeployment.ps1), for example ./arm-deployment-events.jsonl.')
+    }
+
     # logAccounts: the accounts that read the node logs, by name; the passwords are never in the file (a keyvault:// reference only).
     $logAccounts = Get-AzlSonarMember $Config 'logAccounts'
     if ($null -ne $logAccounts) {
@@ -417,6 +422,12 @@ function Read-AzlSonarConfig {
         $osConfigEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $osConfigEventsPath))
     }
 
+    # armEventsPath: the ARM Validate and Deploy event file; relative to the config file's folder.
+    $armEventsPath = [string](Get-AzlSonarMember $raw 'armEventsPath' '')
+    if ($armEventsPath -and -not [System.IO.Path]::IsPathRooted($armEventsPath) -and $baseDirectory) {
+        $armEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $armEventsPath))
+    }
+
     return [pscustomobject]@{
         subscriptionId = ([string]$raw.subscriptionId).ToLowerInvariant()
         resourceGroup  = [string]$raw.resourceGroup
@@ -445,6 +456,7 @@ function Read-AzlSonarConfig {
         recordPath     = $recordPath
         ztpEventsPath  = $ztpEventsPath
         osConfigEventsPath = $osConfigEventsPath
+        armEventsPath  = $armEventsPath
         logAccounts    = $logAccountsNormalised
         sourcePath     = $source
         # Where the settings came from: the master infrastructure.yml, a config file, or a JSON string (tests).

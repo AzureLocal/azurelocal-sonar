@@ -1129,6 +1129,7 @@ function Get-AzlSonarInitialState {
         activePhase       = $phase
         provisioning      = [ordered]@{ route = $route; routeSource = $(if ($route) { 'config' } else { 'auto' }); phase = $phase; status = 'notstarted'; readyForValidate = $false; ztpComplete = $false; nextStep = $null; nodes = @() }
         osConfiguration   = Get-AzlSonarOsConfigurationState -Store $null -Config $Config -ExpectedRoute $(if ($route) { $route } else { '' })
+        arm               = Get-AzlSonarArmState -Store $null -Config $Config
         extensions        = [ordered]@{ shown = $false; status = 'notstarted'; nodes = @() }
         validation        = [ordered]@{ status = 'notstarted'; tree = @(); counts = $emptyCounts }
         deployment        = [ordered]@{ status = 'notstarted'; tree = @(); counts = (Measure-AzlSonarStepTree -Tree @()) }
@@ -1208,6 +1209,10 @@ function Get-AzlSonarDeploymentState {
         # OS configuration events per node (Shared.OsConfigEvents, Add-AzlSonarOsConfigEvent). Used when the config follows an OS configuration event file.
         [AllowNull()]
         [System.Collections.IDictionary]$OsConfigEvents,
+
+        # ARM Validate and Deploy events (Shared.ArmEvents, Add-AzlSonarArmEvent). Used when the config follows an ARM event file.
+        [AllowNull()]
+        [System.Collections.IDictionary]$ArmEvents,
 
         # Shared.LogAccount (the nodes that rejected the domain account) and the local account's name, for the account shown per node.
         [AllowNull()]
@@ -1313,6 +1318,7 @@ function Get-AzlSonarDeploymentState {
         Get-AzlSonarOsConfigRunCommandMap -Store $OsConfigEvents -ArcNode $nodes -Warnings $warnings -Now $Now
     } else { @{} }
     $osConfiguration = Get-AzlSonarOsConfigurationState -Store $OsConfigEvents -Config $Config -ExpectedRoute $route -ZtpNode $ztpNodeNames -RunCommand $runCommands -LogAccount $LogAccount -LocalUserName $LocalUserName
+    $arm = Get-AzlSonarArmState -Store $ArmEvents -Config $Config -Now $Now
     $nextStep = if ($ztpComplete) { [ordered]@{ name = 'OS configuration'; guide = $script:AzlSonarOsConfigurationGuide } } else { $null }
     $readyForValidate = $route -eq 'oem-image' -and $provisioningStatus -eq 'success' -and -not $clusterStarted
 
@@ -1406,6 +1412,7 @@ function Get-AzlSonarDeploymentState {
         activePhase       = $activeOut
         provisioning      = [ordered]@{ route = $route; routeSource = $routeSource; phase = $provisioningPhase; status = $provisioningStatus; readyForValidate = $readyForValidate; ztpComplete = $ztpComplete; nextStep = $nextStep; nodes = $provisioningNodes }
         osConfiguration   = $osConfiguration
+        arm               = $arm
         extensions        = $extensionsSection
         validation        = [ordered]@{ status = $validationStatus; tree = $validationTree; counts = (Measure-AzlSonarStepTree -Tree $validationTree) }
         deployment        = [ordered]@{ status = $deploymentStatus; tree = $deploymentTree; counts = (Measure-AzlSonarStepTree -Tree $deploymentTree) }
@@ -1442,7 +1449,7 @@ function Publish-AzlSonarState {
     )
 
     $json = ConvertTo-AzlSonarJson $State
-    $key = $json -replace '"polledAt":(null|"[^"]*")', '' -replace '"durationSeconds":\d+', ''
+    $key = $json -replace '"polledAt":(null|"[^"]*")', '' -replace '"(durationSeconds|elapsedSeconds)":\d+', ''
     [System.Threading.Monitor]::Enter($Shared.Lock)
     try {
         if ($key -ne $Shared.LastStateKey) {
@@ -1486,9 +1493,10 @@ function Invoke-AzlSonarPollerLoop {
             $hint = try { Get-AzlSonarLogHint -Shared $Shared } catch { $null }
             $ztpStages = if ($Shared.Contains('ZtpStages')) { $Shared['ZtpStages'] } else { $null }
             $osEvents = if ($Shared.Contains('OsConfigEvents')) { $Shared['OsConfigEvents'] } else { $null }
+            $armEvents = if ($Shared.Contains('ArmEvents')) { $Shared['ArmEvents'] } else { $null }
             $logAccount = if ($Shared.Contains('LogAccount')) { $Shared['LogAccount'] } else { $null }
             $localName = if ($Shared.Contains('LocalUserName')) { [string]$Shared['LocalUserName'] } else { '' }
-            $state = Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -LogAccount $logAccount -LocalUserName $localName
+            $state = Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -ArmEvents $armEvents -LogAccount $logAccount -LocalUserName $localName
             Publish-AzlSonarState -Shared $Shared -State $state
         }
         catch {

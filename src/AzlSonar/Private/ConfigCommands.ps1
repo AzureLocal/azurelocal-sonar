@@ -197,6 +197,7 @@ $script:AzlSonarSettableKeys = [ordered]@{
     'edgeApiVersion'            = @{ Kind = 'text' }
     'ztpEvents.path'            = @{ Kind = 'text' }
     'osConfigEventsPath'        = @{ Kind = 'text' }
+    'armEventsPath'             = @{ Kind = 'text' }
     'credential.source'         = @{ Kind = 'text'; Words = @('prompt', 'parameter', 'keyvault') }
     'credential.vault'          = @{ Kind = 'text' }
     'credential.usernameSecret' = @{ Kind = 'text' }

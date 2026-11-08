@@ -58,6 +58,8 @@ function Initialize-AzlSonarSharedState {
             ZtpStages     = [hashtable]::Synchronized(@{})   # simplified route: per-node azurelocal-ztp Device and Network events (Invoke-AzlSonarZtpEventLoop)
             ZtpInfo       = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the ZTP event file: events read and the newest event time (/api/details)
             OsConfigEvents = [hashtable]::Synchronized(@{})   # per-node OS configuration events of the latest attempt, and the run entry '*' (Invoke-AzlSonarOsConfigEventLoop)
+            ArmEvents     = [hashtable]::Synchronized(@{})   # ARM Validate and Deploy events: the run entry '*', the validation and deployment entries and their checks (Invoke-AzlSonarArmEventLoop)
+            ArmInfo       = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the ARM event file: events read and the newest event time (/api/details)
             LogAccount    = [hashtable]::Synchronized(@{})   # per node: immutable records of the account log access uses (never a password); '*breaker' and '*unavailable' hold the account-wide ones
             CredentialLock = [object]::new()   # one lock for the domain credential (read, mask, publish) and for the breaker and the per-node records
             LocalUserName = ''   # the local log account's user name (-Credential or the prompt), for the account shown per node
@@ -1045,6 +1047,10 @@ function Start-AzlSonarServer {
         if ($config.osConfigEventsPath) {
             # The toolkit's OS configuration event file (JSON Lines): the OS configuration mode and its log lines.
             $workerSpecs.Add(@{ Name = 'OsConfigEvents'; Command = 'Invoke-AzlSonarOsConfigEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
+        }
+        if ($config.armEventsPath) {
+            # The toolkit's ARM Validate and Deploy event file (JSON Lines): the ARM view of Validate and Deployment and its log lines.
+            $workerSpecs.Add(@{ Name = 'ArmEvents'; Command = 'Invoke-AzlSonarArmEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
         }
         if ($InfrastructureFile) {
             # Logs a notice when the master file's node set changes (restart Sonar to track it).
