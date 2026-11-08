@@ -641,7 +641,7 @@ Describe 'Node probe (Arc registration status read on the node)' {
     It 'the loop reads every unfinished node, records an unreachable node and stops on the stop flag' {
         InModuleScope AzlSonar -Parameters @{ C = $script:ProbeConfig } {
             param($C)
-            $shared = [hashtable]::Synchronized(@{ Stop = $false; NodeProbe = [hashtable]::Synchronized(@{}); State = [ordered]@{
+            $shared = [hashtable]::Synchronized(@{ Stop = $false; NodeProbe = [hashtable]::Synchronized(@{}); LogAccount = [hashtable]::Synchronized(@{}); CredentialLock = [object]::new(); Redact = @(); State = [ordered]@{
                         activePhase = 'arc-registration'; provisioning = [ordered]@{ route = 'oem-image' }
                         nodes = @([ordered]@{ name = 'node-01'; arcStatus = 'NotFound' }, [ordered]@{ name = 'node-02'; arcStatus = 'NotFound' }) } })
             Mock Open-AzlSonarNodeConnection {
