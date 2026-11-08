@@ -100,6 +100,8 @@ function New-AzlSonarDetailFact {
     $identity = [string](Get-AzlSonarMember $Config 'identityModel' 'LocalIdentity')
     $ztpPath = [string](Get-AzlSonarMember $Config 'ztpEventsPath' '')
     $osConfigPath = [string](Get-AzlSonarMember $Config 'osConfigEventsPath' '')
+    $domainAccount = [string](Get-AzlSonarLogAccount -Config $Config -DomainJoined $true -AdminsConfigured $true).domainAccount
+    $maxRejections = (Get-AzlSonarBreakerSetting -Config $Config).MaxRejections
 
     $nodes = foreach ($node in @($Config.nodes)) {
         [ordered]@{ name = [string]$node.name; address = [string](Get-AzlSonarMember $node 'address' ''); seed = [bool](Get-AzlSonarMember $node 'seed' $false) }
@@ -133,6 +135,8 @@ function New-AzlSonarDetailFact {
         ztpEventsPath     = $ztpPath
         osConfigEventsFile = $(if ($osConfigPath) { [System.IO.Path]::GetFileName($osConfigPath) } else { '' })
         osConfigEventsPath = $osConfigPath
+        domainAccount     = $domainAccount
+        maxRejections     = $maxRejections
         sourceKind        = $kind
         readFrom          = $readFrom
         fileName          = $fileName
@@ -255,6 +259,8 @@ function Get-AzlSonarDetail {
         route       = [ordered]@{ value = $routeShown; label = $routeLabel; source = $(if ($routeSource -eq 'config') { & $fromKey 'route' } else { $routeSource }) }
         identity    = [ordered]@{ value = $identity; label = $identityLabel; meaning = (Get-AzlSonarIdentityMeaning -IdentityModel $identity); source = (& $fromKey 'identity') }
         nodes       = @($(if ($null -ne $facts) { $facts.nodes }))
+        # the account-wide breaker of the domain account (its name and state, never a secret)
+        logAccount  = Get-AzlSonarLogAccountDetail -Shared $shared -AccountName $(if ($null -ne $facts -and $facts.Contains('domainAccount')) { [string]$facts.domainAccount } else { '' }) -MaxRejections $(if ($null -ne $facts -and $facts.Contains('maxRejections')) { [int]$facts.maxRejections } else { 2 }) -Now $Now
         sources     = [ordered]@{
             azure     = [ordered]@{
                 pollSeconds  = $(if ($null -ne $facts) { [int]$facts.pollSeconds } else { 0 })

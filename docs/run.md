@@ -98,7 +98,7 @@ Connect-AzAccount
 
 With the default `track: auto` (and `updateTrack: auto`) Sonar reads the update resources once the deployment is done and follows an update when Azure reports one. To follow it from the start, or when Azure has not reported it yet, use a config file with `track: update` (`ConvertTo-AzlSonarConfig -InfrastructureFile ./infrastructure.yml -OutFile ./config/clus01.json`, then `Set-AzlSonarConfig -Path ./config/clus01.json -Key track -Value update`). `updateTrack: off` never reads the update resources.
 
-**What Sonar shows:** the **Update** mode with the update run's steps (status, start and end, duration, error text, from `updateRuns`), a summary of what Azure says about the update (available, preparing, installing, failed, needs attention), and the node log of the seed node as it is written. The tab *Update* of [Log access](./log-access.md) names the account (the deployment local admin, or the LCM user on Active Directory) and the folders. A failed update can be resumed in the portal; Sonar only reports it.
+**What Sonar shows:** the **Update** mode with the update run's steps (status, start and end, duration, error text, from `updateRuns`), a summary of what Azure says about the update (available, preparing, installing, failed, needs attention), and the node log of the seed node as it is written. The tab *Update* of [Log access](./log-access.md) names the account (the deployment local admin, or on Active Directory the domain account you give Sonar) and the folders. A failed update can be resumed in the portal; Sonar only reports it.
 
 **Access:** Reader on the resource group; for the node logs an account in the seed node's local Administrators.
 

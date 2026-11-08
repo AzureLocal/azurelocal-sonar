@@ -1510,7 +1510,7 @@
     var failedStep = tree.filter(function (t) { return t.osc.stage === 'failed'; })[0];
     var joinStep = tree.filter(function (t) { return t.osc.step === 'DomainJoin'; })[0];
     var domainJoined = !!joinStep && (joinStep.osc.stage === 'applied' || joinStep.osc.stage === 'verified');
-    // the LCM user is added to the local Administrators a moment after the join: only then does Sonar switch accounts
+    // the domain account is added to the local Administrators a moment after the join: only then does Sonar switch accounts
     var adminsConfigured = domainJoined && !!(sp.changes || {}).DomainJoin && r >= sp.changes.DomainJoin.to + 0.1;
     var gstep = tree.filter(function (t) { return t.osc.guarded; })[0];
     return {
@@ -1524,7 +1524,7 @@
       changes: tree.filter(function (t) { return t.osc.stage === 'planned'; }).length, blocked: 0, errors: failedStep ? failedStep.errors : [], attempt: started ? (att2 ? 2 : 1) : 0,
       start: started ? at(cur.start) : null, end: converged ? at(cur.convergedAt) : null, lastEventAt: started ? at(Math.min(r, cur.convergedAt)) : null,
       domainJoined: domainJoined, domainAdminsConfigured: adminsConfigured, logAccount: adminsConfigured
-        ? { kind: 'domain', userName: 'IIC\\svc-lcm', reason: 'domain-joined: using IIC\\svc-lcm', warning: '', waitingForAdmins: false }
+        ? { kind: 'domain', userName: 'IIC\\svc-join', reason: 'domain-joined: using IIC\\svc-join', warning: '', waitingForAdmins: false }
         : domainJoined
           ? { kind: 'local', userName: 'azl-admin', reason: 'joined, waiting for domain administrators: using azl-admin', warning: '', waitingForAdmins: true }
           : { kind: 'local', userName: 'azl-admin', reason: 'workgroup: using azl-admin', warning: '', waitingForAdmins: false },
@@ -1586,7 +1586,7 @@
         }
         if (ch.fail) add(ch.fail.at, n, 'StepFailed', st, 'error', 'Failed: ' + ch.fail.reason);
         else add(ch.to, n, dj ? 'DomainJoined' : 'StepApplied', st, 'info', dj ? 'Joined iic.example.test and restarted.' : 'Applied: ' + st);
-        if (dj) add(ch.to + 0.1, n, 'DomainAdminsConfigured', st, 'info', 'The LCM user IIC\\svc-lcm was added to the local Administrators group.');
+        if (dj) add(ch.to + 0.1, n, 'DomainAdminsConfigured', st, 'info', 'The domain account IIC\\svc-join was added to the local Administrators group.');
       });
       if (sp.retry) add(sp.retry.at, n, 'NodeRetry', '', 'warning', 'The Arc Run Command ended in state Unknown (the node\'s agent may have lost its connection). Try 1 of 3 in the Apply pass; trying again in 15 s.');
       if (sp.reconnect) { add(sp.reconnect.at, n, 'NodeReconnecting', '', 'warning', 'The node restarted (a computer name change needs one); the run waits for it.'); add(sp.reconnect.to, n, 'NodeReconnected', '', 'info', 'The node came back with a new boot time and answered again.'); }
@@ -3397,6 +3397,19 @@
         n.seed ? el('span', { class: 'src', text: 'seed node' }) : null]));
     });
 
+    // The domain account that reads a node's logs once the node is joined and has the domain administrators: its circuit breaker.
+    var la = isObj(d.logAccount) ? d.logAccount : null;
+    if (la && str(la.account)) {
+      var gA = group('Domain account');
+      row(gA, 'Account', str(la.account), [srcGroup(['read from the master file; its password stays in Key Vault and is never shown'])]);
+      var BREAKER_WORD = { closed: 'in use as soon as a node is ready for it', open: 'paused for every node after a rejection', latched: 'paused until its password changes or Sonar restarts', probing: 'one check in progress' };
+      var rej = Number(la.failures) || 0, lim = Number(la.maxRejections) || 2;
+      row(gA, 'Breaker', BREAKER_WORD[str(la.state)] || str(la.state),
+        [srcGroup([rej + ' of ' + lim + ' rejections', str(la.nextProbeAt) && (str(la.state) === 'open' || str(la.state) === 'probing') ? 'next check ' + fmtClock(parseTime(la.nextProbeAt)) : null,
+          str(la.lastClass) ? 'last: ' + str(la.lastClass) : null, Number(la.backoffMinutes) ? 'back-off ' + la.backoffMinutes + ' min' : null])]);
+      row(gA, 'Password', str(la.credential) === 'unavailable' ? 'not available (Key Vault); asked for again' + (str(la.credentialRetryAt) ? ' at ' + fmtClock(parseTime(la.credentialRetryAt)) : '') : (str(la.credential) === 'ready' ? 'read from Key Vault' : 'not read yet'), []);
+    }
+
     var s = isObj(d.sources) ? d.sources : {};
     var g4 = group('Sources');
     var az = isObj(s.azure) ? s.azure : {};
@@ -3485,6 +3498,7 @@
       identity: { value: 'ActiveDirectory', label: 'Active Directory', source: 'from infrastructure.yml scenario.identity',
         meaning: 'Machines join your domain at deployment; Sonar reads the deployment log with a domain or local account.' },
       nodes: names,
+      logAccount: oscOf(state) ? { account: 'IIC\\svc-join', state: 'closed', failures: 0, maxRejections: 2, backoffMinutes: 0, nextProbeAt: null, lastClass: '', credential: 'ready', credentialRetryAt: null } : null,
       sources: {
         azure: { pollSeconds: Number(cfg.pollSeconds) || 20, lastAnswerAt: str(state.polledAt) || iso(12000), ok: true, message: '' },
         ztpEvents: { configured: simplified, file: 'ztp-events.jsonl', fileFound: true, events: 212, lastEventAt: iso(4000) },

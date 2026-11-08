@@ -139,9 +139,12 @@ function Test-AzlSonarConfig {
                 if ($null -ne $value -and ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value))) { $problems.Add("logAccounts.$path must be text.") }
             }
             $ref = Get-AzlSonarMember $logAccounts 'domain.passwordRef'
-            if ($null -ne $ref -and ($ref -isnot [string] -or $null -eq (ConvertFrom-AzlSonarKeyVaultReference -Reference $ref))) {
-                $problems.Add('logAccounts.domain.passwordRef must be a keyvault://<vault>/<secret> reference; a password never goes in the file.')
+            if ($null -ne $ref) {
+                $why = if ($ref -isnot [string]) { 'is not a keyvault:// reference' } else { Get-AzlSonarKeyVaultReferenceProblem -Reference $ref }
+                if ($why) { $problems.Add("logAccounts.domain.passwordRef $why.") }
             }
+            $max = Get-AzlSonarMember $logAccounts 'domain.maxRejections'
+            if ($null -ne $max -and -not ("$max" -match '^[1-5]$')) { $problems.Add('logAccounts.domain.maxRejections must be a whole number from 1 to 5.') }
             foreach ($forbidden in 'password', 'secret', 'secretValue') {
                 if ($null -ne (Get-AzlSonarMember $logAccounts "domain.$forbidden") -or $null -ne (Get-AzlSonarMember $logAccounts "local.$forbidden")) { $problems.Add("logAccounts: '$forbidden' is refused; secrets never go in the file.") }
             }
@@ -401,7 +404,10 @@ function Read-AzlSonarConfig {
             netbios     = [string](Get-AzlSonarMember $accountsRaw 'domain.netbios' '')
             username    = [string](Get-AzlSonarMember $accountsRaw 'domain.username' '')
             passwordRef = [string](Get-AzlSonarMember $accountsRaw 'domain.passwordRef' '')
-            source      = [string](Get-AzlSonarMember $accountsRaw 'domain.source' '')
+            maxRejections = $(
+                $limit = 0
+                $given = Get-AzlSonarMember $accountsRaw 'domain.maxRejections'
+                if ($null -ne $given -and [int]::TryParse("$given", [ref]$limit) -and $limit -ge 1 -and $limit -le 5) { $limit } else { 2 })
         }
     }
 

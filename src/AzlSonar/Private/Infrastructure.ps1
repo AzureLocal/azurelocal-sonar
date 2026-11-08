@@ -530,6 +530,30 @@ function ConvertFrom-AzlSonarInfrastructureTree {
         if ($isoEvidence) { $osConfigPath = & $eventFile $isoEvidence 'os-configuration-events.jsonl' }
     }
 
+    # Which account reads a node's logs: the local administrator (identity.local_admin) until the node has reported DomainJoined
+    # and DomainAdminsConfigured, then the domain account the operator supplies (identity.active_directory.domain_join_account:
+    # username and a keyvault:// password reference, with the domain's netbios_name). Sonar never uses the LCM user
+    # (identity.active_directory.lcm_user): it belongs to the deployment. Read defensively (the keys may be absent). Only
+    # names and a keyvault:// reference are kept; a password that is not a valid reference is refused, and is never echoed.
+    $localAdmin = Get-AzlSonarInfrastructureValue $Tree 'identity.local_admin.username'
+    $accounts = [ordered]@{}
+    if ($localAdmin -and ([string]$localAdmin).Trim()) { $accounts['local'] = [ordered]@{ username = ([string]$localAdmin).Trim() } }
+    if ($identityModel -eq 'ActiveDirectory') {
+        $netbios = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.netbios_name'
+        $joinUser = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.domain_join_account.username'
+        $joinRef = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.domain_join_account.password'
+        if ($joinUser -and ([string]$joinUser).Trim()) {
+            $domain = [ordered]@{ username = ([string]$joinUser).Trim() }
+            if ($netbios -and ([string]$netbios).Trim()) { $domain['netbios'] = ([string]$netbios).Trim() }
+            if ($null -ne $joinRef -and "$joinRef" -ne '') {
+                $refProblem = Get-AzlSonarKeyVaultReferenceProblem -Reference ([string]$joinRef)
+                if ($refProblem) { & $fail 'identity.active_directory.domain_join_account.password' $refProblem }
+                else { $domain['passwordRef'] = [string]$joinRef }
+            }
+            $accounts['domain'] = $domain
+        }
+    }
+
     if ($problems.Count -gt 0) { return [pscustomobject]@{ Config = $null; Problems = $problems.ToArray() } }
 
     # Schema 5.3 has no seed key: the first listed node is the seed node (the one whose logs are read).
@@ -547,31 +571,6 @@ function ConvertFrom-AzlSonarInfrastructureTree {
     $config['nodes'] = $nodes.ToArray()
     if ($ztpPath) { $config['ztpEvents'] = [ordered]@{ path = $ztpPath } }
     if ($osConfigPath) { $config['osConfigEventsPath'] = $osConfigPath }
-    # Which account reads a node's logs: the local administrator until the node has reported DomainJoined and
-    # DomainAdminsConfigured, then the domain account: the LCM user (identity.active_directory.lcm_user), or the optional
-    # override identity.active_directory.domain_join_account when it is present. Read defensively (either may be absent).
-    # Only names and a keyvault:// reference are kept; a plain password in the file is never read.
-    $localAdmin = Get-AzlSonarInfrastructureValue $Tree 'identity.local_admin.username'
-    $accounts = [ordered]@{}
-    if ($localAdmin -and ([string]$localAdmin).Trim()) { $accounts['local'] = [ordered]@{ username = ([string]$localAdmin).Trim() } }
-    if ($identityModel -eq 'ActiveDirectory') {
-        $netbios = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.netbios_name'
-        $joinUser = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.domain_join_account.username'
-        $joinRef = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.domain_join_account.password'
-        $source = 'domain_join_account'
-        if (-not ($joinUser -and ([string]$joinUser).Trim())) {
-            # no override: the LCM user is the account that joins the nodes and reads their logs
-            $joinUser = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.lcm_user.username'
-            $joinRef = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.lcm_user.password'
-            $source = 'lcm_user'
-        }
-        if ($joinUser -and ([string]$joinUser).Trim()) {
-            $domain = [ordered]@{ username = ([string]$joinUser).Trim(); source = $source }
-            if ($netbios -and ([string]$netbios).Trim()) { $domain['netbios'] = ([string]$netbios).Trim() }
-            if ($joinRef -and $null -ne (ConvertFrom-AzlSonarKeyVaultReference -Reference ([string]$joinRef))) { $domain['passwordRef'] = [string]$joinRef }
-            $accounts['domain'] = $domain
-        }
-    }
     if ($accounts.Count -gt 0) { $config['logAccounts'] = $accounts }
     # The credential never comes from the infrastructure file (it holds keyvault:// references only).
     $config['credential'] = [ordered]@{ source = 'prompt' }

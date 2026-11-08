@@ -1216,15 +1216,22 @@ function Invoke-AzlSonarTailerLoop {
                         $sessionParameters = @{ ComputerName = $seed.address; SessionOption = $options; Name = 'AzlSonar'; ErrorAction = 'Stop' }
                         if ($null -ne $useCredential) { $sessionParameters.Credential = $useCredential }
                         $session = New-PSSession @sessionParameters
+                        if ($pick.Account.kind -eq 'domain') { Register-AzlSonarAccountResult -Shared $Shared -Config $Config -Node $seed.name -Class ok }
                     }
                     catch {
-                        $r = "WinRM: $($_.Exception.Message)"
-                        if ($pick.Account.kind -eq 'domain' -and (Test-AzlSonarAuthenticationFailure -Message $_.Exception.Message)) {
-                            # The node refused the domain account: use the local account for it from now on, and say so.
-                            Set-AzlSonarLogAccountRejected -Shared $Shared -Node $seed.name -Message (Protect-AzlSonarText -Text $_.Exception.Message -Secret $Shared.Redact)
-                            $reasons.Add($r + ' The domain account was rejected; trying the local account.')
-                            $session = $null
-                            continue
+                        $failureText = Protect-AzlSonarText -Text $_.Exception.Message -Secret $Shared.Redact
+                        $r = "WinRM: $failureText"
+                        if ($pick.Account.kind -eq 'domain') {
+                            # What the failure says about the domain account decides what happens to it: a rejection or a lockout opens the
+                            # account-wide breaker (no node is given it for a while), a missing administrator right only sets this node
+                            # aside, and an unreachable node says nothing about the account.
+                            $class = Get-AzlSonarConnectionFailureClass -Transport winrm -Exception $_
+                            Register-AzlSonarAccountResult -Shared $Shared -Config $Config -Node $seed.name -Class $class.Class -Message $failureText
+                            if ($class.Class -in 'rejected', 'lockedOut', 'authorization') {
+                                $reasons.Add($r + " The domain account was not accepted ($($class.Reason)); using the local account.")
+                                $session = $null
+                                continue
+                            }
                         }
                         if ($trust.required -and $trust.trusted -eq $false) { $r += ' ' + $trust.message }
                         $reasons.Add($r)
@@ -1239,8 +1246,17 @@ function Invoke-AzlSonarTailerLoop {
                         try {
                             Import-Module Posh-SSH -ErrorAction Stop
                             $ssh = New-SSHSession -ComputerName $seed.address -Credential $useCredential -AcceptKey -ConnectionTimeout ([int]($script:AzlSonarTail.SessionOpenMs / 1000)) -ErrorAction Stop -WarningAction SilentlyContinue
+                            if ($pick.Account.kind -eq 'domain') { Register-AzlSonarAccountResult -Shared $Shared -Config $Config -Node $seed.name -Class ok }
                         }
-                        catch { $reasons.Add("SSH: $($_.Exception.Message)"); $ssh = $null }
+                        catch {
+                            $failureText = Protect-AzlSonarText -Text $_.Exception.Message -Secret $Shared.Redact
+                            $reasons.Add("SSH: $failureText")
+                            $ssh = $null
+                            if ($pick.Account.kind -eq 'domain') {
+                                $class = Get-AzlSonarConnectionFailureClass -Transport ssh -Exception $_
+                                Register-AzlSonarAccountResult -Shared $Shared -Config $Config -Node $seed.name -Class $class.Class -Message $failureText
+                            }
+                        }
                     }
                 }
                 if ($null -eq $session -and $null -eq $ssh) {

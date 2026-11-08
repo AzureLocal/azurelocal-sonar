@@ -1,51 +1,111 @@
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0.0' }
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingConvertToSecureStringWithPlainText', '', Justification = 'Test credentials are made-up values held only in memory.')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'The Get-AzKeyVaultSecret stub mirrors the real parameters.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Pester scopes.')]
 param()
 Set-StrictMode -Version Latest
 
-# Which account reads a node's logs: local until the node reports DomainJoined, then the domain account, and back to the
-# local one (with a warning) when the node rejects it. No Azure, no node: Key Vault is mocked, no secret is real.
+# Which account reads a node's logs: local until the node has reported DomainJoined and DomainAdminsConfigured, then the
+# domain account the operator supplies (never the LCM user), guarded by one account-wide circuit breaker. No Azure, no node:
+# Key Vault is mocked, no secret is real.
 
 BeforeAll {
     Set-StrictMode -Version Latest
     . (Join-Path -Path $PSScriptRoot -ChildPath 'TestHelpers.ps1')
     # Az.KeyVault may be missing on a build agent; Pester can only mock a command that exists.
+    $script:StubbedKeyVault = $false
     if (-not (Get-Command -Name Get-AzKeyVaultSecret -ErrorAction SilentlyContinue)) {
-        Set-Item -Path 'function:global:Get-AzKeyVaultSecret' -Value { [CmdletBinding()] param([string]$VaultName, [string]$Name) throw 'Get-AzKeyVaultSecret stub called without a mock.' }
+        Set-Item -Path 'function:global:Get-AzKeyVaultSecret' -Value { [CmdletBinding()] param([string]$VaultName, [string]$Name, [string]$Version) throw 'Get-AzKeyVaultSecret stub called without a mock.' }
         $script:StubbedKeyVault = $true
     }
     Import-SonarTestModule
     $script:Password = 'D0main-Pa55-not-real'
+    $script:LocalPassword = 'Local-Pa55-not-real'
+    $script:T0 = [datetime]::SpecifyKind([datetime]'2026-11-07T20:00:00', 'Utc')
     $script:Accounts = [pscustomobject]@{
         local  = [pscustomobject]@{ username = 'azl-admin' }
-        domain = [pscustomobject]@{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'keyvault://kv-example-mgmt-01/svc-join-password' }
+        domain = [pscustomobject]@{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'keyvault://kv-example-mgmt-01/svc-join-password'; maxRejections = 2 }
     }
     function global:New-AccountConfig([string]$Identity = 'ActiveDirectory', [object]$Accounts = $script:Accounts) {
-        [pscustomobject]@{ identityModel = $Identity; logAccounts = $Accounts; nodes = @([pscustomobject]@{ name = 'node-01'; seed = $true }, [pscustomobject]@{ name = 'node-02' }); seedNode = [pscustomobject]@{ name = 'node-01'; address = '192.0.2.11' } }
+        [pscustomobject]@{ identityModel = $Identity; logAccounts = $Accounts; nodes = @([pscustomobject]@{ name = 'node-01'; seed = $true }, [pscustomobject]@{ name = 'node-02' }, [pscustomobject]@{ name = 'node-03' }); seedNode = [pscustomobject]@{ name = 'node-01'; address = '192.0.2.11' } }
     }
     function global:New-AccountLine([string]$At, [string]$Node, [string]$State, [string]$Evidence = '', [hashtable]$Extra = @{}) {
         $o = [ordered]@{ timestamp = $At; node = $Node; stage = 'OsConfiguration'; step = 'DomainJoin'; state = $State; evidence = $Evidence; level = 'Info'; nextAction = ''; method = ''; transport = '' }
         foreach ($k in $Extra.Keys) { $o[$k] = $Extra[$k] }
         $o | ConvertTo-Json -Compress -Depth 6
     }
+    # A shared state with the nodes' domain events fed in: 'none', 'joined' (DomainJoined) or 'both' (and DomainAdminsConfigured).
+    function global:New-AccountShared([string]$Domain = 'both', [string[]]$Nodes = @('node-01', 'node-02', 'node-03')) {
+        InModuleScope AzlSonar -Parameters @{ D = $Domain; N = $Nodes } {
+            param($D, $N)
+            $shared = Initialize-AzlSonarSharedState
+            foreach ($n in $N) {
+                if ($D -in 'joined', 'both') { Add-AzlSonarOsConfigEvent -Store $shared['OsConfigEvents'] -Line ('{"timestamp":"2026-11-07T19:00:00Z","node":"' + $n + '","stage":"OsConfiguration","step":"DomainJoin","state":"DomainJoined"}') }
+                if ($D -eq 'both') { Add-AzlSonarOsConfigEvent -Store $shared['OsConfigEvents'] -Line ('{"timestamp":"2026-11-07T19:01:00Z","node":"' + $n + '","stage":"OsConfiguration","step":"DomainJoin","state":"DomainAdminsConfigured"}') }
+            }
+            $shared
+        }
+    }
+    # One Select-AzlSonarNodeAccount call: what the node is given, as plain values.
+    function global:Invoke-AccountPick($Shared, [string]$Node = 'node-01', [double]$Minutes = 0, [object]$Config = (New-AccountConfig)) {
+        InModuleScope AzlSonar -Parameters @{ S = $Shared; C = $Config; N = $Node; Now = $script:T0.AddMinutes($Minutes) } {
+            param($S, $C, $N, $Now)
+            $local = [pscredential]::new('azl-admin', (ConvertTo-SecureString 'Local-Pa55-not-real' -AsPlainText -Force))
+            $pick = Select-AzlSonarNodeAccount -Shared $S -Config $C -Node $N -Local $local -Now $Now
+            [pscustomobject]@{ UserName = $pick.Credential.UserName; Password = $pick.Credential.GetNetworkCredential().Password; Kind = $pick.Account.kind; Reason = $pick.Account.reason; Warning = $pick.Account.warning; Probe = $pick.Probe }
+        }
+    }
+    function global:Register-AccountResult($Shared, [string]$Node, [string]$Class, [double]$Minutes = 0, [string]$Message = '', [object]$Config = (New-AccountConfig)) {
+        InModuleScope AzlSonar -Parameters @{ S = $Shared; C = $Config; N = $Node; K = $Class; M = $Message; Now = $script:T0.AddMinutes($Minutes) } {
+            param($S, $C, $N, $K, $M, $Now)
+            Register-AzlSonarAccountResult -Shared $S -Config $C -Node $N -Class $K -Message $M -Now $Now
+        }
+    }
+    function global:Get-AccountBreaker($Shared) { InModuleScope AzlSonar -Parameters @{ S = $Shared } { param($S) Get-AzlSonarAccountBreaker -Table $S['LogAccount'] } }
 }
 
 AfterAll {
-    foreach ($f in 'New-AccountConfig', 'New-AccountLine') { Remove-Item -LiteralPath "Function:\$f" -ErrorAction SilentlyContinue }
+    foreach ($f in 'New-AccountConfig', 'New-AccountLine', 'New-AccountShared', 'Invoke-AccountPick', 'Register-AccountResult', 'Get-AccountBreaker') { Remove-Item -LiteralPath "Function:\$f" -ErrorAction SilentlyContinue }
     if ($script:StubbedKeyVault) { Remove-Item -LiteralPath 'Function:\Get-AzKeyVaultSecret' -ErrorAction SilentlyContinue }
 }
 
-Describe 'ConvertFrom-AzlSonarKeyVaultReference' {
-    It 'reads keyvault://vault/secret (and a version), and nothing else' {
+Describe 'Key Vault references: validated like Azure validates them' {
+    It 'reads keyvault://vault/secret and an optional version' {
         InModuleScope AzlSonar {
             $r = ConvertFrom-AzlSonarKeyVaultReference -Reference 'keyvault://kv-example-mgmt-01/svc-join-password'
             $r.Vault | Should -Be 'kv-example-mgmt-01'
             $r.Secret | Should -Be 'svc-join-password'
-            (ConvertFrom-AzlSonarKeyVaultReference -Reference 'keyvault://kv-example/s/0123abcd').Secret | Should -Be 's'
-            ConvertFrom-AzlSonarKeyVaultReference -Reference 'P@ssw0rd!' | Should -BeNullOrEmpty
-            ConvertFrom-AzlSonarKeyVaultReference -Reference 'https://kv.vault.azure.net/secrets/x' | Should -BeNullOrEmpty
-            ConvertFrom-AzlSonarKeyVaultReference -Reference '' | Should -BeNullOrEmpty
+            $r.Version | Should -Be ''
+            $v = ConvertFrom-AzlSonarKeyVaultReference -Reference 'keyvault://kv-example/s/0123456789abcdef0123456789ABCDEF'
+            $v.Version | Should -Be '0123456789abcdef0123456789ABCDEF'
+            Get-AzlSonarKeyVaultReferenceProblem -Reference 'keyvault://kv-example/s/0123456789abcdef0123456789ABCDEF' | Should -Be ''
+        }
+    }
+    It 'refuses what is not a reference, with a message that never echoes the value' {
+        InModuleScope AzlSonar {
+            foreach ($bad in 'P@ssw0rd!', 'https://kv.vault.azure.net/secrets/x', '', 'keyvault://', 'keyvault://kv-example', 'keyvault://kv-example/a/b/c') {
+                (Get-AzlSonarKeyVaultReferenceProblem -Reference $bad) | Should -Match 'keyvault://<vault>/<secret>'
+                ConvertFrom-AzlSonarKeyVaultReference -Reference $bad | Should -BeNullOrEmpty
+            }
+            Get-AzlSonarKeyVaultReferenceProblem -Reference 'Sup3r-Secret-Value' | Should -Not -Match 'Sup3r'
+        }
+    }
+    It 'vault names: 3 to 24 characters, start with a letter, letters digits and single hyphens, no leading or trailing hyphen' {
+        InModuleScope AzlSonar {
+            foreach ($bad in 'ab', '1vault', '-vault', 'vault-', 'va--ult', 'vault_name', ('v' * 25), 'vau lt') {
+                (Get-AzlSonarKeyVaultReferenceProblem -Reference "keyvault://$bad/secret") | Should -Match 'vault that Azure would not accept' -Because $bad
+            }
+            foreach ($good in 'abc', 'kv-1', ('v' * 24), 'Kv-Example-01') {
+                (Get-AzlSonarKeyVaultReferenceProblem -Reference "keyvault://$good/secret") | Should -Be '' -Because $good
+            }
+        }
+    }
+    It 'secret names and versions' {
+        InModuleScope AzlSonar {
+            (Get-AzlSonarKeyVaultReferenceProblem -Reference 'keyvault://kv-example/bad_name') | Should -Match 'secret that Azure would not accept'
+            (Get-AzlSonarKeyVaultReferenceProblem -Reference ('keyvault://kv-example/' + ('s' * 128))) | Should -Match 'secret that Azure would not accept'
+            (Get-AzlSonarKeyVaultReferenceProblem -Reference 'keyvault://kv-example/s/abc') | Should -Match 'version that is not 32 hexadecimal'
+            (Get-AzlSonarKeyVaultReferenceProblem -Reference 'keyvault://kv-example/s/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz') | Should -Match 'version that is not 32 hexadecimal'
         }
     }
 }
@@ -61,7 +121,6 @@ Describe 'Get-AzlSonarLogAccount (which account, and why)' {
     It 'joined, but the domain account is not yet a local administrator (no DomainAdminsConfigured): still the local account, and no warning' {
         $a = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig) } { param($C) Get-AzlSonarLogAccount -Config $C -Node 'node-01' -DomainJoined $true -AdminsConfigured $false }
         $a.kind | Should -Be 'local'
-        $a.userName | Should -Be 'azl-admin'
         $a.reason | Should -Be 'joined, waiting for domain administrators: using azl-admin'
         $a.waitingForAdmins | Should -BeTrue
         $a.warning | Should -Be ''
@@ -71,189 +130,631 @@ Describe 'Get-AzlSonarLogAccount (which account, and why)' {
         $a.kind | Should -Be 'local'
         $a.reason | Should -Be 'workgroup: using azl-admin'
     }
-    It 'after DomainJoined and DomainAdminsConfigured: the domain account, NETBIOS\user from the file' {
+    It 'after DomainJoined and DomainAdminsConfigured: the domain account the operator supplied, NETBIOS\user' {
         $a = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig) } { param($C) Get-AzlSonarLogAccount -Config $C -Node 'node-01' -DomainJoined $true -AdminsConfigured $true }
         $a.kind | Should -Be 'domain'
         $a.userName | Should -Be 'IIC\svc-join'
         $a.reason | Should -Be 'domain-joined: using IIC\svc-join'
-        $a.waitingForAdmins | Should -BeFalse
     }
     It 'a local identity design stays on the local account even if a join is reported' {
         $a = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig 'LocalIdentity') } { param($C) Get-AzlSonarLogAccount -Config $C -Node 'node-01' -DomainJoined $true -AdminsConfigured $true }
         $a.kind | Should -Be 'local'
         $a.reason | Should -Match 'identity design is local'
     }
-    It 'a domain account the node rejected: back to the local account, with a warning that names both' {
+    It 'every pause says why, names the account and never presents the domain account' {
+        $cases = @(
+            @{ Kind = 'rejected'; Reason = 'IIC\\svc-join was rejected: using azl-admin' },
+            @{ Kind = 'open'; Reason = 'was rejected; the domain account is paused for every node \(next check 20:15 UTC\)' },
+            @{ Kind = 'lockedOut'; Reason = 'is locked out; the domain account is paused' },
+            @{ Kind = 'latched'; Reason = 'rejected repeatedly; the domain account stays paused until its password changes or Sonar restarts' },
+            @{ Kind = 'unavailable'; Reason = 'the domain account is not available \(next check 20:15 UTC\)' },
+            @{ Kind = 'authorization'; Reason = 'IIC\\svc-join is not an administrator of the node' })
+        foreach ($c in $cases) {
+            $a = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig); K = $c.Kind; U = $script:T0.AddMinutes(15) } { param($C, $K, $U) Get-AzlSonarLogAccount -Config $C -Node 'node-01' -DomainJoined $true -AdminsConfigured $true -Pause ([pscustomobject]@{ Kind = $K; Until = $U; Message = 'Vault unreachable.' }) }
+            $a.kind | Should -Be 'local' -Because $c.Kind
+            $a.userName | Should -Be 'azl-admin'
+            $a.reason | Should -Match $c.Reason
+            $a.warning | Should -Not -BeNullOrEmpty
+        }
+    }
+    It '-Rejected is the same as a rejected pause' {
         $a = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig) } { param($C) Get-AzlSonarLogAccount -Config $C -Node 'node-01' -DomainJoined $true -AdminsConfigured $true -Rejected $true }
         $a.kind | Should -Be 'local'
         $a.rejected | Should -BeTrue
         $a.reason | Should -Be 'domain-joined, but IIC\svc-join was rejected: using azl-admin'
-        $a.warning | Should -Match 'IIC\\svc-join was rejected on node-01'
-        $a.warning | Should -Match 'azl-admin'
     }
-    It 'joined but the file names no domain account: the local account and a warning that says what to set' {
+    It 'joined but the file names no domain account: the local account and a warning that names domain_join_account, never lcm_user as the thing to set' {
         $none = [pscustomobject]@{ local = [pscustomobject]@{ username = 'azl-admin' }; domain = [pscustomobject]@{ netbios = ''; username = ''; passwordRef = '' } }
         $a = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig 'ActiveDirectory' $none) } { param($C) Get-AzlSonarLogAccount -Config $C -Node 'node-02' -DomainJoined $true -AdminsConfigured $true }
         $a.kind | Should -Be 'local'
-        $a.warning | Should -Match 'lcm_user'
+        $a.warning | Should -Match 'domain_join_account'
+        ($a.warning + $a.reason) | Should -Not -Match 'lcm'
     }
     It 'the account given with -Credential is the local account when it is known better than the file' {
         $a = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig) } { param($C) Get-AzlSonarLogAccount -Config $C -Node 'n' -DomainJoined $false -LocalUserName '.\operator' }
         $a.reason | Should -Be 'workgroup: using .\operator'
     }
     It 'a user name that already carries its domain is not given a second one' {
-        $acc = [pscustomobject]@{ local = [pscustomobject]@{ username = 'azl-admin' }; domain = [pscustomobject]@{ netbios = 'IIC'; username = 'svc-join@iic.example.test'; passwordRef = 'keyvault://kv/s' } }
+        $acc = [pscustomobject]@{ local = [pscustomobject]@{ username = 'azl-admin' }; domain = [pscustomobject]@{ netbios = 'IIC'; username = 'svc-join@iic.example.test'; passwordRef = 'keyvault://kv-example/s' } }
         $a = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig 'ActiveDirectory' $acc) } { param($C) Get-AzlSonarLogAccount -Config $C -Node 'n' -DomainJoined $true -AdminsConfigured $true }
         $a.userName | Should -Be 'svc-join@iic.example.test'
     }
 }
 
-Describe 'The domain-joined flag in the event store' {
+Describe 'The domain flags in the event store' {
     BeforeEach {
         $script:Store = [hashtable]::Synchronized(@{})
         $script:Feed = { param($Lines) InModuleScope AzlSonar -Parameters @{ S = $script:Store; L = @($Lines) } { param($S, $L) foreach ($x in $L) { Add-AzlSonarOsConfigEvent -Store $S -Line $x } } }
-        $script:Joined = { param($Node) InModuleScope AzlSonar -Parameters @{ S = $script:Store; N = $Node } { param($S, $N) Get-AzlSonarOsDomainJoined -Store $S -Node $N } }
+        $script:State = { param($Node) InModuleScope AzlSonar -Parameters @{ S = $script:Store; N = $Node } { param($S, $N) Get-AzlSonarOsDomainState -Store $S -Node $N } }
     }
-    It 'joined and admins-configured are two separate facts: DomainJoined, then DomainAdminsConfigured' {
-        $state = { param($Node) InModuleScope AzlSonar -Parameters @{ S = $script:Store; N = $Node } { param($S, $N) Get-AzlSonarOsDomainState -Store $S -Node $N } }
-        $s0 = & $state 'node-01'
-        $s0.Joined | Should -BeFalse; $s0.AdminsConfigured | Should -BeFalse
+    It 'joined and admins-configured are two separate facts, a plan that finds the node not joined clears both' {
+        (& $script:State 'node-01').Joined | Should -BeFalse
         & $script:Feed @((New-AccountLine '2026-11-07T19:02:00Z' 'node-01' 'DomainJoined' 'joined'))
-        $s1 = & $state 'node-01'
+        $s1 = & $script:State 'node-01'
         $s1.Joined | Should -BeTrue; $s1.AdminsConfigured | Should -BeFalse
-        & $script:Feed @((New-AccountLine '2026-11-07T19:03:00Z' 'node-01' 'DomainAdminsConfigured' 'the LCM user was added to the local Administrators'))
-        $s2 = & $state 'node-01'
+        & $script:Feed @((New-AccountLine '2026-11-07T19:03:00Z' 'node-01' 'DomainAdminsConfigured' 'admins'))
+        $s2 = & $script:State 'node-01'
         $s2.Joined | Should -BeTrue; $s2.AdminsConfigured | Should -BeTrue
-        (& $state 'node-02').AdminsConfigured | Should -BeFalse
+        (& $script:State 'node-02').AdminsConfigured | Should -BeFalse
+        (& $script:State 'NODE-01').Joined | Should -BeTrue
         & $script:Feed @((New-AccountLine '2026-11-07T20:00:00Z' 'node-01' 'DomainJoinPlanned' 'Change: not joined' @{ action = 'Change' }))
-        $s3 = & $state 'node-01'
+        $s3 = & $script:State 'node-01'
         $s3.Joined | Should -BeFalse; $s3.AdminsConfigured | Should -BeFalse
     }
-    It 'is false until DomainJoined arrives, then true for that node only' {
-        & $script:Joined 'node-01' | Should -BeFalse
-        & $script:Feed @((New-AccountLine '2026-11-07T19:00:00Z' 'node-01' 'DomainJoinPlanned' 'Change: join iic.example.test' @{ action = 'Change' }), (New-AccountLine '2026-11-07T19:01:00Z' 'node-01' 'DomainJoinApplying'))
-        & $script:Joined 'node-01' | Should -BeFalse
-        & $script:Feed @((New-AccountLine '2026-11-07T19:02:00Z' 'node-01' 'DomainJoined' 'joined iic.example.test'))
-        & $script:Joined 'node-01' | Should -BeTrue
-        & $script:Joined 'node-02' | Should -BeFalse
-        & $script:Joined 'NODE-01' | Should -BeTrue -Because 'node names are case-insensitive'
-    }
-    It 'a DomainJoinFailed does not mark the node as joined' {
-        & $script:Feed @((New-AccountLine '2026-11-07T19:02:00Z' 'node-01' 'DomainJoinFailed' 'The specified domain either does not exist or could not be contacted.'))
-        & $script:Joined 'node-01' | Should -BeFalse
-    }
-    It 'a plan that finds the machine already joined counts, and a plan that finds it not joined clears the flag' {
-        & $script:Feed @((New-AccountLine '2026-11-07T19:00:00Z' 'node-01' 'DomainJoinPlanned' 'Ok: already joined' @{ action = 'Ok' }))
-        & $script:Joined 'node-01' | Should -BeTrue
-        & $script:Feed @((New-AccountLine '2026-11-07T20:00:00Z' 'node-01' 'DomainJoinPlanned' 'Change: not joined' @{ action = 'Change' }))
-        & $script:Joined 'node-01' | Should -BeFalse
-    }
-    It 'survives a new attempt and a run-wide RunStarted that clears the node' {
-        & $script:Feed @((New-AccountLine '2026-11-07T19:02:00Z' 'node-01' 'DomainJoined' 'joined'), (New-AccountLine '2026-11-07T19:03:00Z' 'node-01' 'DomainAdminsConfigured' 'admins'))
+    It 'a DomainJoinFailed does not mark the node as joined, a plan that finds it joined does, and the flags survive a new attempt and a clearing RunStarted' {
+        & $script:Feed @((New-AccountLine '2026-11-07T19:02:00Z' 'node-01' 'DomainJoinFailed' 'The specified domain either does not exist.'))
+        (& $script:State 'node-01').Joined | Should -BeFalse
+        & $script:Feed @((New-AccountLine '2026-11-07T19:03:00Z' 'node-01' 'DomainJoinPlanned' 'Ok: already joined' @{ action = 'Ok' }), (New-AccountLine '2026-11-07T19:04:00Z' 'node-01' 'DomainAdminsConfigured' 'admins'))
         & $script:Feed @('{"timestamp":"2026-11-07T20:00:00Z","node":"node-01","stage":"OsConfiguration","state":"NodeStarted"}')
-        & $script:Joined 'node-01' | Should -BeTrue
-        & $script:Feed @('{"timestamp":"2026-11-07T21:00:00Z","node":"*","stage":"OsConfiguration","state":"RunStarted","nodes":["node-01","node-02"]}')
+        & $script:Feed @('{"timestamp":"2026-11-07T21:00:00Z","node":"*","stage":"OsConfiguration","state":"RunStarted","nodes":["node-01"]}')
         $script:Store.Contains('node-01') | Should -BeFalse
-        & $script:Joined 'node-01' | Should -BeTrue
+        $f = & $script:State 'node-01'
+        $f.Joined | Should -BeTrue; $f.AdminsConfigured | Should -BeTrue
     }
-    It 'the flag is not a machine: the state lists only real nodes' {
+    It 'the flags are not a machine: the state lists only real nodes' {
         & $script:Feed @((New-AccountLine '2026-11-07T19:02:00Z' 'node-01' 'DomainJoined' 'joined'))
         $s = InModuleScope AzlSonar -Parameters @{ S = $script:Store; C = (New-AccountConfig) } { param($S, $C) Get-AzlSonarOsConfigurationState -Store $S -Config $C }
-        @($s.nodes).name | Should -Be @('node-01', 'node-02')
+        @($s.nodes).name | Should -Be @('node-01', 'node-02', 'node-03')
     }
 }
 
-Describe 'Select-AzlSonarNodeAccount (the credential a connection opens with)' {
-    BeforeEach {
-        $script:Local = [pscredential]::new('azl-admin', (ConvertTo-SecureString 'Local-Pa55-not-real' -AsPlainText -Force))
-        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force) } }
-        $script:Pick = {
-            param($Domain, $Config = (New-AccountConfig), [bool]$Reject = $false)
-            InModuleScope AzlSonar -Parameters @{ C = $Config; J = $Domain; L = $script:Local; Rej = $Reject } {
-                param($C, $J, $L, $Rej)
-                $shared = Initialize-AzlSonarSharedState
-                # J: 'none' (a workgroup node), 'joined' (DomainJoined only) or 'both' (DomainJoined and DomainAdminsConfigured)
-                if ($J -in 'joined', 'both') { Add-AzlSonarOsConfigEvent -Store $shared['OsConfigEvents'] -Line '{"timestamp":"2026-11-07T19:00:00Z","node":"node-01","stage":"OsConfiguration","step":"DomainJoin","state":"DomainJoined"}' }
-                if ($J -eq 'both') { Add-AzlSonarOsConfigEvent -Store $shared['OsConfigEvents'] -Line '{"timestamp":"2026-11-07T19:01:00Z","node":"node-01","stage":"OsConfiguration","step":"DomainJoin","state":"DomainAdminsConfigured"}' }
-                if ($Rej) { Set-AzlSonarLogAccountRejected -Shared $shared -Node 'node-01' -Message 'Access is denied.' }
-                $pick = Select-AzlSonarNodeAccount -Shared $shared -Config $C -Node 'node-01' -Local $L
-                [pscustomobject]@{ UserName = $pick.Credential.UserName; Password = $pick.Credential.GetNetworkCredential().Password; Account = $pick.Account; Redact = @($shared.Redact); Info = $shared['LogAccount']['node-01'] }
+Describe 'Connection failures: what each one says about the account' {
+    It 'WinRM: a wrong user name or password is a rejection (error codes and phrases)' {
+        InModuleScope AzlSonar {
+            foreach ($m in 'The user name or password is incorrect.', 'Logon failure: unknown user name or bad password.', 'Connecting to remote server n1 failed with the following error message : 0x8009030c', 'The WinRM client got 0x8007052e from the server.') {
+                (Get-AzlSonarConnectionFailureClass -Transport winrm -Message $m).Class | Should -Be 'rejected' -Because $m
             }
         }
     }
+    It 'WinRM: access denied is authorization, not a rejection: the account got in and may not do this' {
+        InModuleScope AzlSonar {
+            foreach ($m in 'Access is denied.', 'Connecting to remote server n1 failed with the following error message : Access is denied.', 'WinRM returned 0x80070005') {
+                $c = Get-AzlSonarConnectionFailureClass -Transport winrm -Message $m
+                $c.Class | Should -Be 'authorization' -Because $m
+                $c.Reason | Should -Be 'not an administrator of the node'
+            }
+            (Get-AzlSonarConnectionFailureClass -Transport winrm -Exception ([System.UnauthorizedAccessException]::new('Attempted to perform an unauthorized operation.'))).Class | Should -Be 'authorization'
+        }
+    }
+    It 'WinRM: a locked-out account is its own class, even when the text also says logon failure' {
+        InModuleScope AzlSonar {
+            foreach ($m in 'Logon failure: referenced account is currently locked out and may not be logged on to.', 'The account locked out.', 'error 0x80070775') {
+                (Get-AzlSonarConnectionFailureClass -Transport winrm -Message $m).Class | Should -Be 'lockedOut' -Because $m
+            }
+        }
+    }
+    It 'WinRM: broad words are not enough (the false positives): authentication mechanism, Kerberos, credential provider, timeouts, network errors' {
+        InModuleScope AzlSonar {
+            (Get-AzlSonarConnectionFailureClass -Transport winrm -Message 'The WinRM client cannot process the request. The authentication mechanism requested by the client is not supported (Kerberos, NTLM).').Class | Should -Be 'other'
+            (Get-AzlSonarConnectionFailureClass -Transport winrm -Message 'The credential provider failed to return a credential.').Class | Should -Be 'unreachable'
+            (Get-AzlSonarConnectionFailureClass -Transport winrm -Message 'No credentials are available in the security package.').Class | Should -Be 'unreachable'
+            (Get-AzlSonarConnectionFailureClass -Transport winrm -Message 'The operation has timed out.').Class | Should -Be 'unreachable'
+            (Get-AzlSonarConnectionFailureClass -Transport winrm -Message 'WinRM cannot complete the operation. Verify that the specified computer name is valid, that the computer is accessible over the network').Class | Should -Be 'unreachable'
+            (Get-AzlSonarConnectionFailureClass -Transport winrm -Message 'The network path was not found.').Class | Should -Be 'unreachable'
+            (Get-AzlSonarConnectionFailureClass -Transport winrm -Message 'Something else went wrong.').Class | Should -Be 'other'
+            (Get-AzlSonarConnectionFailureClass -Transport winrm -Message '').Class | Should -Be 'other'
+        }
+    }
+    It 'reads the exception chain and the transport message, not only the first message' {
+        InModuleScope AzlSonar {
+            $inner = [System.Exception]::new('Logon failure: unknown user name or bad password.')
+            $outer = [System.InvalidOperationException]::new('Connecting to the remote server failed.', $inner)
+            (Get-AzlSonarConnectionFailureClass -Transport winrm -Exception $outer).Class | Should -Be 'rejected'
+            $record = [System.Management.Automation.ErrorRecord]::new($outer, 'x', [System.Management.Automation.ErrorCategory]::AuthenticationError, $null)
+            (Get-AzlSonarConnectionFailureClass -Transport winrm -Exception $record).Class | Should -Be 'rejected'
+        }
+    }
+    It 'SSH: Permission denied (publickey,password) is a rejection; timeouts and network errors are not' {
+        InModuleScope AzlSonar {
+            (Get-AzlSonarConnectionFailureClass -Transport ssh -Message 'Permission denied (publickey,password).').Class | Should -Be 'rejected'
+            (Get-AzlSonarConnectionFailureClass -Transport ssh -Message 'Connection timed out.').Class | Should -Be 'unreachable'
+            (Get-AzlSonarConnectionFailureClass -Transport ssh -Message 'A connection attempt failed because the connected party did not respond').Class | Should -Be 'unreachable'
+            (Get-AzlSonarConnectionFailureClass -Transport ssh -Message 'Server response does not contain SSH protocol identification.').Class | Should -Be 'other'
+            (Get-AzlSonarConnectionFailureClass -Transport ssh -Message 'User account is locked out (0x80070775)').Class | Should -Be 'lockedOut'
+        }
+    }
+}
+
+Describe 'Masking a secret without keeping it' {
+    It 'a fingerprint holds no way back to the password and is not text' {
+        $f = InModuleScope AzlSonar { New-AzlSonarSecretFingerprint -Secret (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force) }
+        $f.Kind | Should -Be 'fingerprint'
+        $f.Length | Should -Be 20
+        $f.Salt.Length | Should -Be 16
+        ($f | ConvertTo-Json -Depth 4) | Should -Not -Match 'D0main'
+        ($f | Out-String) | Should -Not -Match 'D0main'
+        $f.Sha256 | Should -Match '^[0-9a-f]{64}$'
+    }
+    It 'Protect-AzlSonarText masks the password wherever it sits, as often as it occurs, and nothing near it' {
+        $text = InModuleScope AzlSonar {
+            $f = New-AzlSonarSecretFingerprint -Secret (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force)
+            [pscustomobject]@{
+                Start  = Protect-AzlSonarText -Text 'D0main-Pa55-not-real was rejected' -Secret @($f)
+                End    = Protect-AzlSonarText -Text 'tried with D0main-Pa55-not-real' -Secret @($f)
+                Middle = Protect-AzlSonarText -Text 'x=D0main-Pa55-not-real;y=D0main-Pa55-not-real!' -Secret @($f)
+                Only   = Protect-AzlSonarText -Text 'D0main-Pa55-not-real' -Secret @($f)
+                Near   = Protect-AzlSonarText -Text 'D0main-Pa55-not-rea1 and d0main-pa55-not-real and D0main-Pa55-not-real-x' -Secret @($f)
+                Short  = Protect-AzlSonarText -Text 'D0main' -Secret @($f)
+                Mixed  = Protect-AzlSonarText -Text 'token=abcd1234 D0main-Pa55-not-real' -Secret @('abcd1234', $f)
+                Empty  = Protect-AzlSonarText -Text '' -Secret @($f)
+            }
+        }
+        $text.Start | Should -Be '*** was rejected'
+        $text.End | Should -Be 'tried with ***'
+        $text.Middle | Should -Be 'x=***;y=***!'
+        $text.Only | Should -Be '***'
+        $text.Near | Should -Be 'D0main-Pa55-not-rea1 and d0main-pa55-not-real and ***-x'
+        $text.Short | Should -Be 'D0main'
+        $text.Mixed | Should -Be 'token=*** ***'
+        $text.Empty | Should -Be ''
+    }
+    It 'masks a password with unusual characters and a very long text quickly' {
+        $r = InModuleScope AzlSonar {
+            $f = New-AzlSonarSecretFingerprint -Secret (ConvertTo-SecureString 'pa$$ w0rd"{}\é' -AsPlainText -Force)
+            $long = ('x' * 200000) + 'pa$$ w0rd"{}\é' + ('y' * 200000)
+            $watch = [System.Diagnostics.Stopwatch]::StartNew()
+            $masked = Protect-AzlSonarText -Text $long -Secret @($f)
+            [pscustomobject]@{ Masked = $masked.Contains('***'); Leaked = $masked.Contains('w0rd'); Length = $masked.Length; Ms = $watch.ElapsedMilliseconds }
+        }
+        $r.Masked | Should -BeTrue
+        $r.Leaked | Should -BeFalse
+        $r.Length | Should -Be 400003
+        $r.Ms | Should -BeLessThan 5000
+    }
+    It 'registering a password replaces Shared.Redact with a new snapshot of fingerprints and keeps no plaintext, even in memory dumps of the table' {
+        $r = InModuleScope AzlSonar {
+            $shared = Initialize-AzlSonarSharedState
+            $before = $shared['Redact']
+            Add-AzlSonarRedaction -Shared $shared -Secret (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force)
+            Add-AzlSonarRedaction -Shared $shared -Secret (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force)
+            [pscustomobject]@{
+                Same = [object]::ReferenceEquals($before, $shared['Redact']); Count = @($shared['Redact']).Count; BeforeCount = @($before).Count
+                Strings = @(@($shared['Redact']) | Where-Object { $_ -is [string] }).Count
+                Text = (@($shared['Redact']) | ConvertTo-Json -Depth 5) + ((@($shared['Redact']) | Out-String))
+            }
+        }
+        $r.Same | Should -BeFalse
+        $r.BeforeCount | Should -Be 0
+        $r.Count | Should -Be 1 -Because 'the same password is registered once'
+        $r.Strings | Should -Be 0
+        $r.Text | Should -Not -Match 'D0main'
+    }
+}
+
+Describe 'Select-AzlSonarNodeAccount: the credential a connection opens with' {
+    BeforeEach {
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force); Version = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' } }
+    }
     It 'before the join: the local credential, and the Key Vault is not read' {
-        $r = & $script:Pick 'none'
+        $r = Invoke-AccountPick (New-AccountShared 'none')
         $r.UserName | Should -Be 'azl-admin'
-        $r.Account.kind | Should -Be 'local'
+        $r.Kind | Should -Be 'local'
         Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 0 -Exactly
     }
     It 'joined but DomainAdminsConfigured has not arrived: still the local credential, the Key Vault is not read, and the reason says why' {
-        $r = & $script:Pick 'joined'
+        $r = Invoke-AccountPick (New-AccountShared 'joined')
         $r.UserName | Should -Be 'azl-admin'
         $r.Password | Should -Be 'Local-Pa55-not-real'
-        $r.Account.kind | Should -Be 'local'
-        $r.Account.reason | Should -Be 'joined, waiting for domain administrators: using azl-admin'
-        $r.Account.warning | Should -Be ''
+        $r.Reason | Should -Be 'joined, waiting for domain administrators: using azl-admin'
+        $r.Warning | Should -Be ''
         Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 0 -Exactly
     }
-    It 'after DomainJoined and DomainAdminsConfigured: NETBIOS\user with the password from the Key Vault reference, and the password is masked from then on' {
-        $r = & $script:Pick 'both'
+    It 'after both events: the domain credential from the Key Vault reference; the password is masked by a fingerprint, with no plaintext kept in Shared' {
+        $shared = New-AccountShared 'both'
+        $r = Invoke-AccountPick $shared
         $r.UserName | Should -Be 'IIC\svc-join'
         $r.Password | Should -Be $script:Password
-        $r.Account.reason | Should -Be 'domain-joined: using IIC\svc-join'
-        $r.Redact | Should -Contain $script:Password
-        Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 1 -Exactly -ParameterFilter { $VaultName -eq 'kv-example-mgmt-01' -and $Name -eq 'svc-join-password' }
-        ($r.Info.Account | ConvertTo-Json -Depth 4) | Should -Not -Match 'D0main'
-    }
-    It 'the domain credential is read once and kept' {
-        $null = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig); L = $script:Local } {
-            param($C, $L)
-            $shared = Initialize-AzlSonarSharedState
-            Add-AzlSonarOsConfigEvent -Store $shared['OsConfigEvents'] -Line '{"timestamp":"2026-11-07T19:00:00Z","node":"node-01","state":"DomainJoined"}'
-            Add-AzlSonarOsConfigEvent -Store $shared['OsConfigEvents'] -Line '{"timestamp":"2026-11-07T19:01:00Z","node":"node-01","state":"DomainAdminsConfigured"}'
-            1..3 | ForEach-Object { $null = Select-AzlSonarNodeAccount -Shared $shared -Config $C -Node 'node-01' -Local $L }
+        $r.Reason | Should -Be 'domain-joined: using IIC\svc-join'
+        Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 1 -Exactly -ParameterFilter { $VaultName -eq 'kv-example-mgmt-01' -and $Name -eq 'svc-join-password' -and -not $Version }
+        $check = InModuleScope AzlSonar -Parameters @{ S = $shared } {
+            param($S)
+            [pscustomobject]@{
+                Strings = @(@($S['Redact']) | Where-Object { $_ -is [string] }).Count; Fingerprints = @(@($S['Redact']) | Where-Object { Test-AzlSonarFingerprint -Value $_ }).Count
+                Credential = $S['DomainCredential'] -is [pscredential]; Masked = Protect-AzlSonarText -Text 'rejected: D0main-Pa55-not-real' -Secret $S['Redact']
+                Dump = (@($S['Redact']) | ConvertTo-Json -Depth 5) + ($S['LogAccount'].Keys -join ',') + ($S['LogAccount'].Values | ConvertTo-Json -Depth 6)
+            }
         }
+        $check.Strings | Should -Be 0
+        $check.Fingerprints | Should -Be 1
+        $check.Credential | Should -BeTrue
+        $check.Masked | Should -Be 'rejected: ***'
+        $check.Dump | Should -Not -Match 'D0main'
+    }
+    It 'a pinned secret version is passed to Key Vault' {
+        $acc = [pscustomobject]@{ local = [pscustomobject]@{ username = 'azl-admin' }; domain = [pscustomobject]@{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'keyvault://kv-example-mgmt-01/svc-join-password/0123456789abcdef0123456789abcdef' } }
+        $r = Invoke-AccountPick (New-AccountShared 'both') 'node-01' 0 (New-AccountConfig 'ActiveDirectory' $acc)
+        $r.Kind | Should -Be 'domain'
+        Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 1 -Exactly -ParameterFilter { $Version -eq '0123456789abcdef0123456789abcdef' }
+    }
+    It 'the domain credential is read once and kept, for every node' {
+        $shared = New-AccountShared 'both'
+        1..3 | ForEach-Object { $null = Invoke-AccountPick $shared 'node-01' }
+        $null = Invoke-AccountPick $shared 'node-02'
+        $null = Invoke-AccountPick $shared 'node-03'
         Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 1 -Exactly
     }
-    It 'a domain account the node rejected: the local credential again, a warning, and it stays that way' {
-        $r = & $script:Pick 'both' (New-AccountConfig) $true
-        $r.UserName | Should -Be 'azl-admin'
-        $r.Account.kind | Should -Be 'local'
-        $r.Account.rejected | Should -BeTrue
-        $r.Account.warning | Should -Match 'IIC\\svc-join was rejected'
-        $r.Info.Rejected | Should -BeTrue
-        $r.Info.Message | Should -Be 'Access is denied.'
-        Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 0 -Exactly
-    }
-    It 'a Key Vault that cannot be read: the local credential and a reason that names the vault, never a secret' {
-        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { throw 'Forbidden: the caller is not authorized to get secrets.' }
-        $r = & $script:Pick 'both'
-        $r.UserName | Should -Be 'azl-admin'
-        $r.Account.kind | Should -Be 'local'
-        $r.Account.warning | Should -Match 'kv-example-mgmt-01'
-        $r.Account.warning | Should -Match 'svc-join-password'
-        $r.Account.warning | Should -Not -Match 'D0main'
-        $r.Info.Rejected | Should -BeTrue
-    }
-    It 'a password written in the file instead of a reference is refused, never used' {
+    It 'a password written in the file instead of a reference is refused, never used, and not echoed' {
         $bad = [pscustomobject]@{ local = [pscustomobject]@{ username = 'azl-admin' }; domain = [pscustomobject]@{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'Plain-Text-Pa55' } }
-        $r = & $script:Pick 'both' (New-AccountConfig 'ActiveDirectory' $bad)
+        $r = Invoke-AccountPick (New-AccountShared 'both') 'node-01' 0 (New-AccountConfig 'ActiveDirectory' $bad)
         $r.UserName | Should -Be 'azl-admin'
-        $r.Account.warning | Should -Match 'keyvault://'
+        $r.Warning | Should -Match 'keyvault://'
+        ($r.Warning + $r.Reason) | Should -Not -Match 'Plain-Text'
         Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 0 -Exactly
     }
 }
 
-Describe 'Test-AzlSonarAuthenticationFailure' {
-    It 'tells a refused account from an unreachable node' {
-        InModuleScope AzlSonar {
-            Test-AzlSonarAuthenticationFailure -Message 'WinRM: Access is denied.' | Should -BeTrue
-            Test-AzlSonarAuthenticationFailure -Message 'The user name or password is incorrect.' | Should -BeTrue
-            Test-AzlSonarAuthenticationFailure -Message 'Logon failure: unknown user name or bad password.' | Should -BeTrue
-            Test-AzlSonarAuthenticationFailure -Message 'The WinRM client cannot process the request. (Kerberos)' | Should -BeTrue
-            Test-AzlSonarAuthenticationFailure -Message 'WinRM cannot complete the operation: the computer is turned off or not reachable (timeout).' | Should -BeFalse
-            Test-AzlSonarAuthenticationFailure -Message '' | Should -BeFalse
+Describe 'The account-wide circuit breaker' {
+    BeforeEach {
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force); Version = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' } }
+    }
+    It 'the first rejection by any node stops the domain account for EVERY node, for 15 minutes' {
+        $shared = New-AccountShared 'both'
+        (Invoke-AccountPick $shared 'node-01').Kind | Should -Be 'domain'
+        Register-AccountResult $shared 'node-01' rejected 0 'Logon failure: unknown user name or bad password.'
+        $b = Get-AccountBreaker $shared
+        $b.State | Should -Be 'open'
+        $b.Failures | Should -Be 1
+        $b.BackoffMinutes | Should -Be 15
+        $b.NextProbeAt | Should -Be $script:T0.AddMinutes(15)
+        foreach ($n in 'node-01', 'node-02', 'node-03') {
+            $r = Invoke-AccountPick $shared $n 5
+            $r.Kind | Should -Be 'local' -Because $n
+            $r.UserName | Should -Be 'azl-admin'
+            $r.Reason | Should -Match 'paused for every node \(next check 20:15 UTC\)'
+            $r.Warning | Should -Match 'not locked out'
         }
+    }
+    It 'a rejected account is never presented again per poll: a hundred polls inside the back-off give the domain account to nobody' {
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        Register-AccountResult $shared 'node-02' rejected 0
+        $kinds = foreach ($i in 1..100) { (Invoke-AccountPick $shared ('node-0' + (1 + $i % 3)) (0.1 + $i * 0.1)).Kind }
+        @($kinds | Where-Object { $_ -eq 'domain' }).Count | Should -Be 0
+        Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 1 -Exactly -Because 'the secret is not even read again while the breaker is open'
+    }
+    It 'after the back-off exactly ONE probe is allowed at a time, whichever node asks first' {
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        Register-AccountResult $shared 'node-01' rejected 0
+        $first = Invoke-AccountPick $shared 'node-02' 16
+        $first.Probe | Should -BeTrue
+        $first.Kind | Should -Be 'domain'
+        $second = Invoke-AccountPick $shared 'node-03' 16.1
+        $second.Probe | Should -BeFalse
+        $second.Kind | Should -Be 'local'
+        $third = Invoke-AccountPick $shared 'node-01' 16.2
+        $third.Kind | Should -Be 'local'
+        (Get-AccountBreaker $shared).ProbeInFlight | Should -BeTrue
+    }
+    It 'a successful probe closes the breaker and resets the count' {
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        Register-AccountResult $shared 'node-01' rejected 0
+        $null = Invoke-AccountPick $shared 'node-02' 16
+        Register-AccountResult $shared 'node-02' ok 16.1
+        $b = Get-AccountBreaker $shared
+        $b.State | Should -Be 'closed'
+        $b.Failures | Should -Be 0
+        $b.BackoffMinutes | Should -Be 0
+        (Invoke-AccountPick $shared 'node-03' 17).Kind | Should -Be 'domain'
+    }
+    It 'a rejected probe doubles the back-off, and after maxRejections (2 by default) the breaker latches: no more probes, however long' {
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        Register-AccountResult $shared 'node-01' rejected 0
+        $probe = Invoke-AccountPick $shared 'node-02' 16
+        $probe.Probe | Should -BeTrue
+        Register-AccountResult $shared 'node-02' rejected 16.1
+        $b = Get-AccountBreaker $shared
+        $b.Failures | Should -Be 2
+        $b.BackoffMinutes | Should -Be 30
+        $b.State | Should -Be 'latched'
+        foreach ($m in 60, 600, 6000) {
+            $r = Invoke-AccountPick $shared 'node-01' $m
+            $r.Probe | Should -BeFalse
+            $r.Kind | Should -Be 'local'
+            $r.Reason | Should -Match 'stays paused until its password changes or Sonar restarts'
+        }
+    }
+    It 'with a higher maxRejections the back-off doubles 15, 30, 60, 120 and stays at 120' {
+        $acc = [pscustomobject]@{ local = [pscustomobject]@{ username = 'azl-admin' }; domain = [pscustomobject]@{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'keyvault://kv-example-mgmt-01/svc-join-password'; maxRejections = 5 } }
+        $cfg = New-AccountConfig 'ActiveDirectory' $acc
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01' 0 $cfg
+        $seen = @()
+        $clock = 0
+        foreach ($i in 1..5) {
+            Register-AccountResult $shared 'node-01' rejected $clock '' $cfg
+            $seen += (Get-AccountBreaker $shared).BackoffMinutes
+            $clock += 130
+            $p = Invoke-AccountPick $shared 'node-02' $clock $cfg
+            if ($i -lt 5) { $p.Probe | Should -BeTrue }
+        }
+        $seen | Should -Be @(15, 30, 60, 120, 120)
+        (Get-AccountBreaker $shared).State | Should -Be 'latched'
+    }
+    It 'a locked-out account opens the breaker at once for the longest back-off, with a warning' {
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        Register-AccountResult $shared 'node-01' lockedOut 0 'referenced account is currently locked out'
+        $b = Get-AccountBreaker $shared
+        $b.State | Should -Be 'open'
+        $b.BackoffMinutes | Should -Be 120
+        $b.LastClass | Should -Be 'lockedOut'
+        $r = Invoke-AccountPick $shared 'node-02' 10
+        $r.Kind | Should -Be 'local'
+        $r.Reason | Should -Match 'is locked out; the domain account is paused'
+        $r.Warning | Should -Match 'locked out in Active Directory'
+        (Invoke-AccountPick $shared 'node-02' 119).Kind | Should -Be 'local'
+        (Invoke-AccountPick $shared 'node-02' 121).Probe | Should -BeTrue
+    }
+    It 'authorization (logged on, not an administrator) does not trip the breaker: that node uses the local account for 5 minutes, the others keep the domain account' {
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        Register-AccountResult $shared 'node-01' authorization 0 'Access is denied.'
+        (Get-AccountBreaker $shared).State | Should -Be 'closed'
+        (Get-AccountBreaker $shared).Failures | Should -Be 0
+        $a = Invoke-AccountPick $shared 'node-01' 2
+        $a.Kind | Should -Be 'local'
+        $a.Reason | Should -Match 'is not an administrator of the node'
+        (Invoke-AccountPick $shared 'node-02' 2).Kind | Should -Be 'domain'
+        (Invoke-AccountPick $shared 'node-01' 6).Kind | Should -Be 'domain' -Because 'tried again after 5 minutes'
+    }
+    It 'unreachable and other errors change nothing, and a probe that never reached its node gives the slot back' {
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        Register-AccountResult $shared 'node-01' unreachable 0 'timed out'
+        Register-AccountResult $shared 'node-01' other 0 'what?'
+        $b = Get-AccountBreaker $shared
+        $b.State | Should -Be 'closed'; $b.Failures | Should -Be 0
+        Register-AccountResult $shared 'node-01' rejected 1
+        $probe = Invoke-AccountPick $shared 'node-02' 17
+        $probe.Probe | Should -BeTrue
+        Register-AccountResult $shared 'node-02' unreachable 17.1 'timed out'
+        $b = Get-AccountBreaker $shared
+        $b.State | Should -Be 'open'
+        $b.Failures | Should -Be 1 -Because 'an unreachable node says nothing about the account'
+        $b.ProbeInFlight | Should -BeFalse
+        (Invoke-AccountPick $shared 'node-03' 17.2).Probe | Should -BeTrue
+    }
+    It 'a changed secret version resets the breaker: the probe becomes an ordinary connection' {
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        Register-AccountResult $shared 'node-01' rejected 0
+        Register-AccountResult $shared 'node-01' rejected 1
+        (Get-AccountBreaker $shared).State | Should -Be 'latched'
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'New-Pa55-not-real' -AsPlainText -Force); Version = 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2' } }
+        # a latched breaker is left only by a changed password; its version is looked at once per back-off (Key Vault read, account not tried)
+        (Invoke-AccountPick $shared 'node-02' 20).Kind | Should -Be 'local' -Because 'not time to look yet'
+        Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 1 -Exactly -Because 'only the original read'
+        $r = Invoke-AccountPick $shared 'node-02' 32
+        $r.Kind | Should -Be 'domain'
+        $r.Probe | Should -BeFalse -Because 'an ordinary connection, not a probe'
+        $r.Password | Should -Be 'New-Pa55-not-real'
+        $b = Get-AccountBreaker $shared
+        $b.State | Should -Be 'closed'
+        $b.Failures | Should -Be 0
+        $b.SecretVersion | Should -Be 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2'
+        $masked = InModuleScope AzlSonar -Parameters @{ S = $shared } { param($S) Protect-AzlSonarText -Text 'old D0main-Pa55-not-real new New-Pa55-not-real' -Secret $S['Redact'] }
+        $masked | Should -Be 'old *** new ***' -Because 'the new password is masked too'
+    }
+    It 'a latched breaker whose secret has the same version stays latched, and is looked at again after the back-off, not on every poll' {
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        Register-AccountResult $shared 'node-01' rejected 0
+        Register-AccountResult $shared 'node-01' rejected 1
+        (Invoke-AccountPick $shared 'node-02' 32).Kind | Should -Be 'local'
+        (Invoke-AccountPick $shared 'node-03' 33).Kind | Should -Be 'local'
+        (Invoke-AccountPick $shared 'node-01' 40).Kind | Should -Be 'local'
+        Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 2 -Exactly -Because 'the first read was the original one; one version check since'
+        (Get-AccountBreaker $shared).State | Should -Be 'latched'
+        (Get-AccountBreaker $shared).Failures | Should -Be 2
+    }
+    It 'the breaker keeps no mutable nested tables: its records are replaced, and a copy held by a reader does not change' {
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        $held = Get-AccountBreaker $shared
+        Register-AccountResult $shared 'node-01' rejected 0
+        $held.State | Should -Be 'closed'
+        (Get-AccountBreaker $shared).State | Should -Be 'open'
+        $held -is [hashtable] | Should -BeFalse
+        $node = InModuleScope AzlSonar -Parameters @{ S = $shared } { param($S) $S['LogAccount']['node-01'] }
+        $node -is [hashtable] | Should -BeFalse
+    }
+}
+
+Describe 'A credential that cannot be had is not a rejection' {
+    It 'a Key Vault outage: the local account, nobody marked rejected, asked again after 1, 2 and then 5 minutes' {
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { throw 'Forbidden: the caller is not authorized to get secrets.' }
+        $shared = New-AccountShared 'both'
+        $r = Invoke-AccountPick $shared 'node-01' 0
+        $r.Kind | Should -Be 'local'
+        $r.UserName | Should -Be 'azl-admin'
+        $r.Reason | Should -Match 'the domain account is not available \(next check 20:01 UTC\)'
+        $r.Warning | Should -Match 'kv-example-mgmt-01'
+        $r.Warning | Should -Match 'svc-join-password'
+        (Get-AccountBreaker $shared).State | Should -Be 'closed'
+        (Get-AccountBreaker $shared).Failures | Should -Be 0
+        Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 1 -Exactly
+        $null = Invoke-AccountPick $shared 'node-02' 0.5
+        $null = Invoke-AccountPick $shared 'node-03' 0.9
+        Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 1 -Exactly -Because 'not asked again inside the minute'
+        $null = Invoke-AccountPick $shared 'node-01' 1.1
+        Should -Invoke Get-AzKeyVaultSecret -ModuleName AzlSonar -Times 2 -Exactly
+        # attempts at 0 (wait 1), 1.1 (wait 2), 3.2 (wait 5), 8.3 (wait 5), 14 (wait 5)
+        foreach ($t in 3.2, 8.3, 14) { $null = Invoke-AccountPick $shared 'node-01' $t }
+        $u = InModuleScope AzlSonar -Parameters @{ S = $shared } { param($S) $S['LogAccount']['*unavailable'] }
+        $u.Attempt | Should -Be 5
+        ($u.Until - $script:T0.AddMinutes(14)).TotalMinutes | Should -Be 5 -Because '1, 2, 5 and then 5 again'
+    }
+    It 'the first three waits are 1, 2 and 5 minutes' {
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { throw 'Forbidden' }
+        $shared = New-AccountShared 'both'
+        $waits = foreach ($t in 0, 1.5, 4) {
+            $null = Invoke-AccountPick $shared 'node-01' $t
+            $u = InModuleScope AzlSonar -Parameters @{ S = $shared } { param($S) $S['LogAccount']['*unavailable'].Until }
+            ($u - $script:T0.AddMinutes($t)).TotalMinutes
+        }
+        $waits | Should -Be @(1, 2, 5)
+    }
+    It 'a missing Az.KeyVault module and an expired Azure sign-in are the same class: unavailable, with the reason, and the node is not rejected' {
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { throw 'Run Connect-AzAccount to login.' }
+        $shared = New-AccountShared 'both'
+        $r = Invoke-AccountPick $shared 'node-01'
+        $r.Warning | Should -Match 'Connect-AzAccount'
+        (Get-AccountBreaker $shared).State | Should -Be 'closed'
+        Mock Get-Command -ModuleName AzlSonar { $null } -ParameterFilter { $Name -eq 'Get-AzKeyVaultSecret' }
+        $shared2 = New-AccountShared 'both'
+        $r2 = Invoke-AccountPick $shared2 'node-01'
+        $r2.Warning | Should -Match 'Az.KeyVault is not installed'
+        $r2.Kind | Should -Be 'local'
+        (Get-AccountBreaker $shared2).Failures | Should -Be 0
+    }
+    It 'when the Key Vault comes back the domain account is used and the unavailable record is cleared' {
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { throw 'Forbidden' }
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01' 0
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force); Version = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' } }
+        (Invoke-AccountPick $shared 'node-01' 2).Kind | Should -Be 'domain'
+        InModuleScope AzlSonar -Parameters @{ S = $shared } { param($S) $S['LogAccount']['*unavailable'] } | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Several nodes at once: one credential, one probe' {
+    It 'eight threads asking together read the secret once, register one fingerprint and get the same credential' {
+        $shared = New-AccountShared 'both'
+        $manifest = (Get-Module AzlSonar).Path
+        $counter = [hashtable]::Synchronized(@{ Reads = 0 })
+        $config = New-AccountConfig
+        $results = 1..8 | ForEach-Object -Parallel {
+            Import-Module $using:manifest -Force
+            if (-not (Get-Command Get-AzKeyVaultSecret -ErrorAction SilentlyContinue) -or $true) {
+                function global:Get-AzKeyVaultSecret { param([string]$VaultName, [string]$Name, [string]$Version) $c = $using:counter; [System.Threading.Monitor]::Enter($c); try { $c['Reads'] = [int]$c['Reads'] + 1 } finally { [System.Threading.Monitor]::Exit($c) }; Start-Sleep -Milliseconds 150; [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force); Version = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' } }
+            }
+            $module = Get-Module AzlSonar
+            & $module { param($S, $C, $N) $local = [pscredential]::new('azl-admin', (ConvertTo-SecureString 'Local-Pa55-not-real' -AsPlainText -Force)); $p = Select-AzlSonarNodeAccount -Shared $S -Config $C -Node $N -Local $local; $p.Credential.UserName } $using:shared $using:config ('node-0' + (1 + ($_ % 3)))
+        } -ThrottleLimit 8
+        @($results | Select-Object -Unique) | Should -Be @('IIC\svc-join')
+        $counter['Reads'] | Should -Be 1
+        $fingerprints = InModuleScope AzlSonar -Parameters @{ S = $shared } { param($S) @(@($S['Redact']) | Where-Object { Test-AzlSonarFingerprint -Value $_ }).Count }
+        $fingerprints | Should -Be 1
+    }
+    It 'eight threads asking together after the back-off give exactly one the probe' {
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force); Version = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' } }
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        Register-AccountResult $shared 'node-01' rejected 0
+        $manifest = (Get-Module AzlSonar).Path
+        $config = New-AccountConfig
+        $now = $script:T0.AddMinutes(20)
+        $probes = 1..8 | ForEach-Object -Parallel {
+            Import-Module $using:manifest -Force
+            function global:Get-AzKeyVaultSecret { param([string]$VaultName, [string]$Name, [string]$Version) [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force); Version = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' } }
+            $module = Get-Module AzlSonar
+            & $module { param($S, $C, $N, $T) $local = [pscredential]::new('azl-admin', (ConvertTo-SecureString 'Local-Pa55-not-real' -AsPlainText -Force)); (Select-AzlSonarNodeAccount -Shared $S -Config $C -Node $N -Local $local -Now $T).Probe } $using:shared $using:config ('node-0' + (1 + ($_ % 3))) $using:now
+        } -ThrottleLimit 8
+        @($probes | Where-Object { $_ -eq $true }).Count | Should -Be 1
+    }
+}
+
+Describe 'The password is never in the state, Details, the log pane, the page or an error message' {
+    It 'with a registered password, every served or stored text is clean' {
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force); Version = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' } }
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        Register-AccountResult $shared 'node-02' rejected 0 'Logon failure for IIC\svc-join with D0main-Pa55-not-real: the user name or password is incorrect.'
+        $out = InModuleScope AzlSonar -Parameters @{ S = $shared; C = (New-AccountConfig) } {
+            param($S, $C)
+            $state = Get-AzlSonarOsConfigurationState -Store $S['OsConfigEvents'] -Config $C -LogAccount $S['LogAccount'] -LocalUserName 'azl-admin'
+            $line = ConvertFrom-AzlSonarOsConfigEvent -Line '{"timestamp":"2026-11-07T19:06:00Z","node":"node-01","state":"DomainJoinFailed","step":"DomainJoin","level":"Error","evidence":"join failed for IIC\\svc-join with D0main-Pa55-not-real"}'
+            Add-AzlSonarLogLine -Shared $S -Line @($line)
+            $detail = Get-AzlSonarLogAccountDetail -Shared $S -AccountName 'IIC\svc-join' -MaxRejections 2
+            $classified = Get-AzlSonarConnectionFailureClass -Transport winrm -Message 'Logon failure with D0main-Pa55-not-real'
+            $private:err = try { Resolve-AzlSonarDomainCredential -Config (New-AccountConfigLocal) } catch { $_.Exception.Message }
+            [pscustomobject]@{
+                State = ConvertTo-AzlSonarJson ([ordered]@{ osConfiguration = $state }); Detail = ConvertTo-AzlSonarJson $detail
+                Lines = ConvertTo-AzlSonarJson @((Get-AzlSonarLogWindow -Shared $S).lines); Table = ($S['LogAccount'].Values | ConvertTo-Json -Depth 8)
+                Classified = ($classified | ConvertTo-Json -Depth 3)
+            }
+        }
+        foreach ($name in 'State', 'Detail', 'Lines', 'Table', 'Classified') {
+            $out.$name | Should -Not -Match 'D0main-Pa55-not-real' -Because $name
+            $out.$name | Should -Not -Match 'keyvault://|kv-example-mgmt-01|svc-join-password' -Because $name
+        }
+        $out.Lines | Should -Match '\*\*\*'
+        $out.State | Should -Match 'IIC\\\\svc-join'
+        $out.Detail | Should -Match '"state":"open"'
+    }
+    It 'the rejection message kept for a node is masked before it is stored' {
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force); Version = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' } }
+        $shared = New-AccountShared 'both'
+        $null = Invoke-AccountPick $shared 'node-01'
+        Register-AccountResult $shared 'node-01' authorization 0 'Access is denied for D0main-Pa55-not-real.'
+        $msg = InModuleScope AzlSonar -Parameters @{ S = $shared } { param($S) $S['LogAccount']['node-01'].Message }
+        $msg | Should -Be 'Access is denied for ***.'
+    }
+    It 'an error from Resolve-AzlSonarDomainCredential names the vault and the secret, never a value' {
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { throw 'The vault says no.' }
+        $msg = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig) } { param($C) try { Resolve-AzlSonarDomainCredential -Config $C } catch { $_.Exception.Message } }
+        $msg | Should -Match "Key Vault 'kv-example-mgmt-01' \(secret 'svc-join-password'\)"
+        $msg | Should -Not -Match 'Pa55'
+    }
+}
+
+Describe 'Details: the breaker of the domain account' {
+    It 'shows the account name, the state and the next check, and nothing secret' {
+        $shared = New-AccountShared 'both'
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force); Version = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' } }
+        $null = Invoke-AccountPick $shared 'node-01'
+        $closed = InModuleScope AzlSonar -Parameters @{ S = $shared } { param($S) Get-AzlSonarLogAccountDetail -Shared $S -AccountName 'IIC\svc-join' -MaxRejections 2 -Now ([datetime]'2026-11-07T20:00:00Z') }
+        $closed.account | Should -Be 'IIC\svc-join'
+        $closed.state | Should -Be 'closed'
+        $closed.credential | Should -Be 'ready'
+        $closed.nextProbeAt | Should -BeNullOrEmpty
+        Register-AccountResult $shared 'node-01' rejected 0
+        $open = InModuleScope AzlSonar -Parameters @{ S = $shared } { param($S) Get-AzlSonarLogAccountDetail -Shared $S -AccountName 'IIC\svc-join' -MaxRejections 2 }
+        $open.state | Should -Be 'open'
+        $open.failures | Should -Be 1
+        $open.maxRejections | Should -Be 2
+        $open.backoffMinutes | Should -Be 15
+        $open.nextProbeAt | Should -Be '2026-11-07T20:15:00Z'
+        $open.lastClass | Should -Be 'rejected'
+    }
+    It 'Get-AzlSonarDetail carries it, from the facts of the config' {
+        $cfgObj = New-SonarConfigObject
+        $cfgObj | Add-Member -NotePropertyName identityModel -NotePropertyValue 'ActiveDirectory' -Force
+        $cfgObj | Add-Member -NotePropertyName logAccounts -NotePropertyValue ([pscustomobject]@{ local = [pscustomobject]@{ username = 'azl-admin' }; domain = [pscustomobject]@{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'keyvault://kv-example/svc-join-password'; maxRejections = 3 } }) -Force
+        $cfg = InModuleScope AzlSonar -Parameters @{ Json = (ConvertTo-SonarConfigJson $cfgObj) } { param($Json) Read-AzlSonarConfig -Json $Json }
+        $detail = InModuleScope AzlSonar -Parameters @{ C = $cfg } {
+            param($C)
+            $shared = Initialize-AzlSonarSharedState
+            Register-AzlSonarAccountResult -Shared $shared -Config $C -Node 'node01' -Class rejected
+            Get-AzlSonarDetail -Server @{ Mode = 'live'; Shared = $shared; Facts = (New-AzlSonarDetailFact -Config $C); Version = '1.0.0'; ClusterName = 'clus01' }
+        }
+        $detail.logAccount.account | Should -Be 'IIC\svc-join'
+        $detail.logAccount.state | Should -Be 'open'
+        $detail.logAccount.maxRejections | Should -Be 3
+        ($detail | ConvertTo-Json -Depth 10) | Should -Not -Match 'keyvault://|svc-join-password'
     }
 }
 
@@ -277,7 +778,7 @@ Describe 'DomainJoin in the OS configuration steps' {
         $steps = @($s.nodes[0].tree).osc.step
         $steps.IndexOf('DomainJoin') | Should -Be ($steps.IndexOf('Hostname') + 1)
     }
-    It 'planned, applying, joined, and failed with the AD error text' {
+    It 'planned, applying, joined (waiting for the administrators), configured, and failed with the AD error text' {
         $plan = New-AccountLine '2026-11-07T19:01:00Z' 'node-01' 'DomainJoinPlanned' 'Change: join iic.example.test (OU=Servers)' @{ action = 'Change'; current = 'workgroup WORKGROUP'; desired = 'iic.example.test' }
         $s = & $script:BuildJoin @($script:Start, $plan)
         (& $script:JoinStep $s).osc.stage | Should -Be 'planned'
@@ -285,21 +786,17 @@ Describe 'DomainJoin in the OS configuration steps' {
         $applying = & $script:BuildJoin @($script:Start, $plan, (New-AccountLine '2026-11-07T19:02:00Z' 'node-01' 'DomainJoinApplying' 'Add-Computer started'))
         (& $script:JoinStep $applying).osc.stage | Should -Be 'changing'
         (& $script:JoinStep $applying).status | Should -Be 'running'
-        $joined = & $script:BuildJoin @($script:Start, $plan, (New-AccountLine '2026-11-07T19:02:00Z' 'node-01' 'DomainJoinApplying' 'x'), (New-AccountLine '2026-11-07T19:04:00Z' 'node-01' 'DomainJoined' 'joined iic.example.test'))
+        $joined = & $script:BuildJoin @($script:Start, $plan, (New-AccountLine '2026-11-07T19:04:00Z' 'node-01' 'DomainJoined' 'joined iic.example.test'))
         (& $script:JoinStep $joined).osc.stage | Should -Be 'applied'
-        (& $script:JoinStep $joined).status | Should -Be 'success'
         $joined.nodes[0].domainJoined | Should -BeTrue
         $joined.nodes[0].domainAdminsConfigured | Should -BeFalse
         $joined.nodes[0].logAccount.reason | Should -Be 'joined, waiting for domain administrators: using azl-admin'
-        $joined.nodes[0].logAccount.waitingForAdmins | Should -BeTrue
-        $admins = & $script:BuildJoin @($script:Start, $plan, (New-AccountLine '2026-11-07T19:04:00Z' 'node-01' 'DomainJoined' 'joined iic.example.test'), (New-AccountLine '2026-11-07T19:05:00Z' 'node-01' 'DomainAdminsConfigured' 'the LCM user IIC\svc-lcm was added to the local Administrators'))
+        $admins = & $script:BuildJoin @($script:Start, $plan, (New-AccountLine '2026-11-07T19:04:00Z' 'node-01' 'DomainJoined' 'joined'), (New-AccountLine '2026-11-07T19:05:00Z' 'node-01' 'DomainAdminsConfigured' 'IIC\svc-join was added to the local Administrators'))
         $admins.nodes[0].domainAdminsConfigured | Should -BeTrue
         $admins.nodes[0].logAccount.kind | Should -Be 'domain'
-        (& $script:JoinStep $admins).osc.stage | Should -Be 'applied'
         (& $script:JoinStep $admins).description | Should -Match 'was added to the local Administrators'
-        $failed = & $script:BuildJoin @($script:Start, $plan, (New-AccountLine '2026-11-07T19:02:00Z' 'node-01' 'DomainJoinApplying' 'x'), (New-AccountLine '2026-11-07T19:03:00Z' 'node-01' 'DomainJoinFailed' 'Add-Computer: The specified domain either does not exist or could not be contacted.'))
+        $failed = & $script:BuildJoin @($script:Start, $plan, (New-AccountLine '2026-11-07T19:03:00Z' 'node-01' 'DomainJoinFailed' 'Add-Computer: The specified domain either does not exist or could not be contacted.'))
         (& $script:JoinStep $failed).osc.stage | Should -Be 'failed'
-        (& $script:JoinStep $failed).status | Should -Be 'error'
         @((& $script:JoinStep $failed).errors)[0] | Should -Match 'specified domain either does not exist'
         $failed.nodes[0].domainJoined | Should -BeFalse
     }
@@ -310,143 +807,128 @@ Describe 'DomainJoin in the OS configuration steps' {
     }
 }
 
-Describe 'the account per node in the state, the Details and the page model' {
-    It 'every machine says which account reads its logs and why; a join switches it' {
+Describe 'The account per node in the state' {
+    It 'every machine says which account reads its logs and why; the breaker shows on every node, a node-only authorization on that node only' {
         $s = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig) } {
             param($C)
             $store = [hashtable]::Synchronized(@{})
-            Add-AzlSonarOsConfigEvent -Store $store -Line '{"timestamp":"2026-11-07T19:00:00Z","node":"node-01","state":"NodeStarted"}'
-            Add-AzlSonarOsConfigEvent -Store $store -Line '{"timestamp":"2026-11-07T19:05:00Z","node":"node-02","step":"DomainJoin","state":"DomainJoined"}'
-            Add-AzlSonarOsConfigEvent -Store $store -Line '{"timestamp":"2026-11-07T19:06:00Z","node":"node-02","step":"DomainJoin","state":"DomainAdminsConfigured"}'
-            Get-AzlSonarOsConfigurationState -Store $store -Config $C -LocalUserName 'azl-admin'
-        }
-        $s.nodes[0].logAccount.reason | Should -Be 'workgroup: using azl-admin'
-        $s.nodes[0].logAccount.kind | Should -Be 'local'
-        $s.nodes[1].logAccount.reason | Should -Be 'domain-joined: using IIC\svc-join'
-        $s.nodes[1].logAccount.userName | Should -Be 'IIC\svc-join'
-        $s.nodes[1].domainJoined | Should -BeTrue
-    }
-    It 'a rejected domain account is a warning on the machine and in the state warnings' {
-        $s = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig) } {
-            param($C)
-            $store = [hashtable]::Synchronized(@{})
-            Add-AzlSonarOsConfigEvent -Store $store -Line '{"timestamp":"2026-11-07T19:05:00Z","node":"node-01","step":"DomainJoin","state":"DomainJoined"}'
-            Add-AzlSonarOsConfigEvent -Store $store -Line '{"timestamp":"2026-11-07T19:06:00Z","node":"node-01","step":"DomainJoin","state":"DomainAdminsConfigured"}'
-            $info = [hashtable]::Synchronized(@{}); $info['node-01'] = @{ Rejected = $true; Message = 'Access is denied.' }
-            Get-AzlSonarOsConfigurationState -Store $store -Config $C -LogAccount $info -LocalUserName 'azl-admin'
-        }
-        $s.nodes[0].logAccount.kind | Should -Be 'local'
-        $s.nodes[0].logAccount.warning | Should -Match 'rejected'
-        ($s.warnings -join ' ') | Should -Match 'IIC\\svc-join was rejected'
-    }
-    It 'the Details pop-down facts carry no password, no Key Vault name and no secret name' {
-        $json = '{"subscriptionId":"00000000-0000-0000-0000-000000000000","resourceGroup":"rg-example-azl","clusterName":"clus01","identityModel":"ActiveDirectory","nodes":[{"name":"node-01","address":"192.0.2.11","seed":true}],"logAccounts":{"local":{"username":"azl-admin"},"domain":{"netbios":"IIC","username":"svc-join","passwordRef":"keyvault://kv-secret-vault-name/svc-join-password"}}}'
-        $facts = InModuleScope AzlSonar -Parameters @{ J = $json } { param($J) New-AzlSonarDetailFact -Config (Read-AzlSonarConfig -Json $J) }
-        ($facts | ConvertTo-Json -Depth 8) | Should -Not -Match 'kv-secret-vault-name|svc-join-password|keyvault://'
-    }
-    It 'the state, the public config and the log lines never carry the password, the vault or the reference' {
-        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force) } }
-        $r = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig) } {
-            param($C)
-            $shared = Initialize-AzlSonarSharedState
-            $local = [pscredential]::new('azl-admin', (ConvertTo-SecureString 'Local-Pa55-not-real' -AsPlainText -Force))
-            $shared['LocalUserName'] = 'azl-admin'
-            Add-AzlSonarOsConfigEvent -Store $shared['OsConfigEvents'] -Line '{"timestamp":"2026-11-07T19:05:00Z","node":"node-01","step":"DomainJoin","state":"DomainJoined"}'
-            Add-AzlSonarOsConfigEvent -Store $shared['OsConfigEvents'] -Line '{"timestamp":"2026-11-07T19:06:00Z","node":"node-01","step":"DomainJoin","state":"DomainAdminsConfigured"}'
-            $null = Select-AzlSonarNodeAccount -Shared $shared -Config $C -Node 'node-01' -Local $local
-            # an event whose text carries the password is masked on its way into the log pane
-            $line = ConvertFrom-AzlSonarOsConfigEvent -Line '{"timestamp":"2026-11-07T19:06:00Z","node":"node-01","state":"DomainJoinFailed","step":"DomainJoin","level":"Error","evidence":"join failed for IIC\\svc-join with D0main-Pa55-not-real"}'
-            Add-AzlSonarLogLine -Shared $shared -Line @($line)
-            $state = Get-AzlSonarOsConfigurationState -Store $shared['OsConfigEvents'] -Config $C -LogAccount $shared['LogAccount'] -LocalUserName 'azl-admin'
-            [pscustomobject]@{
-                State = ConvertTo-AzlSonarJson ([ordered]@{ osConfiguration = $state })
-                Lines = ConvertTo-AzlSonarJson @((Get-AzlSonarLogWindow -Shared $shared).lines)
-                Public = ConvertTo-AzlSonarJson (ConvertTo-AzlSonarPublicConfig -Config (Read-AzlSonarConfig -Json '{"subscriptionId":"00000000-0000-0000-0000-000000000000","resourceGroup":"rg","clusterName":"c","identityModel":"ActiveDirectory","nodes":[{"name":"node-01","address":"192.0.2.11","seed":true}],"logAccounts":{"local":{"username":"azl-admin"},"domain":{"netbios":"IIC","username":"svc-join","passwordRef":"keyvault://kv-example-mgmt-01/svc-join-password"}}}') -StartedAt ([datetime]::UtcNow) -ServerId 'x')
+            foreach ($n in 'node-01', 'node-02', 'node-03') {
+                Add-AzlSonarOsConfigEvent -Store $store -Line ('{"timestamp":"2026-11-07T19:05:00Z","node":"' + $n + '","step":"DomainJoin","state":"DomainJoined"}')
             }
+            foreach ($n in 'node-02', 'node-03') { Add-AzlSonarOsConfigEvent -Store $store -Line ('{"timestamp":"2026-11-07T19:06:00Z","node":"' + $n + '","step":"DomainJoin","state":"DomainAdminsConfigured"}') }
+            $table = [hashtable]::Synchronized(@{})
+            $table['node-03'] = [pscustomobject]@{ Node = 'node-03'; Kind = 'authorization'; Until = [datetime]::UtcNow.AddMinutes(5); Message = ''; Rejected = $false }
+            Get-AzlSonarOsConfigurationState -Store $store -Config $C -LogAccount $table -LocalUserName 'azl-admin'
         }
-        foreach ($text in $r.State, $r.Lines, $r.Public) {
-            $text | Should -Not -Match 'D0main-Pa55-not-real|Local-Pa55-not-real'
-            $text | Should -Not -Match 'keyvault://|kv-example-mgmt-01|svc-join-password'
+        $s.nodes[0].logAccount.reason | Should -Be 'joined, waiting for domain administrators: using azl-admin'
+        $s.nodes[1].logAccount.reason | Should -Be 'domain-joined: using IIC\svc-join'
+        $s.nodes[2].logAccount.reason | Should -Match 'is not an administrator of the node'
+        ($s.warnings -join ' ') | Should -Match 'logged on to node-03'
+    }
+    It 'an open breaker is a warning on every domain-ready machine' {
+        $s = InModuleScope AzlSonar -Parameters @{ C = (New-AccountConfig) } {
+            param($C)
+            $store = [hashtable]::Synchronized(@{})
+            foreach ($n in 'node-01', 'node-02') {
+                Add-AzlSonarOsConfigEvent -Store $store -Line ('{"timestamp":"2026-11-07T19:05:00Z","node":"' + $n + '","step":"DomainJoin","state":"DomainJoined"}')
+                Add-AzlSonarOsConfigEvent -Store $store -Line ('{"timestamp":"2026-11-07T19:06:00Z","node":"' + $n + '","step":"DomainJoin","state":"DomainAdminsConfigured"}')
+            }
+            $shared = Initialize-AzlSonarSharedState
+            Register-AzlSonarAccountResult -Shared $shared -Config $C -Node 'node-01' -Class rejected
+            Get-AzlSonarOsConfigurationState -Store $store -Config $C -LogAccount $shared['LogAccount'] -LocalUserName 'azl-admin'
         }
-        $r.State | Should -Match 'IIC\\\\svc-join'
-        $r.Lines | Should -Match '\*\*\*'
+        $s.nodes[0].logAccount.kind | Should -Be 'local'
+        $s.nodes[1].logAccount.kind | Should -Be 'local'
+        $s.nodes[1].logAccount.reason | Should -Match 'paused for every node'
+        ($s.warnings -join ' ') | Should -Match 'IIC\\svc-join'
     }
 }
 
 Describe 'logAccounts in the config and the master file' {
-    It 'is read from a config file, checked, and never takes a password' {
+    It 'is read from a config file, checked, never takes a password, and validates the reference like Azure does' {
         $good = New-SonarConfigObject
-        $good | Add-Member -NotePropertyName logAccounts -NotePropertyValue ([pscustomobject]@{ local = [pscustomobject]@{ username = 'azl-admin' }; domain = [pscustomobject]@{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'keyvault://kv-example/svc-join-password' } }) -Force
+        $good | Add-Member -NotePropertyName logAccounts -NotePropertyValue ([pscustomobject]@{ local = [pscustomobject]@{ username = 'azl-admin' }; domain = [pscustomobject]@{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'keyvault://kv-example/svc-join-password/0123456789abcdef0123456789abcdef'; maxRejections = 3 } }) -Force
         $cfg = InModuleScope AzlSonar -Parameters @{ Json = (ConvertTo-SonarConfigJson $good) } { param($Json) Read-AzlSonarConfig -Json $Json }
         $cfg.logAccounts.domain.username | Should -Be 'svc-join'
-        $cfg.logAccounts.domain.passwordRef | Should -Be 'keyvault://kv-example/svc-join-password'
+        $cfg.logAccounts.domain.passwordRef | Should -Be 'keyvault://kv-example/svc-join-password/0123456789abcdef0123456789abcdef'
+        $cfg.logAccounts.domain.maxRejections | Should -Be 3
         $plain = InModuleScope AzlSonar -Parameters @{ Json = (ConvertTo-SonarConfigJson (New-SonarConfigObject)) } { param($Json) Read-AzlSonarConfig -Json $Json }
         $plain.logAccounts.domain.username | Should -Be ''
-        foreach ($case in @{ Domain = @{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'Plain-Pa55' } }, @{ Domain = @{ netbios = 'IIC'; username = 'svc-join'; password = 'x' } }, @{ Domain = @{ netbios = ' '; username = 'svc-join' } }) {
+        $plain.logAccounts.domain.maxRejections | Should -Be 2
+        $cases = @(
+            @{ Domain = @{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'Plain-Pa55' }; Match = 'is not a keyvault://' },
+            @{ Domain = @{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'keyvault://ab/secret' }; Match = 'vault that Azure would not accept' },
+            @{ Domain = @{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'keyvault://kv-example/secret/xyz' }; Match = '32 hexadecimal' },
+            @{ Domain = @{ netbios = 'IIC'; username = 'svc-join'; password = 'x' }; Match = 'refused' },
+            @{ Domain = @{ netbios = ' '; username = 'svc-join' }; Match = 'must be text' },
+            @{ Domain = @{ netbios = 'IIC'; username = 'svc-join'; maxRejections = 9 }; Match = 'maxRejections' })
+        foreach ($case in $cases) {
             $bad = New-SonarConfigObject
             $bad | Add-Member -NotePropertyName logAccounts -NotePropertyValue ([pscustomobject]@{ domain = [pscustomobject]$case.Domain }) -Force
             $problems = InModuleScope AzlSonar -Parameters @{ C = $bad } { param($C) Test-AzlSonarConfig -Config $C }
             ($problems -match 'logAccounts') | Should -Not -BeNullOrEmpty
+            ($problems -join ' ') | Should -Match $case.Match
+            ($problems -join ' ') | Should -Not -Match 'Plain-Pa55'
         }
     }
-    It 'the master file import uses the LCM user (identity.active_directory.lcm_user) as the domain account when there is no override' {
+    It 'the master file import uses identity.active_directory.domain_join_account: names and a keyvault reference (pinned versions kept)' {
         $yaml = (Get-Content -LiteralPath (Join-Path $script:SonarRepoRoot 'tests/fixtures/infrastructure.3node.yml') -Raw)
-        $yaml = $yaml -replace '(?m)^(    password: "keyvault://kv-example-mgmt-01/local-admin-password"\r?\n)', ('$1' + "  active_directory:`n    netbios_name: `"IIC`"`n    lcm_user:`n      username: `"svc-lcm`"`n      password: `"keyvault://kv-example-mgmt-01/lcm-password`"`n")
-        $file = Join-Path $TestDrive 'ad-lcm.yml'
-        Set-Content -LiteralPath $file -Value $yaml
-        $config = Read-AzlSonarConfig -InfrastructureFile $file 3>$null
-        $config.logAccounts.local.username | Should -Be 'azl-admin'
-        $config.logAccounts.domain.netbios | Should -Be 'IIC'
-        $config.logAccounts.domain.username | Should -Be 'svc-lcm'
-        $config.logAccounts.domain.source | Should -Be 'lcm_user'
-        $config.logAccounts.domain.passwordRef | Should -Be 'keyvault://kv-example-mgmt-01/lcm-password'
-    }
-    It 'the optional domain_join_account overrides the LCM user' {
-        $yaml = (Get-Content -LiteralPath (Join-Path $script:SonarRepoRoot 'tests/fixtures/infrastructure.3node.yml') -Raw)
-        $yaml = $yaml -replace '(?m)^(    password: "keyvault://kv-example-mgmt-01/local-admin-password"\r?\n)', ('$1' + "  active_directory:`n    netbios_name: `"IIC`"`n    lcm_user:`n      username: `"svc-lcm`"`n      password: `"keyvault://kv-example-mgmt-01/lcm-password`"`n    domain_join_account:`n      username: `"svc-join`"`n      password: `"keyvault://kv-example-mgmt-01/svc-join-password`"`n")
-        $file = Join-Path $TestDrive 'ad-override.yml'
-        Set-Content -LiteralPath $file -Value $yaml
-        $config = Read-AzlSonarConfig -InfrastructureFile $file 3>$null
-        $config.logAccounts.domain.username | Should -Be 'svc-join'
-        $config.logAccounts.domain.source | Should -Be 'domain_join_account'
-        $config.logAccounts.domain.passwordRef | Should -Be 'keyvault://kv-example-mgmt-01/svc-join-password'
-        $a = InModuleScope AzlSonar -Parameters @{ C = $config } { param($C) Get-AzlSonarLogAccount -Config $C -Node 'n' -DomainJoined $true -AdminsConfigured $true }
-        $a.userName | Should -Be 'IIC\svc-join'
-    }
-    It 'the master file import reads identity.local_admin and identity.active_directory.domain_join_account, keeping only names and a keyvault reference' {
-        $yaml = (Get-Content -LiteralPath (Join-Path $script:SonarRepoRoot 'tests/fixtures/infrastructure.3node.yml') -Raw)
-        $yaml = $yaml -replace '(?m)^(    password: "keyvault://kv-example-mgmt-01/local-admin-password"\r?\n)', ('$1' + "  active_directory:`n    netbios_name: `"IIC`"`n    domain_join_account:`n      username: `"svc-join`"`n      password: `"keyvault://kv-example-mgmt-01/svc-join-password`"`n")
+        $yaml = $yaml -replace '(?m)^(    password: "keyvault://kv-example-mgmt-01/local-admin-password"\r?\n)', ('$1' + "  active_directory:`n    netbios_name: `"IIC`"`n    domain_join_account:`n      username: `"svc-join`"`n      password: `"keyvault://kv-example-mgmt-01/svc-join-password/0123456789abcdef0123456789abcdef`"`n")
         $file = Join-Path $TestDrive 'ad.yml'
         Set-Content -LiteralPath $file -Value $yaml
         $config = Read-AzlSonarConfig -InfrastructureFile $file 3>$null
         $config.logAccounts.local.username | Should -Be 'azl-admin'
         $config.logAccounts.domain.netbios | Should -Be 'IIC'
         $config.logAccounts.domain.username | Should -Be 'svc-join'
-        $config.logAccounts.domain.passwordRef | Should -Be 'keyvault://kv-example-mgmt-01/svc-join-password'
+        $config.logAccounts.domain.passwordRef | Should -Be 'keyvault://kv-example-mgmt-01/svc-join-password/0123456789abcdef0123456789abcdef'
     }
-    It 'a master file with neither lcm_user nor domain_join_account still imports (read defensively): no domain account' {
+    It 'never uses the LCM user: not as the domain account, not as a fallback, even when the file names it' {
+        $yaml = (Get-Content -LiteralPath (Join-Path $script:SonarRepoRoot 'tests/fixtures/infrastructure.3node.yml') -Raw)
+        $withLcm = $yaml -replace '(?m)^(    password: "keyvault://kv-example-mgmt-01/local-admin-password"\r?\n)', ('$1' + "  active_directory:`n    netbios_name: `"IIC`"`n    lcm_user:`n      username: `"svc-lcm`"`n      password: `"keyvault://kv-example-mgmt-01/lcm-password`"`n")
+        $file = Join-Path $TestDrive 'ad-lcm-only.yml'
+        Set-Content -LiteralPath $file -Value $withLcm
+        $config = Read-AzlSonarConfig -InfrastructureFile $file 3>$null
+        $config.logAccounts.domain.username | Should -Be '' -Because 'no domain_join_account: no domain account, the local account stays'
+        $config.logAccounts.domain.passwordRef | Should -Be ''
+        ($config | ConvertTo-Json -Depth 8) | Should -Not -Match 'svc-lcm|lcm-password'
+        $both = $yaml -replace '(?m)^(    password: "keyvault://kv-example-mgmt-01/local-admin-password"\r?\n)', ('$1' + "  active_directory:`n    netbios_name: `"IIC`"`n    lcm_user:`n      username: `"svc-lcm`"`n      password: `"keyvault://kv-example-mgmt-01/lcm-password`"`n    domain_join_account:`n      username: `"svc-join`"`n      password: `"keyvault://kv-example-mgmt-01/svc-join-password`"`n")
+        $file2 = Join-Path $TestDrive 'ad-both.yml'
+        Set-Content -LiteralPath $file2 -Value $both
+        $c2 = Read-AzlSonarConfig -InfrastructureFile $file2 3>$null
+        $c2.logAccounts.domain.username | Should -Be 'svc-join'
+        ($c2 | ConvertTo-Json -Depth 8) | Should -Not -Match 'svc-lcm|lcm-password'
+        $src = (Get-ChildItem (Join-Path $script:SonarRepoRoot 'src/AzlSonar/Private') -Filter '*.ps1' | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
+        ([regex]::Matches($src, "Get-AzlSonarInfrastructureValue[^\r\n]*lcm_user")).Count | Should -Be 0 -Because 'no code reads the LCM user'
+    }
+    It 'a master file with no domain_join_account still imports (read defensively): the local account only' {
         $config = Read-AzlSonarConfig -InfrastructureFile (Join-Path $script:SonarRepoRoot 'tests/fixtures/infrastructure.3node.yml') 3>$null
         $config.logAccounts.local.username | Should -Be 'azl-admin'
         $config.logAccounts.domain.username | Should -Be ''
     }
-    It 'a plain password written where the reference belongs is dropped on import' {
+    It 'a password that is not a valid keyvault reference stops the import with a clear message that does not echo it' {
         $yaml = (Get-Content -LiteralPath (Join-Path $script:SonarRepoRoot 'tests/fixtures/infrastructure.3node.yml') -Raw)
-        $yaml = $yaml -replace '(?m)^(    password: "keyvault://kv-example-mgmt-01/local-admin-password"\r?\n)', ('$1' + "  active_directory:`n    netbios_name: `"IIC`"`n    domain_join_account:`n      username: `"svc-join`"`n      password: `"Plain-Text-Pa55`"`n")
-        $file = Join-Path $TestDrive 'ad-plain.yml'
-        Set-Content -LiteralPath $file -Value $yaml
-        $config = Read-AzlSonarConfig -InfrastructureFile $file 3>$null
-        $config.logAccounts.domain.passwordRef | Should -Be ''
-        ($config | ConvertTo-Json -Depth 8) | Should -Not -Match 'Plain-Text-Pa55'
+        foreach ($case in @(@{ Value = 'Plain-Text-Pa55'; Match = 'keyvault://<vault>/<secret>' }, @{ Value = 'keyvault://ab/secret'; Match = 'vault that Azure would not accept' }, @{ Value = 'keyvault://kv-example/secret/nothex'; Match = '32 hexadecimal' })) {
+            $text = $yaml -replace '(?m)^(    password: "keyvault://kv-example-mgmt-01/local-admin-password"\r?\n)', ('$1' + "  active_directory:`n    netbios_name: `"IIC`"`n    domain_join_account:`n      username: `"svc-join`"`n      password: `"$($case.Value)`"`n")
+            $file = Join-Path $TestDrive ('ad-bad-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.yml')
+            Set-Content -LiteralPath $file -Value $text
+            $err = try { Read-AzlSonarConfig -InfrastructureFile $file 3>$null; '' } catch { $_.Exception.Message }
+            $err | Should -Match 'identity\.active_directory\.domain_join_account\.password'
+            $err | Should -Match $case.Match
+            $err | Should -Not -Match 'Plain-Text-Pa55'
+        }
     }
-    It 'is documented in docs/config.md and docs/log-access.md' {
+    It 'is documented in docs/config.md and docs/log-access.md, with the breaker and the error classes, and says the LCM user is not used' {
         $config = Get-Content -LiteralPath (Join-Path $script:SonarRepoRoot 'docs/config.md') -Raw
         $log = Get-Content -LiteralPath (Join-Path $script:SonarRepoRoot 'docs/log-access.md') -Raw
         $config | Should -Match 'identity\.active_directory\.domain_join_account'
-        $config | Should -Match 'identity\.active_directory\.lcm_user'
         $config | Should -Match 'logAccounts'
+        $config | Should -Match 'maxRejections'
+        $config | Should -Match 'lcm_user'
         $log | Should -Match 'DomainJoined'
         $log | Should -Match 'DomainAdminsConfigured'
-        $log | Should -Match 'lcm_user'
         $log | Should -Match 'domain_join_account'
+        $log | Should -Match 'circuit breaker'
+        $log | Should -Match 'credentialUnavailable|not available'
+        $log | Should -Match 'lcm_user'
     }
 }

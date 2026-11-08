@@ -1355,7 +1355,7 @@ test('machine card: name, method, transport, current step and the state', functi
   eq(cards[0].chips.map(function (c) { return c.text; }), ['ZTP', 'Arc Run Command']);
   eq(cards[1].chips.map(function (c) { return c.text; }), ['ISO (differs from the file)', 'WinRM']);
   eq(cards[2].lines[0], 'Now: MPIO (SAN)');
-  eq(cards[0].lines.indexOf('Logs: domain-joined: using IIC\\svc-lcm') >= 0, true, 'a joined machine says the domain account reads its logs');
+  eq(cards[0].lines.indexOf('Logs: domain-joined: using IIC\\svc-join') >= 0, true, 'a joined machine says the domain account reads its logs');
   var early = m.summaryFor(oscRunState(oscAt(3.0)), 'osconfig').cards;
   eq(early[2].lines.indexOf('Logs: workgroup: using azl-admin') >= 0, true, 'a machine not joined yet says the local account does');
   eq(cards.every(function (c) { return c.arc === null; }), true);
@@ -1417,9 +1417,9 @@ test('domain join: the DomainJoin step shows planned, applying, joined; the acco
   var waiting = oscNode(oscAt(2.15), 'iic-azl-n01');
   eq(waiting.domainJoined, true); eq(waiting.domainAdminsConfigured, false);
   eq(waiting.logAccount.reason, 'joined, waiting for domain administrators: using azl-admin'); eq(waiting.logAccount.kind, 'local'); eq(waiting.logAccount.waitingForAdmins, true);
-  eq(after.domainJoined, true); eq(after.domainAdminsConfigured, true); eq(after.logAccount.reason, 'domain-joined: using IIC\\svc-lcm'); eq(after.logAccount.userName, 'IIC\\svc-lcm');
+  eq(after.domainJoined, true); eq(after.domainAdminsConfigured, true); eq(after.logAccount.reason, 'domain-joined: using IIC\\svc-join'); eq(after.logAccount.userName, 'IIC\\svc-join');
   var tree = m.osConfigTreeOf(oscRunState(oscAt(2.2)));
-  eq(tree[0].osc.logAccount.reason, 'domain-joined: using IIC\\svc-lcm'); eq(tree[0].osc.domainJoined, true);
+  eq(tree[0].osc.logAccount.reason, 'domain-joined: using IIC\\svc-join'); eq(tree[0].osc.domainJoined, true);
   eq(tree[1].osc.logAccount.reason, 'workgroup: using azl-admin');
   var lines = m.oscDemoLines(4.95, NOW - 4.95 * 60000).map(function (l) { return l.text; });
   eq(lines.some(function (t) { return /\[osconfig\] iic-azl-n01 DomainJoinApplying \(DomainJoin\)/.test(t); }), true);
@@ -1427,6 +1427,29 @@ test('domain join: the DomainJoin step shows planned, applying, joined; the acco
   eq(lines.some(function (t) { return /\[osconfig\] iic-azl-n02 DomainAdminsConfigured \(DomainJoin\)/.test(t); }), true);
   eq(m.lineScope({ file: 'os-config-events', text: '2026-11-07T19:01:59.536Z [osconfig] n1 DomainAdminsConfigured: x' }), { node: 'n1', stage: 'osc.domainjoin' });
   eq(m.lineScope({ file: 'os-config-events', text: '2026-11-07T19:01:59.536Z [osconfig] n1 DomainJoinFailed: x' }), { node: 'n1', stage: 'osc.domainjoin' });
+});
+
+test('Details: the domain account shows its breaker state and next check, never a secret', function () {
+  withDom(function (dom, h) {
+    var d = { mode: 'live', target: {}, route: {}, identity: {}, nodes: [], sources: {}, config: {},
+      logAccount: { account: 'IIC\\svc-join', state: 'open', failures: 1, maxRejections: 2, backoffMinutes: 15, nextProbeAt: '2026-11-07T20:15:00Z', lastClass: 'rejected', credential: 'ready', credentialRetryAt: null } };
+    h.app.details = d;
+    h.renderDetails();
+    var text = textOf(dom.byId['details-body']);
+    eq(text.indexOf('IIC\\svc-join') >= 0, true, 'the account name is shown');
+    eq(/paused for every node after a rejection/.test(text), true);
+    eq(/1 of 2 rejections/.test(text), true);
+    eq(/next check/.test(text), true);
+    eq(/last: rejected/.test(text), true);
+    d.logAccount = { account: 'IIC\\svc-join', state: 'latched', failures: 2, maxRejections: 2, backoffMinutes: 30, nextProbeAt: null, lastClass: 'rejected', credential: 'unavailable', credentialRetryAt: '2026-11-07T20:05:00Z' };
+    h.renderDetails();
+    text = textOf(dom.byId['details-body']);
+    eq(/until its password changes or Sonar restarts/.test(text), true);
+    eq(/not available \(Key Vault\)/.test(text), true);
+    d.logAccount = { account: '', state: 'closed', failures: 0, maxRejections: 2 };
+    h.renderDetails();
+    eq(textOf(dom.byId['details-body']).indexOf('Domain account') < 0, true, 'no account: no group');
+  });
 });
 
 test('Steps box text when OS configuration has not started', function () {

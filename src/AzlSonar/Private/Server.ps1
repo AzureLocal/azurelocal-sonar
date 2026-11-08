@@ -58,7 +58,8 @@ function Initialize-AzlSonarSharedState {
             ZtpStages     = [hashtable]::Synchronized(@{})   # simplified route: per-node azurelocal-ztp Device and Network events (Invoke-AzlSonarZtpEventLoop)
             ZtpInfo       = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the ZTP event file: events read and the newest event time (/api/details)
             OsConfigEvents = [hashtable]::Synchronized(@{})   # per-node OS configuration events of the latest attempt, and the run entry '*' (Invoke-AzlSonarOsConfigEventLoop)
-            LogAccount    = [hashtable]::Synchronized(@{})   # per node: did it reject the domain account, and the account log access uses (never a password)
+            LogAccount    = [hashtable]::Synchronized(@{})   # per node: immutable records of the account log access uses (never a password); '*breaker' and '*unavailable' hold the account-wide ones
+            CredentialLock = [object]::new()   # one lock for the domain credential (read, mask, publish) and for the breaker and the per-node records
             LocalUserName = ''   # the local log account's user name (-Credential or the prompt), for the account shown per node
             OsConfigInfo  = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the OS configuration event file: events read and the newest event time (/api/details)
             ConfigInfo    = [hashtable]::Synchronized(@{ ReadAt = $null; CheckedAt = $null; ChangedAt = $null; Note = $null })   # when the config source was read, checked and last changed (/api/details)
@@ -1003,7 +1004,8 @@ function Start-AzlSonarServer {
         $logCredential = Resolve-AzlSonarCredential -Config $config -Credential $Credential
 
         $shared = Initialize-AzlSonarSharedState
-        if ($logCredential) { $shared.Redact = @($logCredential.GetNetworkCredential().Password) | Where-Object { $_ } }
+        # The log account's password is masked by a fingerprint: no plaintext copy of it is kept in Shared.
+        if ($logCredential) { Add-AzlSonarRedaction -Shared $shared -Secret $logCredential.Password }
         if ($logCredential) { $shared.LocalUserName = $logCredential.UserName }
         $initial = Get-AzlSonarInitialState -Config $config
         $shared.State = $initial

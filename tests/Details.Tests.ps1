@@ -109,7 +109,7 @@ Describe 'Get-AzlSonarDetail' {
     }
 
     It 'groups Target, Mode, Nodes, Sources and Config' {
-        @($script:D.Keys) | Should -Be @('generatedAt', 'mode', 'target', 'route', 'identity', 'nodes', 'sources', 'config')
+        @($script:D.Keys) | Should -Be @('generatedAt', 'mode', 'target', 'route', 'identity', 'nodes', 'logAccount', 'sources', 'config')
         $script:D.target.cluster.value | Should -Be 'clus01'
         $script:D.target.region.value | Should -Be 'eastus'
         $script:D.target.subscription.value | Should -Be '11111111...'
