@@ -23,14 +23,15 @@
     error: 'Failed', skipped: 'Skipped', unknown: 'Unknown'
   };
   var DEMO = typeof location !== 'undefined' && /(?:^|[?&])demo=(?:1|true|yes)(?:&|$)/i.test(location.search);
-  // ?demo=1&route=simplified|oem shows the machine-readiness phase of that route instead of a running deployment.
+  // ?demo=1&route=simplified|oem shows the machine-readiness phase of that route instead of a running deployment;
+  // route=osconfig shows an OS configuration run (one ZTP and one ISO machine side by side).
   // ?demo=1&replay=1 plays the demo deployment as a built-in recording (the replay transport bar without a file).
   var DEMO_REPLAY = DEMO && /(?:^|[?&])replay=(?:1|true|yes)(?:&|$)/i.test(location.search);
   var REPLAY_SPEEDS = [1, 30, 60, 240];
   var DEMO_ROUTE = (function () {
     if (typeof location === 'undefined') return '';
-    var m = /(?:^|[?&])route=(simplified|oem|oem-image)(?:&|$)/i.exec(location.search);
-    return m ? (m[1].toLowerCase() === 'simplified' ? 'simplified' : 'oem-image') : '';
+    var m = /(?:^|[?&])route=(simplified|oem|oem-image|osconfig)(?:&|$)/i.exec(location.search);
+    return m ? (m[1].toLowerCase() === 'simplified' ? 'simplified' : m[1].toLowerCase() === 'osconfig' ? 'osconfig' : 'oem-image') : '';
   })();
 
   // ------------------------------------------------------------------ state
@@ -55,14 +56,15 @@
     follow: true,
     newWhilePaused: 0,
     rendered: 0,
-    treeSig: { provisioning: null, validation: null, extensions: null, deployment: null, update: null },
+    treeSig: { provisioning: null, osconfiguration: null, validation: null, extensions: null, deployment: null, update: null },
     expanded: new Map(),        // key -> bool (user choice)
-    sectionCollapsed: { provisioning: false, validation: false, extensions: false, deployment: false, update: false },
+    sectionCollapsed: { provisioning: false, osconfiguration: false, validation: false, extensions: false, deployment: false, update: false },
     provAutoCollapsed: false,   // the provisioning section was collapsed once validation started
     provTree: [],               // one synthetic tree item per machine (provisioningTreeOf)
+    oscTree: [],                // OS configuration: one tree item per machine with its steps (osConfigTreeOf)
     extTree: [],                // OEM image route, from Validate on: one item per machine with its extensions
     stepIndex: new Map(),       // key -> { node, section, parentKey }
-    focusKey: { provisioning: null, validation: null, extensions: null, deployment: null, update: null },
+    focusKey: { provisioning: null, osconfiguration: null, validation: null, extensions: null, deployment: null, update: null },
     selectedKey: null,
     currentKey: null,
     lastAutoKey: null,
@@ -367,8 +369,19 @@
     if (/^Bios/.test(state)) return 'restore';
     return '';
   }
+  // The OS configuration event lines: "<time> [osconfig] <node> <State> (<Step>): ..." (file os-config-events). The stage is
+  // osc.<step>; the guarded network change events belong to the Network step even when they name none.
+  var OSC_LINE = /^(?:\S+\s+)?\[osconfig\]\s+(\S+)\s+([A-Za-z]+)(?:\s+\(([A-Za-z]+)\))?/;
   function lineScope(l) {
     if (l.scope) return l.scope;
+    if (l.file === 'os-config-events' || /^(?:\S+\s+)?\[osconfig\]\s/.test(str(l.text))) {
+      var o = OSC_LINE.exec(str(l.text));
+      if (o) {
+        var ostep = o[3] || (/^NetworkChange/.test(o[2]) ? 'Network' : (/^Domain(Join|Admins)/.test(o[2]) ? 'DomainJoin' : ''));
+        l.scope = { node: o[1], stage: ostep ? 'osc.' + ostep.toLowerCase() : '' };
+        return l.scope;
+      }
+    }
     var m = l.file === 'ztp-events' || /^(?:\S+\s+)?\[ztp\]\s/.test(str(l.text)) ? ZTP_LINE.exec(str(l.text)) : null;
     l.scope = m ? { node: m[1], stage: ztpStageOfState(m[2]) } : { node: '', stage: '' };
     return l.scope;
@@ -528,18 +541,159 @@
     }[str(src)] || '';
   }
 
+  // ------------------------------------------------------------------ OS configuration (pure; also run by tests under Node)
+  //
+  // The mode between Provisioning and Validate. The back end builds state.osConfiguration from the toolkit's OS
+  // configuration event file (Get-AzlSonarOsConfigurationState): one machine per node with its method (Ztp or Iso), transport,
+  // versions and 13 steps. The page only shows it. A machine with no event yet shows the method it is expected to use.
+
+  var OSC_STAGE_LABEL = {
+    waiting: 'Waiting', planned: 'Planned', ok: 'OK', info: 'Info', changing: 'Changing', applied: 'Applied', verified: 'Verified',
+    failed: 'Failed', blocked: 'Blocked', skipped: 'Not applicable', rolledback: 'Rolled back', refused: 'Refused'
+  };
+  var OSC_STAGE_KIND = {
+    waiting: 'idle', planned: 'warn', ok: 'ok', info: 'ok', changing: 'run', applied: 'ok', verified: 'ok',
+    failed: 'err', blocked: 'warn', skipped: 'idle', rolledback: 'err', refused: 'err'
+  };
+  var OSC_STATE_LABEL = {
+    waiting: 'Waiting to start', planning: 'Reading the machine', planned: 'Planned', applying: 'Applying', retrying: 'Retrying',
+    reconnecting: 'Reconnecting', awaitingconfirm: 'Awaiting confirmation', verifying: 'Verifying', converged: 'Converged',
+    failed: 'Failed', blocked: 'Blocked', rolledback: 'Rolled back', refused: 'Refused'
+  };
+  var OSC_STATE_KIND = {
+    waiting: 'idle', planning: 'run', planned: 'idle', applying: 'run', retrying: 'warn', reconnecting: 'run', awaitingconfirm: 'warn',
+    verifying: 'run', converged: 'ok', failed: 'err', blocked: 'err', rolledback: 'err', refused: 'err'
+  };
+  var OSC_TRANSPORT_LABEL = { ArcRunCommand: 'Arc Run Command', WinRM: 'WinRM' };
+  var OSC_GUARDED_LABEL = {
+    Staged: 'Staged on the node', Verifying: 'Checking the node (stable period)', AwaitingConfirm: 'Waiting for the confirmation',
+    Committed: 'Committed', Repaired: 'Repaired', RolledBack: 'Rolled back', Refused: 'Refused before any change'
+  };
+
+  function oscOf(state) { return isObj(state) && isObj(state.osConfiguration) ? state.osConfiguration : null; }
+  function oscNodes(state) { var o = oscOf(state); return o ? arr(o.nodes).filter(isObj) : []; }
+  // Is there anything from the OS configuration run to show? (a run started, or a machine has an attempt)
+  function oscHasData(osc) {
+    if (!isObj(osc)) return false;
+    return !!(isObj(osc.run) && osc.run.started) || arr(osc.nodes).some(function (n) { return isObj(n) && Number(n.attempt) > 0; });
+  }
+
+  // One tree item per machine; its children are the machine's steps. The item carries the machine summary in .osc.machine.
+  function osConfigTreeOf(state) {
+    return oscNodes(state).map(function (n) {
+      return {
+        id: str(n.name), name: str(n.name), description: str(n.stateText), status: normStatus(n.status), start: n.start || null, end: n.end || null,
+        errors: arr(n.errors).map(str).filter(Boolean), children: arr(n.tree),
+        osc: { machine: true, method: str(n.method), methodSource: str(n.methodSource), methodNote: str(n.methodNote), transport: str(n.transport),
+          declared: str(n.declared), declaredMethod: str(n.declaredMethod), mismatch: n.mismatch === true, warnings: arr(n.warnings).map(str), versions: isObj(n.versions) ? n.versions : {},
+          evidence: isObj(n.evidence) ? n.evidence : {}, state: str(n.state), stateText: str(n.stateText), retries: Number(n.retries) || 0, restarts: Number(n.restarts) || 0,
+          guarded: str(n.guarded), guardedDetail: isObj(n.guardedDetail) ? n.guardedDetail : null, runCommands: arr(n.runCommands).filter(isObj),
+          changes: Number(n.changes) || 0, blocked: Number(n.blocked) || 0, currentStep: str(n.currentStep),
+          domainJoined: n.domainJoined === true, logAccount: isObj(n.logAccount) ? n.logAccount : null }
+      };
+    });
+  }
+
+  // The method chip of a machine: { text, kind, title }. "Ztp" or "Iso"; "expected" when no event has resolved it yet.
+  function oscMethodChip(m) {
+    var method = str(m.method);
+    if (!method) return { text: 'Method unknown', kind: 'idle', title: 'No event has named the method yet, and the master file does not say how this machine was installed.' };
+    var label = method === 'Ztp' ? 'ZTP' : 'ISO';
+    var title = method === 'Ztp' ? 'Provisioned by ZTP (simplified machine provisioning): the computer name and the Azure Arc registration are checked, everything else is configured.'
+      : 'Installed from an ISO: the computer name is set (a restart) and the machine is registered with Azure Arc, besides everything else.';
+    if (str(m.methodSource) === 'expected') return { text: label + ' (expected)', kind: 'idle', title: title + ' Expected because ' + (str(m.methodNote) || 'of the master file') + '; the run has not resolved it yet.' };
+    if (m.mismatch === true) return { text: label + ' (differs from the file)', kind: 'warn', title: title + ' The master file declares ' + (str(m.declared) || 'another method') + ' but the evidence says ' + method + '; the evidence wins.' };
+    return { text: label, kind: method === 'Ztp' ? 'run' : 'ok', title: title };
+  }
+
+  // "10.0.26100 build 26100" style text for the versions of a machine; '' when nothing is known.
+  function oscVersionLines(m) {
+    var v = isObj(m.versions) ? m.versions : {}, out = [];
+    var os = str(v.osCaption) || (str(v.osVersion) ? 'OS ' + str(v.osVersion) : '');
+    if (os) out.push(os + (v.build && str(v.osVersion).indexOf(str(v.build)) < 0 ? ' (build ' + str(v.build) + ')' : ''));
+    if (str(v.hostname)) out.push('computer name ' + str(v.hostname));
+    var sbe = [str(v.sbePublisher), str(v.sbeFamily), str(v.sbeVersion)].filter(Boolean).join(' ');
+    if (sbe || str(v.sbePackage)) out.push('SBE ' + (sbe || str(v.sbePackage)) + (str(v.sbeDelivery) ? ' (' + str(v.sbeDelivery) + ')' : ''));
+    if (str(v.schemaVersion)) out.push('schema ' + str(v.schemaVersion));
+    if (str(v.wrapperVersion)) out.push('wrapper ' + str(v.wrapperVersion));
+    return out;
+  }
+
+  // Seconds left in a guarded change's confirmation window, or NaN.
+  function oscCountdown(confirmBy, now) {
+    var t = parseTime(confirmBy);
+    return isNaN(t) ? NaN : Math.max(0, Math.round((t - (now === undefined ? nowMs() : now)) / 1000));
+  }
+  function fmtCountdown(sec) {
+    if (isNaN(sec)) return '';
+    if (sec <= 0) return 'window over';
+    return pad(Math.floor(sec / 60)) + ':' + pad(sec % 60) + ' left';
+  }
+
+  // The summary-card model of one machine.
+  function oscCard(n, now) {
+    var chip = oscMethodChip(n), tr = OSC_TRANSPORT_LABEL[str(n.transport)] || str(n.transport);
+    var state = str(n.state) || 'waiting', steps = arr(n.tree).filter(isObj);
+    var done = steps.filter(function (s) { var st = isObj(s.osc) ? str(s.osc.stage) : ''; return st === 'ok' || st === 'info' || st === 'applied' || st === 'verified' || st === 'skipped'; }).length;
+    var cur = str(n.currentStep), curName = '';
+    steps.forEach(function (s) { if (isObj(s.osc) && s.osc.step === cur) curName = str(s.name); });
+    var g = isObj(n.guardedDetail) ? n.guardedDetail : null;
+    var lines = [];
+    if (state === 'converged') lines.push('All ' + steps.length + ' steps match the master file');
+    else if (state === 'planned') lines.push(str(n.stateText));
+    else if (curName) lines.push('Now: ' + curName);
+    else if (state === 'waiting') lines.push('Waiting for the run to reach this machine');
+    if (n.retries) lines.push('Retried ' + n.retries + (n.retries === 1 ? ' time' : ' times') + ' (Arc Run Command lost)');
+    if (n.restarts) lines.push('Restarted ' + n.restarts + (n.restarts === 1 ? ' time' : ' times'));
+    if (g && (str(n.guarded) === 'RolledBack' || str(n.guarded) === 'Refused') && str(g.reason)) lines.push((n.guarded === 'RolledBack' ? 'Rolled back: ' : 'Refused: ') + firstLine(g.reason, 140));
+    else if (state === 'failed' || state === 'blocked') lines.push(firstLine(arr(n.errors)[0] || str(n.stateText), 140));
+    var chips = [{ text: chip.text, kind: chip.kind, title: chip.title }];
+    if (tr) chips.push({ text: tr, kind: 'idle', title: 'How this machine is reached.' });
+    if (isObj(n.logAccount) && str(n.logAccount.reason)) lines.push('Logs: ' + str(n.logAccount.reason));
+    return {
+      name: str(n.name), seed: false, state: OSC_STATE_LABEL[state] || state, kind: OSC_STATE_KIND[state] || 'idle', status: normStatus(n.status),
+      tip: str(n.stateText), arc: null, chips: chips, lines: lines.concat(arr(n.warnings).slice(0, 2).map(function (w) { return 'Warning: ' + firstLine(w, 140); })),
+      waits: '', progress: state === 'applying' || state === 'verifying' || state === 'retrying' ? Math.round(100 * done / Math.max(1, steps.length)) : null,
+      until: state === 'awaitingconfirm' && g ? str(g.confirmBy) : '', osc: true
+    };
+  }
+
+  function oscHeadline(osc, mode) {
+    var total = Number(osc.nodesTotal) || 0, ok = Number(osc.nodesConverged) || 0, run = isObj(osc.run) ? osc.run : {};
+    if (!oscHasData(osc)) return 'No OS configuration run has been seen yet';
+    if (osc.ready) return 'OS configuration has converged on all ' + total + ' machine' + (total === 1 ? '' : 's') + '. Next: Validate';
+    var bad = arr(osc.nodes).filter(function (n) { return isObj(n) && (n.state === 'failed' || n.state === 'blocked' || n.state === 'rolledback' || n.state === 'refused'); });
+    var head = ok + ' of ' + total + ' machine' + (total === 1 ? '' : 's') + ' converged';
+    if (bad.length) return head + ': ' + str(bad[0].name) + ' ' + (OSC_STATE_LABEL[bad[0].state] || 'failed').toLowerCase() + (bad.length > 1 ? ' and ' + (bad.length - 1) + ' more' : '');
+    if (run.completed && run.mode === 'Plan') return 'Plan finished' + (run.planChanges !== null && run.planChanges !== undefined ? ': ' + run.planChanges + ' change' + (run.planChanges === 1 ? '' : 's') + ' pending' : '') + '. Nothing was changed; run it with -Mode Apply';
+    if (run.completed) return head + '; the run ended with exit code ' + run.exitCode;
+    var retry = Number(osc.nodesRetrying) || 0;
+    return head + (retry ? ', ' + retry + ' retrying' : '') + (osc.state === 'planning' ? ' (reading the machines)' : osc.state === 'applying' ? ' (applying)' : '');
+  }
+
+  // Facts under the headline: [{ k, v }].
+  function oscFacts(osc) {
+    var run = isObj(osc.run) ? osc.run : {}, out = [];
+    out.push({ k: 'Run', v: ({ waiting: 'not started', planning: 'planning', planned: 'plan finished', applying: 'applying', converged: 'converged', failed: 'failed', incomplete: 'ended, not converged' })[str(osc.state)] || str(osc.state) });
+    out.push({ k: 'Machines converged', v: (Number(osc.nodesConverged) || 0) + ' of ' + (Number(osc.nodesTotal) || 0) });
+    var w = isObj(osc.wipe) ? osc.wipe : {};
+    if (w.published) out.push({ k: 'Wipe list', v: !w.enabled ? 'off' : (Number(w.count) === 0 ? 'nothing to wipe' : (w.pending ? 'pending (' + arr(w.nodes).length + ' machine' + (arr(w.nodes).length === 1 ? '' : 's') + ')' : 'done')), warn: !!(w.enabled && w.pending && Number(w.count) > 0) });
+    if (run.mode) out.push({ k: 'Mode', v: run.mode });
+    return out;
+  }
+
   // ------------------------------------------------------------------ modes and summary (pure; also run by tests under Node)
   //
   // The page shows one "mode" at a time: Provisioning, Validate, Deployment, Update, Health. A mode maps onto the phase the
   // back end reports (phase / activePhase) and the section of the state that holds its data (provisioning, validation,
   // deployment, update). Azure's raw states are turned into plain words here; the raw value goes into a tooltip.
 
-  var MODE_IDS = ['prov', 'validate', 'deploy', 'update', 'health'];
+  var MODE_IDS = ['prov', 'osconfig', 'validate', 'deploy', 'update', 'health'];
   var MODE_OF_PHASE = {
     provisioning: 'prov', 'arc-registration': 'prov', validation: 'validate', deployment: 'deploy', update: 'update',
     done: 'health', 'post-deployment': 'health', 'add-node': 'health', repair: 'health'
   };
-  var MODE_TITLE = { validate: 'Validate', deploy: 'Deployment', update: 'Update', health: 'Health' };
+  var MODE_TITLE = { osconfig: 'OS configuration', validate: 'Validate', deploy: 'Deployment', update: 'Update', health: 'Health' };
 
   // The provisioning route the run follows: the one the state names, else what the phase says (Arc registration is the
   // OEM image route's machine phase).
@@ -561,7 +715,13 @@
     if (!isObj(state)) return 'prov';
     var p = normPhase(state.phase), act = str(state.activePhase).toLowerCase();
     var key = p === 'failed' ? (act || 'provisioning') : (p === 'done' ? 'done' : (act || p));
-    return MODE_OF_PHASE[key] || 'prov';
+    var mode = MODE_OF_PHASE[key] || 'prov';
+    // Provisioning is over for the machines that ZTP finished, or an OS configuration run has started: that mode is the one to watch.
+    if (mode === 'prov') {
+      var osc = oscOf(state);
+      if (osc && (oscHasData(osc) || (osc.configured === true && ztpComplete(state)))) return 'osconfig';
+    }
+    return mode;
   }
 
   // Steps done, the step that runs now (1-based) and its name, over the main steps of a tree.
@@ -590,7 +750,8 @@
   }
 
   var MODE_WHEN = {
-    validate: { simplified: 'Starts after ZTP and OS configuration are done', 'oem-image': 'Starts when every machine is registered', '': 'Starts after the machines are ready' },
+    osconfig: 'Starts after ZTP is complete; follows the toolkit’s OS configuration event file (osConfigEventsPath)',
+    validate: { simplified: 'Starts after OS configuration has converged on every machine', 'oem-image': 'Starts when every machine is registered', '': 'Starts after the machines are ready' },
     deploy: 'Starts after validation passes',
     update: 'Available after the cluster is deployed; starts when Azure reports an update',
     health: 'Available after the cluster is deployed'
@@ -600,7 +761,7 @@
     return MODE_WHEN[id] || '';
   }
 
-  // The five tiles: { id, name, status ok|run|idle|err, line, tip, hidden }. A waiting tile has no state line; its tip
+  // The six tiles: { id, name, status ok|run|idle|err, line, tip, hidden }. A waiting tile has no state line; its tip
   // says when it starts.
   function modeStates(state) {
     var s = isObj(state) ? state : {};
@@ -621,10 +782,24 @@
     else if (order > 0 || phase === 'done') { pst = 'ok'; pline = psum.total ? counted : 'Done'; }
     else if (active === 'prov') { pst = 'run'; pline = psum.total ? counted : 'Waiting for the machines'; }
     else pst = 'idle';
-    // Always five tiles. With no machine data (a run Sonar joined after provisioning) the tile is grey and its tip says why.
+    // Always six tiles. With no machine data (a run Sonar joined after provisioning) the tile is grey and its tip says why.
     tile('prov', pst, pline, false, pst === 'idle' && order > 0 ? 'No machine data in this run: Sonar started after provisioning, or the resource group has no edge machines.' : '');
 
-    [['validate', s.validation, 1], ['deploy', s.deployment, 2]].forEach(function (x) {
+    // OS configuration: ready for the cluster when every machine has converged. It never keeps Provisioning running.
+    var osc = oscOf(s), ost, oline = '', otip = '';
+    if (osc && oscHasData(osc)) {
+      var ototal = Number(osc.nodesTotal) || 0, ook = Number(osc.nodesConverged) || 0;
+      if (Number(osc.nodesFailed) > 0) { ost = 'err'; oline = ook + ' of ' + ototal + ' converged, ' + osc.nodesFailed + ' failed'; }
+      else if (osc.ready) { ost = 'ok'; oline = ook + ' of ' + ototal + ' converged'; }
+      else if (osc.status === 'running') { ost = 'run'; oline = ook + ' of ' + ototal + ' converged' + (Number(osc.nodesRetrying) ? ', ' + osc.nodesRetrying + ' retrying' : ''); }
+      else { ost = 'idle'; oline = osc.state === 'planned' ? 'Plan ready' : ook + ' of ' + ototal + ' converged'; otip = osc.state === 'planned' ? 'The plan was made and nothing was changed. Run the OS configuration with -Mode Apply.' : ''; }
+    } else {
+      ost = 'idle';
+      otip = osc && osc.configured === true ? (order > MODE_IDS.indexOf('osconfig') || phase === 'done' ? 'No OS configuration data in this run.' : modeWhen('osconfig', route)) : 'Set osConfigEventsPath to follow the toolkit’s OS configuration run.';
+    }
+    tile('osconfig', ost, oline, false, otip);
+
+    [['validate', s.validation, MODE_IDS.indexOf('validate')], ['deploy', s.deployment, MODE_IDS.indexOf('deploy')]].forEach(function (x) {
       var sec = isObj(x[1]) ? x[1] : null, st = sec ? sectionStatus(sec) : 'notstarted', pr = stepProgress(sec && sec.tree);
       if (st === 'success') tile(x[0], 'ok', x[0] === 'validate' ? 'Passed' : 'Done');
       else if (st === 'running') tile(x[0], 'run', pr.total ? 'Step ' + pr.current + ' of ' + pr.total : 'Running');
@@ -766,6 +941,17 @@
       return out;
     }
 
+    if (me.id === 'osconfig') {
+      var os = oscOf(s) || {}, orun = isObj(os.run) ? os.run : {};
+      var ost0 = parseTime(orun.started), oend = parseTime(orun.completed);
+      if (!isNaN(ost0)) out.startedAt = ost0;
+      if (me.status === 'ok' && !isNaN(oend)) out.endedAt = oend;
+      out.cards = oscNodes(s).map(function (n) { return oscCard(n); });
+      out.headline = me.status === 'idle' && !oscHasData(os) ? me.tip : oscHeadline(os);
+      out.facts = oscHasData(os) ? oscFacts(os) : [];
+      return out;
+    }
+
     var sec = me.id === 'validate' ? s.validation : me.id === 'deploy' ? s.deployment : me.id === 'update' ? s.update : null;
     var secTree = isObj(sec) ? arr(sec.tree) : [];
     var pr = stepProgress(secTree), word = { validate: 'Validation', deploy: 'Deployment', update: 'Update' }[me.id];
@@ -818,7 +1004,7 @@
   // the step's time window, or, for a ZTP stage, to the ZTP event lines tagged with that stage. A machine row selects
   // the machine, like its card.
 
-  var MODE_SECTIONS = { prov: ['provisioning'], validate: ['validation', 'extensions'], deploy: ['deployment'], update: ['update'], health: [] };
+  var MODE_SECTIONS = { prov: ['provisioning'], osconfig: ['osconfiguration'], validate: ['validation', 'extensions'], deploy: ['deployment'], update: ['update'], health: [] };
 
   // chain: the items from the top of the section down to the clicked step ({ id, name, ... }).
   // Returns { side: 'machine' | 'azure' | 'node', node, stage, window }.
@@ -832,6 +1018,12 @@
       if (z) return { side: 'node', node: machine, stage: z[1], window: false };
       if (/^(update|bootstrap)(?:\.|$)/.test(group)) return { side: 'node', node: machine, stage: '', window: true };
       return { side: 'azure', node: machine, stage: '', window: false };
+    }
+    if (section === 'osconfiguration') {
+      // A machine row selects the machine; a step filters the log to that machine's [osconfig] lines for the step.
+      if (list.length === 1) return { side: 'machine', node: str(top.name), stage: '', window: false };
+      var ostep = isObj(list[1].osc) ? str(list[1].osc.step) : '';
+      return { side: 'node', node: str(top.name), stage: ostep ? 'osc.' + ostep.toLowerCase() : '', window: false };
     }
     if (section === 'validation' || section === 'extensions') return { side: 'azure', node: '', stage: '', window: false };
     return { side: 'node', node: '', stage: '', window: true };
@@ -865,6 +1057,7 @@
   function stepsEmptyText(modeId, status, when, hasMachines) {
     if (modeId === 'health') return 'There are no steps here. Sonar does not run health checks; the cards above show each machine’s Azure Arc status.';
     if (modeId === 'prov' && !hasMachines) return 'No machines reported yet.';
+    if (modeId === 'osconfig' && status === 'idle') return 'The steps appear here when the OS configuration run starts. Run Invoke-AzureLocalOsConfiguration.ps1 from the toolkit and point osConfigEventsPath at its os-configuration-events.jsonl.' + (when ? ' ' + when + '.' : '');
     if (status === 'idle') return 'The steps appear here when this mode begins.' + (when ? ' ' + when + '.' : '');
     return 'No steps reported yet.';
   }
@@ -976,6 +1169,10 @@
       if (guide) { note.href = guide; note.linkText = guide.replace(/^https:\/\//i, '').replace(/\/$/, ''); }
       out.push(note);
     }
+    var oscn = oscNodes(s);
+    oscn.forEach(function (n) {
+      arr(n.warnings).slice(0, 2).forEach(function (w) { out.push({ kind: 'osconfig', text: 'OS configuration, ' + str(n.name) + ': ' + firstLine(w, 220) }); });
+    });
     var tr = str(s.track).toLowerCase();
     if (tr === 'add-node' || tr === 'repair') {
       out.push({ kind: 'track', text: phaseLabel(tr) + ' (set in the config): Sonar shows the Arc machines and the node log; the steps are not reported by Azure. Unverified against a live run.' });
@@ -1211,6 +1408,203 @@
   function scrubFraction(rec, t) { var d = rec.end - rec.start; return d > 0 ? Math.max(0, Math.min(1, (t - rec.start) / d)) : 0; }
   function scrubTime(rec, f) { return rec.start + Math.max(0, Math.min(1, Number(f) || 0)) * (rec.end - rec.start); }
 
+  // ------------------------------------------------------------------ OS configuration demo (pure; ?demo=1&route=osconfig and the built-in replay)
+  //
+  // Two or three machines in different situations, one ZTP and one ISO side by side: iic-azl-n01 (ZTP, over Arc Run Command)
+  // plans, applies and converges with one retry of a lost run command; iic-azl-n02 (ISO, over WinRM) changes its management
+  // address with the guarded change (commit confirmed), restarts for its computer name, registers with Azure Arc, fails
+  // on the OEM drivers, and converges on a second attempt; iic-azl-n03 (ZTP, over WinRM) is still applying. r is the minutes
+  // since the run began. Sample names and documentation values only.
+
+  var OSC_DEMO_STEP = ['RemoteManagement', 'Network', 'Dns', 'Time', 'Hostname', 'DomainJoin', 'UnusedAdapters', 'LocalAdmin', 'Mpio', 'SanVerify', 'ClearStorage', 'Sbe', 'Drivers', 'ArcRegistration'];
+  var OSC_DEMO_NAME = {
+    RemoteManagement: 'Remote management', Network: 'Network (management address)', Dns: 'DNS servers', Time: 'Time (NTP)', Hostname: 'Computer name',
+    UnusedAdapters: 'Unused network adapters', LocalAdmin: 'Local administrator', Mpio: 'MPIO (SAN)', SanVerify: 'SAN verification', ClearStorage: 'Clear storage',
+    Sbe: 'SBE package', Drivers: 'OEM drivers', ArcRegistration: 'Azure Arc registration', DomainJoin: 'Domain join'
+  };
+  var OSC_DEMO_OK = {
+    RemoteManagement: 'WinRM: Running/Automatic, 1 listener(s)', Network: 'management: static 192.0.2.%IP%/24 gw 192.0.2.1', Dns: 'DNS: 192.0.2.53,192.0.2.54',
+    Time: 'NTP peers: ntp.example.test', Hostname: 'computer name: %NAME%', UnusedAdapters: '2 unused port(s) disabled', LocalAdmin: 'azl-admin: present, enabled, in Administrators',
+    Mpio: 'MultipathIO feature: Enabled', SanVerify: '2 SAN disk(s), 4 paths each', ClearStorage: 'no leftover local storage', Sbe: 'SBE_Dell_16G-45n0c-Intel_5.0.2606.1616.zip: present, SHA-256 matches',
+    Drivers: 'OEM network drivers: current', ArcRegistration: 'Arc machine %NAME% is Connected', DomainJoin: 'joined iic.example.test (OU=Servers)'
+  };
+
+  function oscDemoSpecs() {
+    return [
+      { name: 'iic-azl-n01', ip: 11, method: 'Ztp', transport: 'ArcRunCommand', declared: 'simplified', start: 0.2, planAt: 0.9, verifyAt: 3.2, convergedAt: 3.6,
+        changes: { Dns: { from: 1.2, to: 1.5, current: '192.0.2.250', desired: '192.0.2.53,192.0.2.54' }, Time: { from: 1.5, to: 1.8, current: 'type NT5DS (domain)', desired: 'ntp.example.test' },
+          DomainJoin: { from: 1.8, to: 2.1, current: 'workgroup WORKGROUP', desired: 'iic.example.test (OU=Servers)' },
+          UnusedAdapters: { from: 2.1, to: 2.4, current: 'Slot 3 Port 2 (Up)', desired: 'Disabled' }, Mpio: { from: 2.4, to: 2.8, current: 'Disabled', desired: 'Enabled' }, Drivers: { from: 2.8, to: 3.2, current: '24.1.0', desired: '24.4.1.0' } },
+        verify: ['Hostname', 'ArcRegistration'], na: { ClearStorage: 'os_configuration.clear_storage is off, so no storage is wiped.' },
+        retry: { at: 2.0, to: 2.2 }, versions: { hostname: 'iic-azl-n01', osVersion: '10.0.26100.1', build: 26100, sbePublisher: 'Dell', sbeFamily: '16G-45n0c-Intel', sbeVersion: '5.0.2606.1616', sbeDelivery: 'SAS download by the node (Arc Run Command)' } },
+      { name: 'iic-azl-n02', ip: 12, method: 'Iso', transport: 'WinRM', declared: 'simplified', mismatch: true, start: 0.25, planAt: 1.0, verifyAt: 5.2, convergedAt: 6.2,
+        changes: { Network: { from: 1.5, to: 2.6, current: 'dhcp 192.0.2.112', desired: 'static 192.0.2.12 gw 192.0.2.1', guarded: true }, Dns: { from: 2.6, to: 2.8, current: '192.0.2.250', desired: '192.0.2.53,192.0.2.54' },
+          Hostname: { from: 2.8, to: 3.5, current: 'WIN-7K2Q9', desired: 'iic-azl-n02' }, DomainJoin: { from: 3.5, to: 3.8, current: 'workgroup WORKGROUP', desired: 'iic.example.test (OU=Servers)' },
+          ArcRegistration: { from: 3.8, to: 4.1, current: 'not registered', desired: 'Connected in rg-iic-azl-c01' },
+          ClearStorage: { from: 4.1, to: 4.4, current: '1 pool(s), 2 virtual disk(s), disks: 3 (1000 GB)', desired: 'clean' }, Sbe: { from: 4.4, to: 4.6, current: 'missing', desired: 'present, SHA-256 matches' },
+          Drivers: { from: 4.6, to: 5.7, current: '24.1.0', desired: '24.4.1.0', fail: { at: 4.9, reason: 'Driver package Intel_E810.inf does not match the SBE manifest hash; the node kept its current driver.' } } },
+        second: { start: 5.0, planAt: 5.2, changes: { Drivers: { from: 5.3, to: 5.7, current: '24.1.0', desired: '24.4.1.0' } }, verifyAt: 5.9, convergedAt: 6.2 },
+        verify: [], na: {}, reconnect: { at: 3.1, to: 3.4 }, wipe: '3 local disks (1000 GB)',
+        versions: { hostname: 'iic-azl-n02', osVersion: '10.0.26100.1', build: 26100, osCaption: 'Azure Stack HCI', sbePublisher: 'Dell', sbeFamily: '16G-45n0c-Intel', sbeVersion: '5.0.2606.1616', sbeDelivery: 'copy over WinRM' } },
+      { name: 'iic-azl-n03', ip: 13, method: 'Ztp', transport: 'WinRM', declared: 'simplified', start: 0.4, planAt: 1.1, verifyAt: 6.0, convergedAt: 6.3,
+        changes: { DomainJoin: { from: 3.9, to: 4.2, current: 'workgroup WORKGROUP', desired: 'iic.example.test (OU=Servers)' }, Time: { from: 4.2, to: 4.6, current: 'type NT5DS (domain)', desired: 'ntp.example.test' }, Mpio: { from: 4.6, to: 5.4, current: 'Disabled', desired: 'Enabled' }, Drivers: { from: 5.4, to: 6.0, current: '24.1.0', desired: '24.4.1.0' } },
+        verify: ['Hostname', 'ArcRegistration'], na: { ClearStorage: 'os_configuration.clear_storage is off, so no storage is wiped.' },
+        versions: { hostname: 'iic-azl-n03', osVersion: '10.0.26100.1', build: 26100, sbePublisher: 'Dell', sbeFamily: '16G-45n0c-Intel', sbeVersion: '5.0.2606.1616', sbeDelivery: 'copy over WinRM' } }
+    ];
+  }
+
+  // One machine of state.osConfiguration at r minutes (base = ms of r 0).
+  function oscDemoNode(sp, r, base, unit) {
+    function at(m) { return new Date(base + m * (unit || 60000)).toISOString(); }
+    var att2 = !!sp.second && r >= sp.second.start, cur = att2 ? sp.second : sp;
+    var started = r >= cur.start, planned = r >= cur.planAt;
+    var changeEnds = Object.keys(cur.changes || {}).map(function (k) { return cur.changes[k].to; });
+    var firstChange = Math.min.apply(null, Object.keys(cur.changes || {}).map(function (k) { return cur.changes[k].from; }).concat([Infinity]));
+    var anyFailed = false, anyChanging = false, awaiting = null, rolled = null;
+    var steps = OSC_DEMO_STEP.map(function (st) {
+      var ch = (cur.changes || {})[st], first = (sp.changes || {})[st], prior = att2 && first && !ch;
+      var o = { stage: 'waiting', action: '', evidence: '', current: '', desired: '', start: null, end: null, errors: [], guarded: null };
+      var verifyOnly = sp.verify.indexOf(st) >= 0, okText = OSC_DEMO_OK[st].replace('%NAME%', sp.name).replace('%IP%', String(sp.ip));
+      if (!started) return { st: st, o: o, verifyOnly: verifyOnly };
+      if (!planned) return { st: st, o: o, verifyOnly: verifyOnly };
+      if (sp.na && sp.na[st]) { o.stage = 'skipped'; o.evidence = 'Not applicable: ' + sp.na[st]; return { st: st, o: o, verifyOnly: false }; }
+      if (verifyOnly) { o.stage = 'ok'; o.action = 'Ok'; o.evidence = 'Ok: Verify only: ' + okText; return { st: st, o: o, verifyOnly: true }; }
+      if (!ch) { o.stage = 'ok'; o.action = 'Ok'; o.evidence = (prior ? 'Verified: ' : 'Ok: ') + okText; if (prior) o.stage = 'verified'; return { st: st, o: o, verifyOnly: false }; }
+      o.current = ch.current; o.desired = ch.desired;
+      var txt = st + ': ' + ch.current + ' -> ' + ch.desired;
+      if (r < ch.from) { o.stage = 'planned'; o.action = 'Change'; o.evidence = 'Change: ' + txt; }
+      else if (ch.fail && r >= ch.fail.at) { o.stage = 'failed'; o.start = at(ch.from); o.end = at(ch.fail.at); o.errors = [ch.fail.reason]; o.evidence = 'Failed: ' + ch.fail.reason; anyFailed = true; }
+      else if (r < ch.to) {
+        o.stage = 'changing'; o.start = at(ch.from); o.evidence = 'Changing: ' + txt; anyChanging = true;
+        if (ch.guarded) {
+          var g = r < ch.from + 0.3 ? 'Staged' : r < ch.from + 0.6 ? 'Verifying' : 'AwaitingConfirm';
+          o.guarded = { state: g, changeId: 'net-1', rung: '', repairs: 0, confirmBy: g === 'AwaitingConfirm' ? at(ch.from + 0.6 + 10) : null, confirmMinutes: 10, reason: '' };
+          if (g === 'AwaitingConfirm') awaiting = o.guarded;
+        }
+      } else if (r < cur.verifyAt) { o.stage = 'applied'; o.start = at(ch.from); o.end = at(ch.to); o.evidence = 'Applied: ' + txt; }
+      else { o.stage = 'verified'; o.start = at(ch.from); o.end = at(ch.to); o.evidence = 'Verified: ' + okText; }
+      if (ch.guarded && o.stage !== 'changing' && o.stage !== 'planned' && r >= ch.to) o.guarded = { state: 'Committed', changeId: 'net-1', rung: '', repairs: 0, confirmBy: null, confirmMinutes: 10, reason: '' };
+      return { st: st, o: o, verifyOnly: false };
+    });
+    var retrying = !!sp.retry && r >= sp.retry.at && r < sp.retry.to, reconnecting = !!sp.reconnect && r >= sp.reconnect.at && r < sp.reconnect.to;
+    var converged = started && r >= cur.convergedAt;
+    var state = !started ? 'waiting' : converged ? 'converged' : anyFailed ? 'failed' : retrying ? 'retrying' : reconnecting ? 'reconnecting' : awaiting ? 'awaitingconfirm'
+      : anyChanging ? 'applying' : !planned ? 'planning' : r < firstChange ? 'planned' : r < cur.verifyAt ? 'verifying' : 'verifying';
+    var status = { waiting: 'notstarted', planned: 'notstarted', converged: 'success', failed: 'error' }[state] || 'running';
+    var tree = steps.map(function (x) {
+      var o = x.o, ts = { waiting: 'notstarted', planned: 'notstarted', ok: 'success', info: 'success', changing: 'running', applied: 'success', verified: 'success', failed: 'error', skipped: 'skipped' }[o.stage];
+      return {
+        id: 'osc.' + x.st, name: OSC_DEMO_NAME[x.st], description: o.evidence, status: ts, rawStatus: o.stage, start: o.start, end: o.end, durationSeconds: o.start && o.end ? Math.round((Date.parse(o.end) - Date.parse(o.start)) / 1000) : null,
+        errors: o.errors, children: [],
+        osc: { step: x.st, stage: o.stage, action: o.action, verifyOnly: x.verifyOnly, notApplicable: o.stage === 'skipped', current: o.current, desired: o.desired, nextAction: '', level: 'Info',
+          transport: sp.transport, arc: sp.transport === 'ArcRunCommand' && ['changing', 'applied', 'verified', 'failed'].indexOf(o.stage) >= 0 && !x.verifyOnly, guarded: o.guarded }
+      };
+    });
+    var current = '';
+    tree.forEach(function (t) { if (!current && t.osc.stage === 'changing') current = t.osc.step; });
+    var stateText = { waiting: 'Waiting to start', planning: 'Reading the machine (plan)', planned: 'Planned: ' + Object.keys(cur.changes || {}).length + ' changes pending', applying: 'Applying changes', retrying: 'Retrying (run command lost, try 1)',
+      reconnecting: 'Reconnecting after a restart or an address change', awaitingconfirm: 'Network change applied; waiting for the orchestrator’s confirmation', verifying: 'Verifying', converged: 'Converged',
+      failed: 'Failed' }[state];
+    var v = {}; Object.keys(sp.versions).forEach(function (k) { v[k] = sp.versions[k]; });
+    v.schemaVersion = '5.3.0'; v.wrapperVersion = '1.0.0';
+    var failedStep = tree.filter(function (t) { return t.osc.stage === 'failed'; })[0];
+    var joinStep = tree.filter(function (t) { return t.osc.step === 'DomainJoin'; })[0];
+    var domainJoined = !!joinStep && (joinStep.osc.stage === 'applied' || joinStep.osc.stage === 'verified');
+    // the LCM user is added to the local Administrators a moment after the join: only then does Sonar switch accounts
+    var adminsConfigured = domainJoined && !!(sp.changes || {}).DomainJoin && r >= sp.changes.DomainJoin.to + 0.1;
+    var gstep = tree.filter(function (t) { return t.osc.guarded; })[0];
+    return {
+      name: sp.name, method: started ? sp.method : sp.method, methodSource: started ? 'resolved' : 'expected', methodNote: started ? '' : 'scenario.os_install is simplified',
+      declared: started ? sp.declared : '', declaredMethod: started ? 'Ztp' : '', mismatch: !!sp.mismatch && started, transport: started ? sp.transport : '',
+      evidence: started ? { handoff: sp.method === 'Ztp' ? 'ready' : 'none', arc: sp.method === 'Ztp' ? 'Connected' : 'none', winrm: sp.transport === 'WinRM' ? 'answers' : 'not tried' } : { handoff: '', arc: '', winrm: '' },
+      warnings: sp.mismatch && started ? ['Declared os_install \'simplified\' but there is no ready ZTP handoff and no Connected Arc machine, and the machine answers on WinRM, so the ISO path is used. Check scenario.os_install.'] : [],
+      versions: started && planned ? v : { hostname: '', osVersion: '', build: '', osCaption: '', sbePublisher: v.sbePublisher, sbeFamily: v.sbeFamily, sbeVersion: v.sbeVersion, sbePackage: '', sbeDelivery: started ? v.sbeDelivery : '', schemaVersion: started ? '5.3.0' : '', wrapperVersion: started ? '1.0.0' : '' },
+      status: status, state: state, stateText: stateText, currentStep: current, converged: converged,
+      retries: sp.retry && r >= sp.retry.at ? 1 : 0, restarts: sp.reconnect && r >= sp.reconnect.at ? 1 : 0,
+      changes: tree.filter(function (t) { return t.osc.stage === 'planned'; }).length, blocked: 0, errors: failedStep ? failedStep.errors : [], attempt: started ? (att2 ? 2 : 1) : 0,
+      start: started ? at(cur.start) : null, end: converged ? at(cur.convergedAt) : null, lastEventAt: started ? at(Math.min(r, cur.convergedAt)) : null,
+      domainJoined: domainJoined, domainAdminsConfigured: adminsConfigured, logAccount: adminsConfigured
+        ? { kind: 'domain', userName: 'IIC\\svc-lcm', reason: 'domain-joined: using IIC\\svc-lcm', warning: '', waitingForAdmins: false }
+        : domainJoined
+          ? { kind: 'local', userName: 'azl-admin', reason: 'joined, waiting for domain administrators: using azl-admin', warning: '', waitingForAdmins: true }
+          : { kind: 'local', userName: 'azl-admin', reason: 'workgroup: using azl-admin', warning: '', waitingForAdmins: false },
+      guarded: gstep ? gstep.osc.guarded.state : '',
+      guardedDetail: gstep ? gstep.osc.guarded : null,
+      runCommands: sp.transport === 'ArcRunCommand' && started && !converged ? [{ name: 'azl-osconfig-3f9c1a7b2d4e', state: retrying ? 'Unknown' : 'Running', provisioning: 'Succeeded', since: at(Math.max(cur.start, r - 0.2)), ageMinutes: 0, stuck: false }] : [],
+      tree: tree
+    };
+  }
+
+  function oscDemoState(r, base, count, unit) {
+    var specs = oscDemoSpecs().slice(0, count || 3);
+    var nodes = specs.map(function (sp) { return oscDemoNode(sp, r, base, unit); });
+    function at(m) { return new Date(base + m * (unit || 60000)).toISOString(); }
+    var endAt = Math.max.apply(null, specs.map(function (sp) { return sp.second ? sp.second.convergedAt : sp.convergedAt; }));
+    var started = r >= 0.2, planDone = r >= 1.0, completed = r >= endAt + 0.1;
+    var total = nodes.length, ok = nodes.filter(function (n) { return n.state === 'converged'; }).length;
+    var failed = nodes.filter(function (n) { return n.state === 'failed'; }).length, retrying = nodes.filter(function (n) { return n.state === 'retrying'; }).length;
+    var ready = ok === total;
+    var wipeNodes = specs.filter(function (sp) { return sp.wipe; }).map(function (sp) {
+      var n = nodes.filter(function (x) { return x.name === sp.name; })[0], st = n.tree.filter(function (t) { return t.osc.step === 'ClearStorage'; })[0].osc.stage;
+      return { node: sp.name, disks: sp.wipe, done: st === 'applied' || st === 'verified' };
+    });
+    var warnings = [];
+    nodes.forEach(function (n) { n.warnings.forEach(function (w) { warnings.push(n.name + ': ' + w); }); });
+    return {
+      configured: true, status: !started ? 'notstarted' : failed ? 'error' : ready ? 'success' : 'running',
+      state: !started ? 'waiting' : failed ? 'failed' : ready ? 'converged' : !planDone ? 'planning' : 'applying', ready: ready,
+      run: { started: started ? at(0.2) : null, completed: completed ? at(endAt + 0.1) : null, mode: 'Apply', exitCode: completed ? 0 : null, planCompleted: planDone, planChanges: 17,
+        cluster: 'iic-azl-c01', schemaVersion: '5.3.0', wrapperVersion: '1.0.0', lastEventAt: at(Math.min(r, endAt)), events: 64 },
+      nodesTotal: total, nodesConverged: ok, nodesFailed: failed, nodesRetrying: retrying,
+      wipe: planDone ? { published: true, enabled: true, count: wipeNodes.length ? 1 : 0, pending: wipeNodes.some(function (w) { return !w.done; }), nodes: wipeNodes } : { published: false, enabled: false, count: 0, pending: false, nodes: [] },
+      nodes: nodes, warnings: warnings
+    };
+  }
+
+  // The event lines of the demo run up to r, as the log pane shows them: "<time> [osconfig] <node> <State> (<Step>): ...".
+  function oscDemoLines(r, base, count, unit) {
+    var out = [];
+    function at(m) { return new Date(base + m * (unit || 60000)).toISOString(); }
+    var specs = oscDemoSpecs().slice(0, count || 3);
+    function add(m, node, state, step, level, text) { if (m <= r) out.push({ time: at(m), level: level, text: at(m) + ' [osconfig] ' + node + ' ' + state + (step ? ' (' + step + ')' : '') + ': ' + text }); }
+    add(0.2, '*', 'RunStarted', '', 'info', 'OS configuration run started: mode Apply, cluster iic-azl-c01, ' + specs.length + ' node(s): ' + specs.map(function (x) { return x.name; }).join(', ') + '.');
+    specs.forEach(function (sp) {
+      var n = sp.name;
+      add(sp.start, n, 'NodeStarted', '', 'info', 'Looking at ' + n + ': its handoff, its Arc machine, and whether it answers on WinRM.');
+      add(sp.start + 0.1, n, 'MethodResolved', '', sp.mismatch ? 'warning' : 'info', 'Declared os_install \'simplified\'; so the ' + sp.method + ' path over ' + sp.transport + (sp.mismatch ? '. Warning: no ready ZTP handoff, the machine answers on WinRM, so the ISO path is used.' : '.'));
+      add(sp.start + 0.1, n, 'TransportResolved', '', 'info', n + ' is reached over ' + sp.transport + ' for every step.');
+      Object.keys(sp.changes).forEach(function (st) {
+        var ch = sp.changes[st];
+        var dj = st === 'DomainJoin';
+        add(sp.planAt, n, dj ? 'DomainJoinPlanned' : 'StepPlanned', st, 'info', 'Change: ' + st + ': ' + ch.current + ' -> ' + ch.desired);
+        add(ch.from, n, dj ? 'DomainJoinApplying' : 'StepApplying', st, 'info', 'Changing: ' + st + ': ' + ch.current + ' -> ' + ch.desired);
+        if (ch.guarded) {
+          add(ch.from, n, 'NetworkChangeStaged', 'Network', 'info', 'The change is staged on the node with a snapshot; the watchdog is armed.');
+          add(ch.from + 0.3, n, 'NetworkChangeVerifying', 'Network', 'info', 'The node checks its own address, gateway and DNS for a stable minute.');
+          add(ch.from + 0.6, n, 'NetworkChangeAwaitingConfirm', 'Network', 'warning', 'Local checks passed; waiting for the orchestrator to confirm within 10 minutes, or the node reverts. (warning)');
+          add(ch.to, n, 'NetworkChangeCommitted', 'Network', 'info', 'Both proofs are in: the change is committed and the watchdog is disarmed.');
+        }
+        if (ch.fail) add(ch.fail.at, n, 'StepFailed', st, 'error', 'Failed: ' + ch.fail.reason);
+        else add(ch.to, n, dj ? 'DomainJoined' : 'StepApplied', st, 'info', dj ? 'Joined iic.example.test and restarted.' : 'Applied: ' + st);
+        if (dj) add(ch.to + 0.1, n, 'DomainAdminsConfigured', st, 'info', 'The LCM user IIC\\svc-lcm was added to the local Administrators group.');
+      });
+      if (sp.retry) add(sp.retry.at, n, 'NodeRetry', '', 'warning', 'The Arc Run Command ended in state Unknown (the node\'s agent may have lost its connection). Try 1 of 3 in the Apply pass; trying again in 15 s.');
+      if (sp.reconnect) { add(sp.reconnect.at, n, 'NodeReconnecting', '', 'warning', 'The node restarted (a computer name change needs one); the run waits for it.'); add(sp.reconnect.to, n, 'NodeReconnected', '', 'info', 'The node came back with a new boot time and answered again.'); }
+      if (sp.second) {
+        add(sp.changes.Drivers.fail.at, n, 'NodeFailed', '', 'error', sp.changes.Drivers.fail.reason);
+        add(sp.second.start, n, 'NodeStarted', '', 'info', 'Looking at ' + n + ' again.');
+        add(sp.second.planAt, n, 'StepPlanned', 'Drivers', 'info', 'Change: Drivers: 24.1.0 -> 24.4.1.0');
+        add(sp.second.changes.Drivers.from, n, 'StepApplying', 'Drivers', 'info', 'Changing: Drivers: 24.1.0 -> 24.4.1.0');
+        add(sp.second.changes.Drivers.to, n, 'StepApplied', 'Drivers', 'info', 'Applied: Drivers');
+      }
+      add(sp.second ? sp.second.convergedAt : sp.convergedAt, n, 'NodeConverged', '', 'info', 'The verification pass found nothing left to change.');
+    });
+    add(1.0, '*', 'PlanCompleted', '', 'info', 'Plan complete for 3 node(s): 17 change(s) pending, 0 blocked. Nothing was changed.');
+    add(1.0, '*', 'WipeListPublished', '', 'warning', '1 node(s) have local disks that WILL BE WIPED NOW: iic-azl-n02: 3 local disks (1000 GB) (warning)');
+    out.sort(function (a, b) { return Date.parse(a.time) - Date.parse(b.time); });
+    return out;
+  }
+
   // ------------------------------------------------------------------ demo data (pure; ?demo=1 and its replay)
 
   function demoFactory(now) {
@@ -1335,6 +1729,7 @@
 
   // ?demo=1&replay=1: the demo deployment as a built-in recording (64 minutes, a poll every 20 s): Arc registration,
   // Validate, Deploy, the log lines at their times. Built with replayDiff, so it is a real keyframe + delta recording.
+  var OSC_DEMO_SCALE = 1.12;
   function demoRecording(now) {
     var d = demoDeploymentSample(now), M = 60000, final = d.state;
     var start = now - 64 * M, valStart = now - 58 * M, depStart = now - 36 * M;
@@ -1345,9 +1740,12 @@
       var valDone = vs && val.every(function (n) { return normStatus(n.status) === 'success'; });
       var phase = ds ? 'deployment' : vs ? 'validation' : 'arc-registration';
       var path = runningPath(ds ? dep : vs ? val : []);
+      // OS configuration runs in the minutes before Validate (its scenario is 6.4 minutes long; the recording gives it 5.7).
+      var osR = Math.max(0, (T - start) / M) * OSC_DEMO_SCALE;
       return {
         cluster: final.cluster, mode: ds ? 'Deploy' : vs ? 'Validate' : null, provisioningState: ds ? 'Succeeded' : vs ? 'Accepted' : null,
         phase: phase, activePhase: phase,
+        osConfiguration: oscDemoState(osR, start, 2, M / OSC_DEMO_SCALE),
         validation: { status: vs ? (valDone ? 'Success' : 'InProgress') : 'notstarted', tree: vs ? val : [], counts: {} },
         deployment: { status: ds ? 'InProgress' : 'notstarted', tree: ds ? dep : [], counts: {} },
         nodes: cloneJSON(final.nodes),
@@ -1374,6 +1772,9 @@
       var m = d.msgs[mi++ % d.msgs.length];
       lines.push({ time: at(L), received: at(L), timeSource: 'line', file: d.file, level: m[0], text: m[1] });
     }
+    oscDemoLines(99, start, 2, M / OSC_DEMO_SCALE).forEach(function (l) {
+      lines.push({ time: l.time, received: l.time, timeSource: 'line', file: 'os-config-events', level: l.level, text: l.text });
+    });
     lines.forEach(function (l) { events.push({ t: l.received, k: 'log', lines: [l] }); });
     events.push({ t: at(now), k: 'end' });
     var order = events.map(function (e, i) { return { e: e, i: i, t: Date.parse(e.t) }; });
@@ -1407,7 +1808,10 @@
       demoDeploymentSample: demoDeploymentSample, demoRecording: demoRecording, setClock: setClock, nowMs: nowMs,
       nodeDuration: nodeDuration,
       modeStates: modeStates, activeModeId: activeModeId, modeName: modeName, summaryFor: summaryFor, stepProgress: stepProgress,
-      lifecyclePlain: lifecyclePlain, arcInfo: arcInfo, machineWaits: machineWaits, machineList: machineList
+      lifecyclePlain: lifecyclePlain, arcInfo: arcInfo, machineWaits: machineWaits, machineList: machineList,
+      oscOf: oscOf, oscNodes: oscNodes, oscHasData: oscHasData, osConfigTreeOf: osConfigTreeOf, oscMethodChip: oscMethodChip, oscVersionLines: oscVersionLines,
+      oscCard: oscCard, oscHeadline: oscHeadline, oscFacts: oscFacts, oscCountdown: oscCountdown, fmtCountdown: fmtCountdown,
+      oscDemoState: oscDemoState, oscDemoLines: oscDemoLines
     };
     return;
   }
@@ -1716,6 +2120,11 @@
       if (k === 'unknown') label = str(isObj(s[phase]) ? s[phase].status : '') || 'Unknown';
       return { key: k, label: label };
     }
+    var osc = oscOf(s);
+    if (osc && oscHasData(osc) && activeModeId(s) === 'osconfig') {
+      var okey = osc.status === 'success' ? 'success' : osc.status === 'error' ? 'error' : osc.status === 'running' ? 'running' : 'unknown';
+      return { key: okey, label: 'OS configuration: ' + oscHeadline(osc) };
+    }
     if (isObj(s.provisioning) && arr(s.provisioning.nodes).length) {
       var sum = provisioningSummary(app.provTree);
       if (readyForValidate(s)) {
@@ -1753,6 +2162,11 @@
     }
     walk(isObj(s.validation) ? s.validation.tree : null);
     walk(isObj(s.deployment) ? s.deployment.tree : null);
+    var oscRun = oscOf(s) && isObj(oscOf(s).run) ? oscOf(s).run : null;
+    if (min === Infinity && oscRun && activeModeId(s) === 'osconfig' && !isNaN(parseTime(oscRun.started))) {
+      min = parseTime(oscRun.started);   // OS configuration is the mode to watch: time since its run began
+      if (!isNaN(parseTime(oscRun.completed))) max = parseTime(oscRun.completed); else running = true;
+    }
     if (min === Infinity) walk(app.provTree);   // before validation: time since the machines started getting ready
     if (min === Infinity) return null;
     var phase = normPhase(s.phase);
@@ -1822,6 +2236,13 @@
     ]);
     host.appendChild(head);
     host.appendChild(el('div', { class: 'head', id: 'sum-headline', text: app.state ? sm.headline : 'Waiting for data from the Sonar back end' }));
+    if (arr(sm.facts).length) {
+      var facts = el('dl', { class: 'facts', 'aria-label': 'Run summary' });
+      sm.facts.forEach(function (f) {
+        facts.appendChild(el('div', null, [el('dt', { text: f.k }), el('dd', { class: f.warn ? 'warnk' : null, text: f.v })]));
+      });
+      host.appendChild(facts);
+    }
     var cards = el('div', { class: 'cards', role: 'group', 'aria-label': 'Machines' });
     sm.cards.forEach(function (c) {
       var sel = app.filter.node && app.filter.node.toLowerCase() === c.name.toLowerCase();
@@ -1832,13 +2253,15 @@
           c.seed ? el('span', { class: 'seed', text: 'seed' }) : null,
           chipEl(c.kind, c.state, c.tip)
         ]),
-        el('span', { class: 'ln', title: c.arc.raw ? 'Azure Arc says: ' + c.arc.raw : null }, [
+        c.arc ? el('span', { class: 'ln', title: c.arc.raw ? 'Azure Arc says: ' + c.arc.raw : null }, [
           el('span', { class: 'arc arc-' + c.arc.kind, text: c.arc.text })
-        ]),
+        ]) : null,
+        c.chips ? el('span', { class: 'ln chips' }, c.chips.map(function (x) { return chipEl(x.kind, x.text, x.title); })) : null,
         c.progress !== null && c.progress !== undefined ? el('span', { class: 'bar', role: 'progressbar', 'aria-label': c.name + ' progress',
           'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(c.progress) }, [el('i', { style: 'width:' + c.progress + '%' })]) : null,
-        c.waits ? el('span', { class: 'ln muted' }, [c.waits]) : null
-      ]);
+        c.waits ? el('span', { class: 'ln muted' }, [c.waits]) : null,
+        c.until ? el('span', { class: 'ln' }, [el('span', { class: 'countdown', 'data-until': c.until, text: 'Confirmation window: ' + fmtCountdown(oscCountdown(c.until)) })]) : null
+      ].concat(arr(c.lines).map(function (t) { return el('span', { class: 'ln muted' }, [t]); })));
       b.addEventListener('click', function () { selectNode(c.name); });
       cards.appendChild(b);
     });
@@ -1874,12 +2297,14 @@
     var windowBefore = filterKey ? windowSignature(stepWindow()) : null;
     app.state = s;
     app.provTree = provisioningTreeOf(s);
+    app.oscTree = osConfigTreeOf(s);
     app.extTree = extensionsTreeOf(s);
     var collapse = provisioningCollapse(s.activePhase || (normPhase(s.phase) === 'failed' ? '' : s.phase), app.provAutoCollapsed);
     if (collapse === 'collapse') { app.sectionCollapsed.provisioning = true; app.provAutoCollapsed = true; }
     else if (collapse === 'expand') { app.sectionCollapsed.provisioning = false; app.provAutoCollapsed = false; }
     app.stepIndex = new Map();
     indexSection('provisioning');
+    indexSection('osconfiguration');
     indexSection('validation');
     indexSection('extensions');
     indexSection('deployment');
@@ -1920,7 +2345,7 @@
   }
 
   function indexSection(section) {
-    var sec = app.state && app.state[section];
+    var sec = app.state && app.state[section === 'osconfiguration' ? 'osConfiguration' : section];
     var seen = new Set();
     function walk(nodes, parentKey) {
       arr(nodes).forEach(function (n, i) {
@@ -1933,7 +2358,7 @@
         walk(n.children, k);
       });
     }
-    walk(section === 'provisioning' ? app.provTree : section === 'extensions' ? app.extTree : (isObj(sec) ? sec.tree : null), section);
+    walk(section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'extensions' ? app.extTree : (isObj(sec) ? sec.tree : null), section);
   }
 
   function findCurrentKey() {
@@ -1970,6 +2395,7 @@
     ['update', 'deployment', 'validation'].forEach(function (sec) {
       if (!best && isObj(s[sec])) walk(s[sec].tree, 0);
     });
+    if (!best && activeModeId(s) === 'osconfig') walk(app.oscTree, 0);
     if (!best && (s.activePhase === 'provisioning' || s.activePhase === 'arc-registration')) walk(app.provTree, 0);
     if (best) return best.__key;
     // 3. by name
@@ -2043,9 +2469,9 @@
     });
     var shown = 0;
     wanted.forEach(function (section) {
-      var sec = section === 'provisioning' ? (isObj(s.provisioning) ? s.provisioning : {}) : (isObj(s[section]) ? s[section] : {});
-      var tree = section === 'provisioning' ? app.provTree : section === 'extensions' ? app.extTree : arr(sec.tree);
-      var only = section === 'provisioning' ? str(app.filter.node).toLowerCase() : '';
+      var sec = section === 'provisioning' ? (isObj(s.provisioning) ? s.provisioning : {}) : section === 'osconfiguration' ? (isObj(s.osConfiguration) ? s.osConfiguration : {}) : (isObj(s[section]) ? s[section] : {});
+      var tree = section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'extensions' ? app.extTree : arr(sec.tree);
+      var only = section === 'provisioning' || section === 'osconfiguration' ? str(app.filter.node).toLowerCase() : '';
       if (only) tree = tree.filter(function (n) { return str(n.name).toLowerCase() === only; });
       var wrap = host.querySelector('.tree-section[data-section="' + section + '"]');
       if (!tree.length) { if (wrap) wrap.remove(); app.treeSig[section] = null; return; }
@@ -2093,7 +2519,7 @@
 
   function buildSection(section, tree) {
     var wrap = el('div', { class: 'tree-section', 'data-section': section });
-    var title = section === 'provisioning' ? 'Machines' : section === 'extensions' ? 'Extensions (installed during Validate)' :
+    var title = section === 'provisioning' || section === 'osconfiguration' ? 'Machines' : section === 'extensions' ? 'Extensions (installed during Validate)' :
       section === 'validation' ? 'Validation' : section === 'update' ? 'Update (unverified against a live run)' : 'Deployment';
     if (section === 'extensions') wrap.appendChild(el('h3', { class: 'sub-h', text: title }));
     var ul = el('ul', { class: 'tree', role: 'tree', id: 'tree-' + section, 'aria-label': title + ' steps' });
@@ -2143,12 +2569,28 @@
     row.appendChild(ic);
 
     var nameEl = el('span', { class: 'step-name' });
-    if (rule.side !== 'machine' && section !== 'provisioning' && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
+    if (rule.side !== 'machine' && section !== 'provisioning' && section !== 'osconfiguration' && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
     nameEl.appendChild(el('span', { class: 'sn', text: name }));
     if (rule.side === 'azure') nameEl.appendChild(el('span', { class: 'az', title: 'This step runs in Azure: Sonar reads its status from Azure, there are no node log lines for it.', text: 'Azure' }));
+    if (isObj(n.osc) && n.osc.arc === true) nameEl.appendChild(el('span', { class: 'az', title: 'This step runs as an Azure Arc Run Command: Azure starts it on the node and Sonar can read the run command from Azure.', text: 'Azure' }));
     var desc = stepDescription(n);
     if (desc) nameEl.appendChild(el('span', { class: 'desc', text: desc }));
     row.appendChild(nameEl);
+    if (isObj(n.osc) && n.osc.stage) {
+      var oo = n.osc, stageWord = oo.verifyOnly && (oo.stage === 'ok' || oo.stage === 'info') ? 'Verify only: OK' : (oo.verifyOnly && oo.stage === 'blocked' ? 'Verify only: differs' : (OSC_STAGE_LABEL[oo.stage] || oo.stage));
+      var oscs = el('span', { class: 'osc-stage' });
+      oscs.appendChild(chipEl(OSC_STAGE_KIND[oo.stage] || 'idle', stageWord, oo.notApplicable ? 'Does not apply to this machine: ' + str(n.description) : (oo.verifyOnly ? 'ZTP did this; the run checks it and does not change it.' : '')));
+      if (isObj(oo.guarded) && str(oo.guarded.state)) {
+        var gd = oo.guarded, gtext = OSC_GUARDED_LABEL[str(gd.state)] || str(gd.state);
+        if (str(gd.state) === 'Repaired' && str(gd.rung)) gtext += ' (rung ' + str(gd.rung) + ')';
+        oscs.appendChild(chipEl(str(gd.state) === 'RolledBack' || str(gd.state) === 'Refused' ? 'err' : str(gd.state) === 'Committed' ? 'ok' : 'warn', 'Network change: ' + gtext, 'The management network change is guarded: the node reverts on its own unless the orchestrator confirms it in time.'));
+        if (str(gd.state) === 'AwaitingConfirm' && str(gd.confirmBy)) {
+          oscs.appendChild(el('span', { class: 'countdown', 'data-until': str(gd.confirmBy), text: fmtCountdown(oscCountdown(gd.confirmBy)) }));
+        }
+      }
+      var descEl = nameEl.querySelector('.desc');
+      nameEl.insertBefore(oscs, descEl);
+    }
 
     var durEl = el('span', { class: 'dur' });
     if (st === 'running' && !isNaN(parseTime(n.start))) durEl.setAttribute('data-start', String(parseTime(n.start)));
@@ -2162,6 +2604,7 @@
     row.addEventListener('click', function () { selectStep(k); });
     li.appendChild(row);
     if (isObj(n.prov)) li.appendChild(buildProvMeta(n, st));
+    if (isObj(n.osc) && n.osc.machine === true) li.appendChild(buildOscMeta(n));
 
     if (selected && rule.side === 'azure') li.appendChild(buildAzureDetail(n, st, name));
     var errs = arr(n.errors).map(str).filter(Boolean);
@@ -2218,6 +2661,36 @@
     if (note) meta.appendChild(el('span', { class: 'prov-probe', title: str(p.probe.reason), text: note }));
     if (st === 'error' && n.description) meta.appendChild(el('span', { class: 'prov-msg', text: n.description }));
     return meta.childNodes.length ? meta : document.createDocumentFragment();
+  }
+
+  // Under a machine row of the OS configuration mode: the method, the transport, the versions, retries and restarts, the
+  // guarded network change, the Arc run commands read from Azure, and any warning.
+  function buildOscMeta(n) {
+    var m = n.osc, meta = el('div', { class: 'prov-meta osc-meta' });
+    var chip = oscMethodChip(m);
+    meta.appendChild(chipEl(chip.kind, chip.text, chip.title));
+    if (m.transport) meta.appendChild(el('span', { title: 'How this machine is reached', text: OSC_TRANSPORT_LABEL[m.transport] || m.transport }));
+    oscVersionLines({ versions: m.versions }).forEach(function (t) { meta.appendChild(el('span', { class: 'osc-ver', text: t })); });
+    if (m.retries) meta.appendChild(el('span', { class: 'prov-steps', 'data-status': 'running', title: 'An Arc Run Command ended in state Unknown and was run again', text: 'Retried ' + m.retries + '×' }));
+    if (m.restarts) meta.appendChild(el('span', { class: 'prov-steps', 'data-status': 'running', text: 'Restarted ' + m.restarts + '×' }));
+    if (m.guarded) {
+      var g = m.guardedDetail || {};
+      var gt = 'Network change: ' + (OSC_GUARDED_LABEL[m.guarded] || m.guarded);
+      var gspan = el('span', { class: 'prov-steps', 'data-status': m.guarded === 'RolledBack' || m.guarded === 'Refused' ? 'error' : m.guarded === 'Committed' ? 'success' : 'running', text: gt });
+      meta.appendChild(gspan);
+      if (m.guarded === 'AwaitingConfirm' && str(g.confirmBy)) meta.appendChild(el('span', { class: 'countdown', 'data-until': str(g.confirmBy), text: fmtCountdown(oscCountdown(g.confirmBy)) }));
+      if ((m.guarded === 'RolledBack' || m.guarded === 'Refused') && str(g.reason)) meta.appendChild(el('span', { class: 'prov-msg', text: 'The node says: ' + str(g.reason) }));
+    }
+    m.runCommands.forEach(function (rc) {
+      meta.appendChild(el('span', { class: 'prov-steps', 'data-status': rc.stuck ? 'error' : 'running', title: 'Read from Azure: Microsoft.HybridCompute/machines/runCommands (read only)',
+        text: 'Run command ' + str(rc.name) + ': ' + str(rc.state) + (rc.ageMinutes !== null && rc.ageMinutes !== undefined ? ', ' + rc.ageMinutes + ' min' : '') + (rc.stuck ? ' (stuck?)' : '') }));
+    });
+    if (isObj(m.logAccount) && str(m.logAccount.reason)) {
+      meta.appendChild(el('span', { class: 'osc-account', title: 'The account that reads this machine\u2019s logs: the local one until the machine reports DomainJoined, then the domain account. The password is never shown.',
+        text: 'Log account: ' + str(m.logAccount.reason) }));
+    }
+    m.warnings.forEach(function (w) { meta.appendChild(el('span', { class: 'prov-msg osc-warn', text: 'Warning: ' + w })); });
+    return meta;
   }
 
   function isVisibleItem(item) {
@@ -2378,7 +2851,7 @@
 
   // ------------------------------------------------------------------ mode bar
 
-  var MODE_OF_SECTION = { provisioning: 'prov', validation: 'validate', extensions: 'validate', deployment: 'deploy', update: 'update' };
+  var MODE_OF_SECTION = { provisioning: 'prov', osconfiguration: 'osconfig', validation: 'validate', extensions: 'validate', deployment: 'deploy', update: 'update' };
 
   // The mode shown: the one the user clicked while the run is still in the same mode, else the active one.
   function currentModeId() {
@@ -2446,6 +2919,11 @@
 
   function tickTimers() {
     var now = nowMs();
+    var cds = document.querySelectorAll('.countdown[data-until]');
+    for (var ci = 0; ci < cds.length; ci++) {
+      var left = oscCountdown(cds[ci].getAttribute('data-until'), now), pre = cds[ci].textContent.indexOf('Confirmation window: ') === 0 ? 'Confirmation window: ' : '';
+      cds[ci].textContent = pre + fmtCountdown(left);
+    }
     var nodes = document.querySelectorAll('.dur[data-start]');
     for (var i = 0; i < nodes.length; i++) {
       var a = Number(nodes[i].getAttribute('data-start'));
@@ -2542,7 +3020,7 @@
   // The phase that matches a mode (the tab the window opens on), and the phase that is happening now.
   function phaseOfMode(modeId) {
     var route = provRouteOf(app.state);
-    return { prov: route === 'oem-image' ? 'arc-registration' : 'provisioning', validate: 'validation', deploy: 'deployment', update: 'update', health: 'post-deployment' }[modeId] || 'provisioning';
+    return { prov: route === 'oem-image' ? 'arc-registration' : 'provisioning', osconfig: 'provisioning', validate: 'validation', deploy: 'deployment', update: 'update', health: 'post-deployment' }[modeId] || 'provisioning';
   }
   function currentGuidancePhase() {
     var s = app.state, act = s ? str(s.activePhase).toLowerCase() : '';
@@ -2623,6 +3101,16 @@
 
     var account = pick(g, ['account', 'accounts', 'user', 'who', 'readBy']);
     if (account !== undefined) row('Account', textList(listOf(account), false));
+    var accountNodes = oscNodes(app.state).filter(function (n) { return isObj(n.logAccount) && str(n.logAccount.reason); });
+    if (accountNodes.length) {
+      var acctList = el('ul', { class: 'acct' });
+      accountNodes.forEach(function (n) {
+        var li = el('li', null, [el('strong', { text: str(n.name) + ': ' }), document.createTextNode(str(n.logAccount.reason))]);
+        if (str(n.logAccount.warning)) li.appendChild(el('span', { class: 'warnk', text: ' ' + str(n.logAccount.warning) }));
+        acctList.appendChild(li);
+      });
+      row('Account in use', acctList);
+    }
     var where = pick(g, ['where', 'logs', 'logPaths', 'paths', 'location', 'locations', 'logLocation']);
     if (where !== undefined) row('Where', textList(listOf(where), true));
     var when = pick(g, ['when', 'available', 'availability', 'whenAvailable']);
@@ -2921,6 +3409,13 @@
     } else {
       row(g4, 'ZTP events', replay ? '' : 'no event file set', [srcGroup([replay ? '' : 'the machine steps from the nodes are not shown'])]);
     }
+    var oe = isObj(s.osConfigEvents) ? s.osConfigEvents : {};
+    if (oe.configured) {
+      row(g4, 'OS configuration events', oe.events + ' event' + (oe.events === 1 ? '' : 's'),
+        [srcGroup([oe.lastEventAt ? ageEl('last ', oe.lastEventAt) : (oe.events ? null : 'none yet'), oe.fileFound ? 'file ' + oe.file : 'file ' + oe.file + ' not found yet'])]);
+    } else {
+      row(g4, 'OS configuration events', replay ? '' : 'no event file set', [srcGroup([replay ? '' : 'the OS configuration mode shows no steps'])]);
+    }
     var nl = isObj(s.nodeLogs) ? s.nodeLogs : {};
     // A replay shows the recorded tailer, not the idle one of the replay server.
     if (replay && isObj(app.tailer)) nl = { state: app.tailer.state, node: app.tailer.node, credential: app.tailer.credential, reason: app.tailer.reason };
@@ -2928,6 +3423,25 @@
     row(g4, 'Node logs', live ? 'live from the seed node' + (nl.node ? ' (' + nl.node + ')' : '') : 'not available: Azure status only',
       [srcGroup(live ? [(nl.transport && nl.transport !== 'auto' ? 'via ' + nl.transport : ''), (nl.credential ? 'as ' + nl.credential : ''), nl.lastLineAt ? ageEl('last line ', nl.lastLineAt) : null] :
         [firstLine(nl.reason || 'the tailer has not connected yet', 90), nl.lastLineAt ? ageEl('last line ', nl.lastLineAt) : null])]);
+
+    // OS configuration: how each machine is being configured and with which versions (from the run's events).
+    var oscState = oscOf(app.state), oscMachines = oscNodes(app.state);
+    if (oscState && oscHasData(oscState) && oscMachines.length) {
+      var gO = group('OS configuration', true);
+      var orun = isObj(oscState.run) ? oscState.run : {};
+      row(gO, 'Run', (orun.mode ? orun.mode + ', ' : '') + (OSC_STATE_LABEL[oscState.state] || str(oscState.state)) + ', ' + oscState.nodesConverged + ' of ' + oscState.nodesTotal + ' converged',
+        [srcGroup([orun.started ? 'started ' + fmtClock(parseTime(orun.started)) : null, orun.exitCode !== null && orun.exitCode !== undefined ? 'exit code ' + orun.exitCode : null])]);
+      oscMachines.forEach(function (n) {
+        var chip = oscMethodChip({ method: n.method, methodSource: n.methodSource, methodNote: n.methodNote, mismatch: n.mismatch, declared: n.declared });
+        var verLines = oscVersionLines(n);
+        gO.appendChild(el('dt', { class: 'mono-name', text: str(n.name), title: str(n.name) }));
+        gO.appendChild(el('dd', null, [
+          el('span', { class: 'val', text: chip.text + (n.transport ? ' via ' + (OSC_TRANSPORT_LABEL[n.transport] || n.transport) : '') }),
+          verLines.length ? el('span', { class: 'src', text: verLines.join(' · ') }) : el('span', { class: 'src', text: 'no versions reported yet' }),
+          isObj(n.logAccount) && str(n.logAccount.reason) ? el('span', { class: 'src', text: 'log access: ' + str(n.logAccount.reason) }) : null
+        ]));
+      });
+    }
 
     var c = isObj(d.config) ? d.config : {};
     var g5 = group('Config', true);
@@ -2974,6 +3488,7 @@
       sources: {
         azure: { pollSeconds: Number(cfg.pollSeconds) || 20, lastAnswerAt: str(state.polledAt) || iso(12000), ok: true, message: '' },
         ztpEvents: { configured: simplified, file: 'ztp-events.jsonl', fileFound: true, events: 212, lastEventAt: iso(4000) },
+        osConfigEvents: { configured: !!oscOf(state), file: 'os-configuration-events.jsonl', fileFound: true, events: 118, lastEventAt: iso(3000) },
         nodeLogs: { state: str(app.tailer && app.tailer.state) || 'connected', node: str(app.tailer && app.tailer.node), credential: 'supplied', transport: 'auto',
           reason: str(app.tailer && app.tailer.reason), lastLineAt: iso(3000) }
       },
@@ -3763,6 +4278,51 @@
     app.demoExport = function () { return { config: app.config, timeline: [state], logs: app.store.lines.map(function (l) { return { seq: l.seq, time: l.time, received: l.received, timeSource: l.timeSource, file: l.file, level: l.level, text: l.text }; }) }; };
   }
 
+  // ?demo=1&route=osconfig: an OS configuration run of three machines (example names): iic-azl-n01 is ZTP and has converged
+  // after one retry of a lost Arc Run Command; iic-azl-n02 is an ISO install whose OEM drivers step failed (its network
+  // change was committed and it restarted for its computer name); iic-azl-n03 is ZTP and still applying. The run moves on
+  // while the page is open (planned, applying, converged). Sample data only; no API calls.
+  function startOsConfigDemo(iso, M) {
+    var NAMES = ['iic-azl-n01', 'iic-azl-n02', 'iic-azl-n03'], now = Date.now(), r = 4.95, base = now - r * M;
+    function provMachine(name, i) {
+      return { name: name, route: 'simplified', lifecycle: 'Provisioned', lifecycleMessage: 'Machine has been successfully provisioned.', status: 'success', percent: 100, reportedPercent: 100,
+        arcMachineName: '00000000-0000-0000-0000-00000000000' + (i + 1) + '-1', arcSource: 'edgeMachine.job', arcStatus: 'Connected', extensions: [], start: iso(150 * M), end: iso(40 * M), errors: [],
+        ztp: { complete: true, device: { status: 'success' }, network: { status: 'success' }, restore: { status: 'success' } }, tree: [] };
+    }
+    var provNodes = NAMES.map(provMachine);
+    var state = {
+      cluster: 'iic-azl-c01', mode: null, provisioningState: null, phase: 'provisioning', activePhase: 'provisioning',
+      provisioning: { route: 'simplified', routeSource: 'config', phase: 'provisioning', status: 'success', readyForValidate: false, ztpComplete: true, nextStep: null, nodes: provNodes },
+      osConfiguration: oscDemoState(r, base, 3),
+      extensions: { shown: false, status: 'notstarted', nodes: [] },
+      validation: { status: 'notstarted', tree: [], counts: {} }, deployment: { status: 'notstarted', tree: [], counts: {} },
+      nodes: provNodes.map(function (n) { return { name: n.name, arcStatus: n.arcStatus, arcMachineName: n.arcMachineName, arcSource: n.arcSource, lastStatusChange: iso(30 * M) }; }),
+      current: { phase: 'provisioning', stepPath: [], stepName: null }, warnings: [], polledAt: iso(4000)
+    };
+    applyConfig({ cluster: 'iic-azl-c01', resourceGroup: 'rg-iic-azl-c01', identityModel: 'ActiveDirectory', pollSeconds: 20, provisioningRoute: 'simplified',
+      nodes: NAMES.map(function (n, i) { return { name: n, seed: i === 0 }; }), logPaths: ['C:\\Windows\\System32\\Bootstrap\\Logs'] });
+    app.guidance = demoGuidance();
+    applyState(state);
+    applyTailer({ state: 'connected', reason: '', node: NAMES[0], credential: 'supplied' });
+    applyFiles([{ path: 'C:\\Windows\\System32\\Bootstrap\\Logs\\setup.log' }]);
+    var seq = 0, shown = 0;
+    function feed() {
+      var lines = oscDemoLines(r, base, 3);
+      var fresh = lines.slice(shown);
+      shown = lines.length;
+      if (fresh.length) applyLogBatch(fresh.map(function (l) { return { seq: ++seq, time: l.time, received: l.time, timeSource: 'line', file: 'os-config-events', level: l.level, text: l.text }; }), { source: 'live' });
+    }
+    feed();
+    setInterval(function () {
+      if (r < 6.6) r = Math.round((r + 0.15) * 100) / 100;
+      state.osConfiguration = oscDemoState(r, base, 3);
+      state.polledAt = new Date().toISOString();
+      applyState(state);
+      feed();
+    }, 15000);
+    app.demoExport = function () { return { config: app.config, timeline: [state], logs: app.store.lines.map(function (l) { return { seq: l.seq, time: l.time, received: l.received, timeSource: l.timeSource, file: l.file, level: l.level, text: l.text }; }) }; };
+  }
+
   // Steps for a demo machine: names (or [name, description] pairs) one after the other from startAgo; cur is the index of
   // the current step (-1: all finished) and curStatus its status.
   function demoSteps(step, prefix, names, startAgo, per, cur, curStatus, errors) {
@@ -3791,6 +4351,7 @@
   // live 11 Oct 2026). Sample data only; no API calls. ?demo=1&route=simplified is startZtpDemo.
   function startRouteDemo(route, iso, step, M) {
     if (route === 'simplified') { startZtpDemo(iso, step, M); return; }
+    if (route === 'osconfig') { startOsConfigDemo(iso, M); return; }
     function steps(prefix, names, startAgo, per, cur, curStatus, errors) { return demoSteps(step, prefix, names, startAgo, per, cur, curStatus, errors); }
     // OEM image route: the three groups Arc registration shows per machine (OS image update, Bootstrap, Azure registration).
     var UPD = ['Scan', 'Download', 'Install'];

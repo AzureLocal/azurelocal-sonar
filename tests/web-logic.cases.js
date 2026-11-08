@@ -696,10 +696,11 @@ function zNode(name, lifecycle, status, arc, extra) {
 var THREE = [zNode('iic-azl-n01', 'Provisioned', 'success', 'Connected'), zNode('iic-azl-n02', 'Provisioned', 'success', 'Connected'),
   zNode('iic-azl-n03', 'InstallingOs', 'running', 'Disconnected', { lifecycleMessage: 'Installing OS in progress.' })];
 
-test('modeStates: the five tiles for a ZTP run with one machine still installing', function () {
+test('modeStates: the six tiles for a ZTP run with one machine still installing; OS configuration sits between Provisioning and Validate', function () {
   var tiles = m.modeStates(ztpState(THREE));
-  eq(tiles.map(function (t) { return t.id; }), ['prov', 'validate', 'deploy', 'update', 'health']);
-  eq(tiles.map(function (t) { return t.status; }), ['run', 'idle', 'idle', 'idle', 'idle']);
+  eq(tiles.map(function (t) { return t.id; }), ['prov', 'osconfig', 'validate', 'deploy', 'update', 'health']);
+  eq(tiles.map(function (t) { return t.status; }), ['run', 'idle', 'idle', 'idle', 'idle', 'idle']);
+  eq(tiles[1].name, 'OS configuration');
   eq(tiles[0].name, 'Provisioning (ZTP)');
   eq(tiles[0].line, '2 of 3 machines ready');
   eq(tiles[0].hidden, false);
@@ -711,8 +712,8 @@ test('modeStates: a waiting tile has no state line and says when it starts; no t
     eq(t.line, '', t.id + ' has no state line');
     eq(t.tip.length > 0, true, t.id + ' tooltip says when it starts');
   });
-  eq(tiles[1].tip, 'Starts after ZTP and OS configuration are done');
-  eq(tiles[2].tip, 'Starts after validation passes');
+  eq(tiles[2].tip, 'Starts after OS configuration has converged on every machine', 'Validate unlocks logically after OS configuration (information only)');
+  eq(tiles[3].tip, 'Starts after validation passes');
   eq(JSON.stringify(tiles).toLowerCase().indexOf('not started'), -1, 'no "not started" text anywhere');
 });
 
@@ -721,22 +722,23 @@ test('modeStates: Provisioning is named after the route; the OEM image route say
   s.provisioning.route = 'oem-image'; s.phase = 'arc-registration'; s.activePhase = 'arc-registration';
   eq(m.modeStates(s)[0].name, 'Provisioning (OS image)');
   eq(m.modeName('prov', 'simplified'), 'Provisioning (ZTP)');
-  eq(m.modeStates(s)[1].tip, 'Starts when every machine is registered');
+  eq(m.modeStates(s)[2].tip, 'Starts when every machine is registered');
 });
 
-test('modeStates: there are always five tiles; Provisioning is grey with a reason when the run has no machines and is past it (a plain deployment)', function () {
+test('modeStates: there are always six tiles; Provisioning is grey with a reason when the run has no machines and is past it (a plain deployment)', function () {
   var s = { phase: 'deployment', activePhase: 'deployment', validation: { status: 'Success', tree: [{ id: '1', name: 'v', status: 'success', children: [] }] },
     deployment: { status: 'InProgress', tree: [{ id: '2', name: 'Deploy', status: 'running', children: [
       { id: '2.1', name: 'a', status: 'success', children: [] }, { id: '2.2', name: 'b', status: 'running', children: [] }, { id: '2.3', name: 'c', status: 'notstarted', children: [] }] }] } };
   var tiles = m.modeStates(s);
-  eq(tiles.length, 5);
+  eq(tiles.length, 6);
   eq(tiles.some(function (t) { return t.hidden; }), false);
   eq(tiles[0].status, 'idle');
   eq(tiles[0].line, '');
   eq(/No machine data/.test(tiles[0].tip), true);
-  eq(tiles.map(function (t) { return t.status; }), ['idle', 'ok', 'run', 'idle', 'idle']);
-  eq(tiles[1].line, 'Passed');
-  eq(tiles[2].line, 'Step 2 of 3');
+  eq(tiles.map(function (t) { return t.status; }), ['idle', 'idle', 'ok', 'run', 'idle', 'idle']);
+  eq(tiles[1].tip, 'Set osConfigEventsPath to follow the toolkit’s OS configuration run.', 'no OS configuration data: the tile says how to get it');
+  eq(tiles[2].line, 'Passed');
+  eq(tiles[3].line, 'Step 2 of 3');
 });
 
 test('activeModeId: the active phase picks the selected mode; a failed run stays on the mode that failed; done is Health', function () {
@@ -880,7 +882,7 @@ test('stepRule: OEM route groups, validation, extensions, deployment and update'
 });
 
 test('mode sections: each mode shows only its own steps; Health has none', function () {
-  eq(m.MODE_SECTIONS, { prov: ['provisioning'], validate: ['validation', 'extensions'], deploy: ['deployment'], update: ['update'], health: [] });
+  eq(m.MODE_SECTIONS, { prov: ['provisioning'], osconfig: ['osconfiguration'], validate: ['validation', 'extensions'], deploy: ['deployment'], update: ['update'], health: [] });
 });
 
 test('regression: clicking an Azure step (Register machine, Install OS) must not leave the logs empty', function () {
@@ -1198,6 +1200,266 @@ test('page source: no HTML injection, no inline style, no eval; innerHTML only t
   var assigns = appSource.match(/\.innerHTML\s*=\s*[^;]+;/g) || [];
   assigns.forEach(function (a) { eq(/=\s*(ICON\.\w+|icon\(\w+\))\s*;/.test(a), true, 'innerHTML takes only an icon constant: ' + a); });
   eq(assigns.length > 0, true);
+});
+
+// ---------------------------------------------------------------- OS configuration mode
+
+var NOW = Date.parse('2026-11-07T20:00:00Z');
+function oscAt(r, count) { return m.oscDemoState(r, NOW - r * 60000, count || 3); }
+function oscNode(osc, name) { return osc.nodes.filter(function (n) { return n.name === name; })[0]; }
+function oscStage(node, step) { return node.tree.filter(function (t) { return t.osc.step === step; })[0]; }
+function oscRunState(osc, extra) {
+  var s = { phase: 'provisioning', activePhase: 'provisioning', provisioning: { route: 'simplified', ztpComplete: true, nodes: [] }, osConfiguration: osc };
+  if (extra) Object.keys(extra).forEach(function (k) { s[k] = extra[k]; });
+  return s;
+}
+
+test('OS configuration tile: between Provisioning and Validate, equal width (the bar sets --n to the tile count)', function () {
+  var tiles = m.modeStates(oscRunState(oscAt(2)));
+  eq(tiles.map(function (t) { return t.id; }), ['prov', 'osconfig', 'validate', 'deploy', 'update', 'health']);
+  eq(m.MODE_SECTIONS.osconfig, ['osconfiguration']);
+  eq(m.modeName('osconfig', 'simplified'), 'OS configuration');
+  eq(tiles.some(function (t) { return t.hidden; }), false);
+});
+
+test('OS configuration tile states: running while a run works, error with a failed machine, ok only when every machine converged', function () {
+  var running = m.modeStates(oscRunState(oscAt(1.7)))[1];
+  eq(running.status, 'run'); eq(running.line, '0 of 3 converged');
+  var retrying = m.modeStates(oscRunState(oscAt(2.1)))[1];
+  eq(retrying.status, 'run'); eq(retrying.line, '0 of 3 converged, 1 retrying');
+  var failed = m.modeStates(oscRunState(oscAt(4.95)))[1];
+  eq(failed.status, 'err'); eq(failed.line, '1 of 3 converged, 1 failed');
+  var done = oscAt(6.9);
+  eq(done.ready, true);
+  var ok = m.modeStates(oscRunState(done))[1];
+  eq(ok.status, 'ok'); eq(ok.line, '3 of 3 converged');
+  var plan = oscAt(0.95, 3); plan.status = 'notstarted'; plan.state = 'planned'; plan.run.completed = '2026-11-07T19:00:00Z'; plan.run.mode = 'Plan';
+  plan.nodes.forEach(function (n) { n.status = 'notstarted'; n.state = 'planned'; });
+  var planned = m.modeStates(oscRunState(plan))[1];
+  eq(planned.status, 'idle'); eq(planned.line, 'Plan ready');
+});
+
+test('OS configuration never keeps Provisioning running, and it is the mode shown once its run has started', function () {
+  var s = oscRunState(oscAt(3));
+  var tiles = m.modeStates(s);
+  eq(tiles[0].status, 'ok', 'Provisioning stays done while OS configuration runs');
+  eq(m.activeModeId(s), 'osconfig');
+  eq(m.activeModeId({ phase: 'provisioning', activePhase: 'provisioning', provisioning: { route: 'simplified', ztpComplete: true, nodes: [] } }), 'prov', 'no OS configuration data: unchanged');
+  var configured = oscRunState({ configured: true, nodes: [], run: {}, nodesTotal: 0 });
+  eq(m.activeModeId(configured), 'osconfig', 'ZTP complete and the event file is configured: the mode to watch, waiting');
+  var validating = { phase: 'validation', activePhase: 'validation', osConfiguration: oscAt(6.9), validation: { status: 'InProgress', tree: [] } };
+  eq(m.activeModeId(validating), 'validate');
+});
+
+test('OS configuration is ready for the cluster only when every machine has converged', function () {
+  eq(oscAt(5.5).ready, false);
+  eq(oscAt(5.5).nodesConverged, 1);
+  eq(oscAt(6.9).ready, true);
+  eq(oscAt(6.9).nodes.every(function (n) { return n.state === 'converged'; }), true);
+  eq(m.summaryFor(oscRunState(oscAt(6.9)), 'osconfig').headline, 'OS configuration has converged on all 3 machines. Next: Validate');
+});
+
+test('method per machine: Ztp and Iso side by side, expected before an event says, a warning when the declaration differs', function () {
+  var osc = oscAt(2.7);
+  var n1 = oscNode(osc, 'iic-azl-n01'), n2 = oscNode(osc, 'iic-azl-n02');
+  eq(n1.method, 'Ztp'); eq(n2.method, 'Iso');
+  eq(n1.transport, 'ArcRunCommand'); eq(n2.transport, 'WinRM');
+  var c1 = m.oscMethodChip(n1), c2 = m.oscMethodChip(n2);
+  eq(c1.text, 'ZTP'); eq(c1.kind, 'run');
+  eq(c2.text, 'ISO (differs from the file)'); eq(c2.kind, 'warn');
+  eq(/declares simplified/.test(c2.title), true);
+  eq(n2.warnings.length, 1);
+  var early = oscNode(oscAt(0.1), 'iic-azl-n01');
+  eq(m.oscMethodChip(early).text, 'ZTP (expected)');
+  eq(m.oscMethodChip({ method: '' }).text, 'Method unknown');
+});
+
+test('steps follow the method: ZTP verifies the computer name and Arc registration, ISO changes them; N/A steps say why', function () {
+  var osc = oscAt(2.7);
+  var z = oscNode(osc, 'iic-azl-n01'), i = oscNode(osc, 'iic-azl-n02');
+  eq(z.tree.length, 14); eq(i.tree.length, 14);
+  eq(z.tree.map(function (t) { return t.osc.step; }), ['RemoteManagement', 'Network', 'Dns', 'Time', 'Hostname', 'DomainJoin', 'UnusedAdapters', 'LocalAdmin', 'Mpio', 'SanVerify', 'ClearStorage', 'Sbe', 'Drivers', 'ArcRegistration']);
+  eq(oscStage(z, 'Hostname').osc.verifyOnly, true); eq(oscStage(z, 'ArcRegistration').osc.verifyOnly, true);
+  eq(oscStage(z, 'Hostname').osc.stage, 'ok');
+  eq(oscStage(i, 'Hostname').osc.verifyOnly, false); eq(oscStage(i, 'ArcRegistration').osc.verifyOnly, false);
+  eq(oscStage(i, 'Hostname').osc.stage, 'planned'); eq(oscStage(i, 'ArcRegistration').osc.action, 'Change');
+  var na = oscStage(z, 'ClearStorage');
+  eq(na.osc.stage, 'skipped'); eq(na.osc.notApplicable, true); eq(/^Not applicable: /.test(na.description), true); eq(na.status, 'skipped');
+  // before the first event the ZTP steps are known: waiting, with the two verify-only ones marked
+  var waiting = oscNode(oscAt(0.1), 'iic-azl-n03');
+  eq(waiting.tree.every(function (t) { return t.osc.stage === 'waiting'; }), true);
+});
+
+test('step status: planned, ok, changing, applied, failed, verified, with current and desired from the event evidence', function () {
+  var mid = oscNode(oscAt(1.3), 'iic-azl-n01');
+  eq(oscStage(mid, 'Dns').osc.stage, 'changing'); eq(oscStage(mid, 'Dns').status, 'running');
+  eq(oscStage(mid, 'Dns').osc.current, '192.0.2.250'); eq(oscStage(mid, 'Dns').osc.desired, '192.0.2.53,192.0.2.54');
+  eq(/192.0.2.250 -> 192.0.2.53/.test(oscStage(mid, 'Dns').description), true);
+  eq(oscStage(mid, 'Time').osc.stage, 'planned'); eq(oscStage(mid, 'Time').status, 'notstarted');
+  eq(oscStage(mid, 'RemoteManagement').osc.stage, 'ok'); eq(oscStage(mid, 'RemoteManagement').status, 'success');
+  var later = oscNode(oscAt(3.0), 'iic-azl-n01');
+  eq(oscStage(later, 'Dns').osc.stage, 'applied'); eq(oscStage(later, 'Dns').status, 'success');
+  var verified = oscNode(oscAt(3.7), 'iic-azl-n01');
+  eq(oscStage(verified, 'Dns').osc.stage, 'verified');
+  var failed = oscNode(oscAt(4.95), 'iic-azl-n02');
+  eq(oscStage(failed, 'Drivers').osc.stage, 'failed'); eq(oscStage(failed, 'Drivers').status, 'error');
+  eq(/SBE manifest hash/.test(oscStage(failed, 'Drivers').errors[0]), true);
+});
+
+test('retries and restarts are counted on the machine and shown on its card', function () {
+  var osc = oscAt(2.1);
+  var n1 = oscNode(osc, 'iic-azl-n01');
+  eq(n1.state, 'retrying'); eq(n1.retries, 1);
+  var card = m.oscCard(n1);
+  eq(card.state, 'Retrying'); eq(card.kind, 'warn');
+  eq(card.lines.some(function (l) { return /Retried 1 time/.test(l); }), true);
+  var n2 = oscNode(oscAt(3.45), 'iic-azl-n02');
+  eq(n2.restarts, 1); eq(n2.state, 'applying');
+  eq(oscNode(oscAt(3.2), 'iic-azl-n02').state, 'reconnecting', 'while the node is away it is reconnecting');
+  eq(m.oscCard(n2).lines.some(function (l) { return /Restarted 1 time/.test(l); }), true);
+});
+
+test('guarded network change: AwaitingConfirm has a countdown, Committed ends it', function () {
+  var n2 = oscNode(oscAt(2.3), 'iic-azl-n02');
+  eq(n2.state, 'awaitingconfirm'); eq(n2.guarded, 'AwaitingConfirm');
+  var step = oscStage(n2, 'Network');
+  eq(step.osc.stage, 'changing'); eq(step.osc.guarded.state, 'AwaitingConfirm');
+  eq(step.osc.guarded.confirmMinutes, 10);
+  var card = m.oscCard(n2);
+  eq(card.state, 'Awaiting confirmation'); eq(card.until, step.osc.guarded.confirmBy);
+  var left = m.oscCountdown(step.osc.guarded.confirmBy, NOW);
+  eq(left > 0 && left <= 600, true, 'a window of at most 10 minutes is left');
+  eq(m.fmtCountdown(75), '01:15 left'); eq(m.fmtCountdown(0), 'window over'); eq(m.fmtCountdown(NaN), '');
+  eq(m.oscCountdown(step.osc.guarded.confirmBy, Date.parse(step.osc.guarded.confirmBy) + 5000), 0);
+  var after = oscStage(oscNode(oscAt(2.7), 'iic-azl-n02'), 'Network');
+  eq(after.osc.guarded.state, 'Committed'); eq(after.osc.stage, 'applied');
+});
+
+test('guarded network change: RolledBack shows the node’s reason on the machine and the step; Refused too', function () {
+  var osc = oscAt(2.3);
+  var n2 = oscNode(osc, 'iic-azl-n02');
+  var net = oscStage(n2, 'Network');
+  net.osc.stage = 'rolledback'; net.osc.guarded = { state: 'RolledBack', reason: 'The gateway 192.0.2.1 did not answer for 60 s; the snapshot was restored.', confirmBy: null };
+  net.status = 'error'; net.errors = [net.osc.guarded.reason];
+  n2.guarded = 'RolledBack'; n2.guardedDetail = net.osc.guarded; n2.state = 'rolledback'; n2.status = 'error'; n2.errors = [net.osc.guarded.reason]; n2.stateText = 'Network change rolled back: ' + net.osc.guarded.reason;
+  var card = m.oscCard(n2);
+  eq(card.state, 'Rolled back'); eq(card.kind, 'err');
+  eq(card.lines.some(function (l) { return /^Rolled back: The gateway/.test(l); }), true);
+});
+
+test('machine card: name, method, transport, current step and the state', function () {
+  var osc = oscAt(4.95);
+  var cards = m.summaryFor(oscRunState(osc), 'osconfig').cards;
+  eq(cards.map(function (c) { return c.name; }), ['iic-azl-n01', 'iic-azl-n02', 'iic-azl-n03']);
+  eq(cards.map(function (c) { return c.state; }), ['Converged', 'Failed', 'Applying']);
+  eq(cards[0].chips.map(function (c) { return c.text; }), ['ZTP', 'Arc Run Command']);
+  eq(cards[1].chips.map(function (c) { return c.text; }), ['ISO (differs from the file)', 'WinRM']);
+  eq(cards[2].lines[0], 'Now: MPIO (SAN)');
+  eq(cards[0].lines.indexOf('Logs: domain-joined: using IIC\\svc-lcm') >= 0, true, 'a joined machine says the domain account reads its logs');
+  var early = m.summaryFor(oscRunState(oscAt(3.0)), 'osconfig').cards;
+  eq(early[2].lines.indexOf('Logs: workgroup: using azl-admin') >= 0, true, 'a machine not joined yet says the local account does');
+  eq(cards.every(function (c) { return c.arc === null; }), true);
+});
+
+test('run summary: run state, machines converged, wipe list, start', function () {
+  var osc = oscAt(2.0);
+  var sm = m.summaryFor(oscRunState(osc), 'osconfig');
+  eq(sm.title, 'OS configuration');
+  eq(sm.facts.map(function (f) { return f.k; }), ['Run', 'Machines converged', 'Wipe list', 'Mode']);
+  eq(sm.facts[0].v, 'applying'); eq(sm.facts[1].v, '0 of 3');
+  eq(sm.facts[2].v, 'pending (1 machine)'); eq(sm.facts[2].warn, true);
+  eq(sm.startedAt, Date.parse(osc.run.started));
+  var done = m.summaryFor(oscRunState(oscAt(6.9)), 'osconfig');
+  eq(done.facts[2].v, 'done');
+  eq(m.oscHeadline(oscAt(0.5)).indexOf('0 of 3 machines converged') === 0, true);
+});
+
+test('version display: OS build, SBE package and route, schema and wrapper, from the events', function () {
+  var n1 = oscNode(oscAt(2.0), 'iic-azl-n01'), n2 = oscNode(oscAt(2.0), 'iic-azl-n02');
+  eq(m.oscVersionLines(n1), ['OS 10.0.26100.1', 'computer name iic-azl-n01', 'SBE Dell 16G-45n0c-Intel 5.0.2606.1616 (SAS download by the node (Arc Run Command))', 'schema 5.3.0', 'wrapper 1.0.0']);
+  eq(m.oscVersionLines(n2)[0], 'Azure Stack HCI');
+  eq(/copy over WinRM/.test(m.oscVersionLines(n2).join(' ')), true);
+  eq(m.oscVersionLines({ versions: {} }), []);
+});
+
+test('mixed cluster: one Ztp and one Iso machine render side by side in the tree, each with its own steps and Azure badges only on Arc steps', function () {
+  var tree = m.osConfigTreeOf(oscRunState(oscAt(3.3)));
+  eq(tree.map(function (t) { return t.name; }), ['iic-azl-n01', 'iic-azl-n02', 'iic-azl-n03']);
+  eq(tree[0].osc.method, 'Ztp'); eq(tree[1].osc.method, 'Iso');
+  var arcSteps = function (t) { return t.children.filter(function (c) { return c.osc.arc; }).map(function (c) { return c.osc.step; }); };
+  eq(arcSteps(tree[0]).length > 0, true, 'the ZTP machine uses Arc Run Command for its changes');
+  eq(arcSteps(tree[1]), [], 'the ISO machine is reached over WinRM: no Arc steps');
+  eq(m.stepRule('osconfiguration', [tree[1]]).side, 'machine');
+  eq(m.stepRule('osconfiguration', [tree[1], tree[1].children[2]]), { side: 'node', node: 'iic-azl-n02', stage: 'osc.dns', window: false });
+});
+
+test('log lines: the OS configuration events carry node and step for the machine and step filters', function () {
+  var t = '2026-11-07T19:01:59.536Z [osconfig] iic-azl-n02 StepApplying (Dns): Changing: Dns: a -> b';
+  eq(m.lineScope({ file: 'os-config-events', text: t }), { node: 'iic-azl-n02', stage: 'osc.dns' });
+  eq(m.lineScope({ file: 'os-config-events', text: '2026-11-07T19:01:59.536Z [osconfig] * RunStarted: x' }), { node: '*', stage: '' });
+  eq(m.lineScope({ file: 'os-config-events', text: '2026-11-07T19:01:59.536Z [osconfig] n1 NetworkChangeAwaitingConfirm: waiting' }), { node: 'n1', stage: 'osc.network' });
+  eq(m.lineInScope({ file: 'os-config-events', text: t }, { node: 'iic-azl-n02', stage: 'osc.dns' }, null, 'iic-azl-n01'), true);
+  eq(m.lineInScope({ file: 'os-config-events', text: t }, { node: 'iic-azl-n01', stage: '' }, null, 'iic-azl-n01'), false);
+  eq(m.lineInScope({ file: 'os-config-events', text: t }, { node: 'iic-azl-n02', stage: 'osc.time' }, null, ''), false);
+  var lines = m.oscDemoLines(4.95, NOW - 4.95 * 60000);
+  eq(lines.every(function (l) { return /\[osconfig\]/.test(l.text); }), true);
+  eq(lines.some(function (l) { return l.level === 'error'; }), true);
+  eq(lines.filter(function (l) { return /NodeRetry/.test(l.text); }).length, 1);
+});
+
+test('domain join: the DomainJoin step shows planned, applying, joined; the account switches from local to domain at DomainJoined', function () {
+  var before = oscNode(oscAt(1.9), 'iic-azl-n01'), after = oscNode(oscAt(2.2), 'iic-azl-n01');
+  eq(oscStage(before, 'DomainJoin').osc.stage, 'changing'); eq(oscStage(before, 'DomainJoin').status, 'running');
+  eq(oscStage(oscNode(oscAt(1.5), 'iic-azl-n01'), 'DomainJoin').osc.stage, 'planned');
+  eq(/workgroup WORKGROUP -> iic.example.test/.test(oscStage(before, 'DomainJoin').description), true);
+  eq(before.domainJoined, false); eq(before.logAccount.reason, 'workgroup: using azl-admin'); eq(before.logAccount.kind, 'local');
+  eq(oscStage(after, 'DomainJoin').osc.stage, 'applied');
+  var waiting = oscNode(oscAt(2.15), 'iic-azl-n01');
+  eq(waiting.domainJoined, true); eq(waiting.domainAdminsConfigured, false);
+  eq(waiting.logAccount.reason, 'joined, waiting for domain administrators: using azl-admin'); eq(waiting.logAccount.kind, 'local'); eq(waiting.logAccount.waitingForAdmins, true);
+  eq(after.domainJoined, true); eq(after.domainAdminsConfigured, true); eq(after.logAccount.reason, 'domain-joined: using IIC\\svc-lcm'); eq(after.logAccount.userName, 'IIC\\svc-lcm');
+  var tree = m.osConfigTreeOf(oscRunState(oscAt(2.2)));
+  eq(tree[0].osc.logAccount.reason, 'domain-joined: using IIC\\svc-lcm'); eq(tree[0].osc.domainJoined, true);
+  eq(tree[1].osc.logAccount.reason, 'workgroup: using azl-admin');
+  var lines = m.oscDemoLines(4.95, NOW - 4.95 * 60000).map(function (l) { return l.text; });
+  eq(lines.some(function (t) { return /\[osconfig\] iic-azl-n01 DomainJoinApplying \(DomainJoin\)/.test(t); }), true);
+  eq(lines.some(function (t) { return /\[osconfig\] iic-azl-n02 DomainJoined \(DomainJoin\)/.test(t); }), true);
+  eq(lines.some(function (t) { return /\[osconfig\] iic-azl-n02 DomainAdminsConfigured \(DomainJoin\)/.test(t); }), true);
+  eq(m.lineScope({ file: 'os-config-events', text: '2026-11-07T19:01:59.536Z [osconfig] n1 DomainAdminsConfigured: x' }), { node: 'n1', stage: 'osc.domainjoin' });
+  eq(m.lineScope({ file: 'os-config-events', text: '2026-11-07T19:01:59.536Z [osconfig] n1 DomainJoinFailed: x' }), { node: 'n1', stage: 'osc.domainjoin' });
+});
+
+test('Steps box text when OS configuration has not started', function () {
+  eq(/Invoke-AzureLocalOsConfiguration/.test(m.stepsEmptyText('osconfig', 'idle', 'Starts after ZTP is complete', false)), true);
+  eq(m.stepsEmptyText('osconfig', 'run', '', true), 'No steps reported yet.');
+});
+
+test('live notes: an OS configuration warning (declaration differs, stuck run command) shows under the bar', function () {
+  var notes = m.liveNotes(oscRunState(oscAt(3.0)));
+  eq(notes.some(function (n) { return n.kind === 'osconfig' && /iic-azl-n02/.test(n.text); }), true);
+});
+
+test('OS configuration summary and steps: hostile machine names, evidence and reasons render as text', function () {
+  var osc = oscAt(2.3);
+  var hostile = HOSTILE[0];
+  osc.nodes[1].name = hostile; osc.nodes[1].versions.hostname = HOSTILE[1];
+  osc.nodes[1].tree[1].description = HOSTILE[2]; osc.nodes[1].warnings = [HOSTILE[3]];
+  osc.nodes[1].guardedDetail.reason = HOSTILE[1];
+  withDom(function (dom, h) {
+    var state = oscRunState(osc);
+    h.app.state = state; h.app.config = { cluster: 'c', nodes: [{ name: 'iic-azl-n01', seed: true }, { name: hostile }] };
+    h.renderSummary();
+    assertInert(dom.byId.summary, 'osconfig summary');
+    eq(textOf(dom.byId.summary).indexOf(hostile) >= 0, true, 'the machine name shows as text');
+    var tree = m.osConfigTreeOf(state);
+    tree.forEach(function (n, i) { n.__key = 'osconfiguration/' + i; n.children.forEach(function (c, j) { c.__key = 'osconfiguration/' + i + '/' + j; }); h.app.stepIndex.set(n.__key, { node: n, section: 'osconfiguration', parentKey: 'osconfiguration' }); });
+    var li = h.buildItem(tree[1], 1, null, 'osconfiguration', [tree[1]]);
+    assertInert(li, 'osconfig tree');
+    eq(textOf(li).indexOf(HOSTILE[2]) >= 0, true, 'the evidence shows as text');
+    eq(li.querySelectorAll('.osc-stage').length > 0, true, 'a step shows its stage chip');
+    eq(li.querySelectorAll('.countdown').length > 0, true, 'the guarded change shows its countdown');
+    staticIcons(dom, 'osconfig');
+  });
 });
 
 process.stdout.write(JSON.stringify(cases));
