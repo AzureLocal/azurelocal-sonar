@@ -181,12 +181,14 @@ function Protect-AzlSonarText {
     [OutputType([string])]
     param(
         [AllowEmptyString()][AllowNull()][string]$Text,
-        [string[]]$Secret = @()
+        # Exact values (strings of 4 or more characters) and fingerprints (New-AzlSonarSecretFingerprint: no plaintext kept).
+        [object[]]$Secret = @()
     )
     if ([string]::IsNullOrEmpty($Text)) { return [string]$Text }
     $out = $Text
     foreach ($s in $Secret) {
-        if (-not [string]::IsNullOrEmpty($s) -and $s.Length -ge 4) { $out = $out.Replace($s, '***') }
+        if ($s -is [string]) { if ($s.Length -ge 4) { $out = $out.Replace($s, '***') } }
+        elseif (Test-AzlSonarFingerprint -Value $s) { $out = Hide-AzlSonarFingerprint -Text $out -Fingerprint @($s) }
     }
     if ($null -eq $script:AzlSonarSecretRegex) {
         # Compiled once: this runs on every log line, and a publishable export runs it over hundreds of MB.

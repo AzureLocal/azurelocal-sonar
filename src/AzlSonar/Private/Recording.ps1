@@ -84,7 +84,7 @@ function Protect-AzlSonarJsonNode {
         [AllowNull()]
         [object]$Node,
 
-        [string[]]$Secret = @()
+        [object[]]$Secret = @()
     )
 
     if ($null -eq $Node) { return }
@@ -138,7 +138,7 @@ function ConvertTo-AzlSonarProtectedJson {
         [AllowEmptyString()]
         [string]$Json,
 
-        [string[]]$Secret = @()
+        [object[]]$Secret = @()
     )
 
     if ([string]::IsNullOrWhiteSpace($Json)) { return , [object[]]@($null) }
@@ -317,7 +317,7 @@ function Get-AzlSonarRecorderSecret {
         The exact values a recording masks: the log credential (Shared.Redact) and the Key Vault vault and secret names.
     #>
     [CmdletBinding()]
-    [OutputType([string[]])]
+    [OutputType([object[]])]
     param(
         [Parameter(Mandatory)]
         [System.Collections.IDictionary]$Shared,
@@ -326,13 +326,14 @@ function Get-AzlSonarRecorderSecret {
         [object]$Config
     )
 
-    $values = [System.Collections.Generic.List[string]]::new()
-    if ($Shared.Contains('Redact')) { foreach ($s in @($Shared['Redact'])) { if ($s) { $values.Add([string]$s) } } }
+    $values = [System.Collections.Generic.List[object]]::new()
+    # exact strings and fingerprints (no plaintext) of Shared.Redact
+    if ($Shared.Contains('Redact')) { foreach ($s in @($Shared['Redact'])) { if ($s -is [string]) { if ($s) { $values.Add($s) } } elseif (Test-AzlSonarFingerprint -Value $s) { $values.Add($s) } } }
     foreach ($name in 'vault', 'usernameSecret', 'passwordSecret') {
         $v = [string](Get-AzlSonarMember $Config "credential.$name" '')
         if ($v.Length -ge 4) { $values.Add($v) }
     }
-    return [string[]]$values.ToArray()
+    return [object[]]$values.ToArray()
 }
 
 function Resolve-AzlSonarRecordPath {
@@ -406,7 +407,7 @@ function Open-AzlSonarRecorder {
         [Parameter(Mandatory)]
         [string]$SessionJson,
 
-        [string[]]$Secret = @(),
+        [object[]]$Secret = @(),
 
         [int]$MaxDeltas = $script:AzlSonarRecordingMaxDeltas,
 

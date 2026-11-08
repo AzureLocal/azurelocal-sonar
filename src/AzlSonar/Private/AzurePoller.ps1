@@ -708,7 +708,7 @@ function Get-AzlSonarNodeErrorText {
     [OutputType([string[]])]
     param(
         [AllowNull()][object]$Errors,
-        [AllowNull()][AllowEmptyCollection()][string[]]$Secret = @()
+        [AllowNull()][AllowEmptyCollection()][object[]]$Secret = @()
     )
 
     $texts = foreach ($item in (ConvertTo-AzlSonarArray $Errors)) {
@@ -744,7 +744,7 @@ function ConvertTo-AzlSonarNodeStatusStep {
         [Parameter(Mandatory)][string]$Id,
         [string]$Name,
         [string]$Description,
-        [AllowNull()][AllowEmptyCollection()][string[]]$Secret = @()
+        [AllowNull()][AllowEmptyCollection()][object[]]$Secret = @()
     )
 
     $rawStatus = Get-AzlSonarMember $Entry 'Status'
@@ -841,7 +841,7 @@ function New-AzlSonarArcProbeGroup {
     param(
         [Parameter(Mandatory)][ValidateSet('update', 'bootstrap')][string]$Kind,
         [AllowNull()][System.Collections.IDictionary]$Probe,
-        [AllowNull()][AllowEmptyCollection()][string[]]$Secret = @(),
+        [AllowNull()][AllowEmptyCollection()][object[]]$Secret = @(),
         [datetime]$Now = [datetime]::UtcNow
     )
 
@@ -898,7 +898,7 @@ function ConvertTo-AzlSonarOemNode {
         [Parameter(Mandatory)][object]$Node,
         [AllowNull()][object]$Arc,
         [AllowNull()][System.Collections.IDictionary]$Probe,
-        [AllowNull()][AllowEmptyCollection()][string[]]$Secret = @(),
+        [AllowNull()][AllowEmptyCollection()][object[]]$Secret = @(),
         [datetime]$Now = [datetime]::UtcNow
     )
 
@@ -1217,7 +1217,7 @@ function Get-AzlSonarDeploymentState {
 
         [AllowNull()]
         [AllowEmptyCollection()]
-        [string[]]$Secret = @(),
+        [object[]]$Secret = @(),
 
         # What the newest node log lines say (Get-AzlSonarLogHint): used to label an Azure state that lags behind the node.
         [AllowNull()]
@@ -1482,7 +1482,7 @@ function Invoke-AzlSonarPollerLoop {
     while (-not $Shared.Stop) {
         try {
             $probe = if ($Shared.Contains('NodeProbe')) { $Shared['NodeProbe'] } else { $null }
-            $secret = if ($Shared.Contains('Redact')) { [string[]]@($Shared['Redact'] | Where-Object { $_ }) } else { [string[]]@() }
+            $secret = if ($Shared.Contains('Redact')) { [object[]]@($Shared['Redact'] | Where-Object { $_ }) } else { [object[]]@() }
             $hint = try { Get-AzlSonarLogHint -Shared $Shared } catch { $null }
             $ztpStages = if ($Shared.Contains('ZtpStages')) { $Shared['ZtpStages'] } else { $null }
             $osEvents = if ($Shared.Contains('OsConfigEvents')) { $Shared['OsConfigEvents'] } else { $null }
