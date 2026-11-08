@@ -4054,11 +4054,12 @@
 
   // The level filter: 'all' (no filter) or the levels shown, 'info', 'warning', 'error', or several joined with commas in that
   // order ('warning,error'). A level shows only its own lines: Warnings never include errors and Errors never include warnings.
-  var LEVEL_ORDER = ['info', 'warning', 'error'];
+  // levelOrder() is a function, not a var: the test export near the top returns before a var here would be assigned.
+  function levelOrder() { return ['info', 'warning', 'error']; }
   function levelSet(level) {
     var k = str(level).toLowerCase();
     if (!k || k === 'all') return [];
-    return LEVEL_ORDER.filter(function (x) { return k.split(',').indexOf(x) >= 0; });
+    return levelOrder().filter(function (x) { return k.split(',').indexOf(x) >= 0; });
   }
   function levelPasses(level, lineLevel) {
     var s = levelSet(level);
@@ -4072,8 +4073,8 @@
     if (clicked === 'all') return 'all';
     var s = levelSet(level), i = s.indexOf(clicked);
     if (i >= 0) s.splice(i, 1); else s.push(clicked);
-    s = LEVEL_ORDER.filter(function (x) { return s.indexOf(x) >= 0; });
-    return !s.length || s.length === LEVEL_ORDER.length ? 'all' : s.join(',');
+    s = levelOrder().filter(function (x) { return s.indexOf(x) >= 0; });
+    return !s.length || s.length === levelOrder().length ? 'all' : s.join(',');
   }
 
   function lineMatches(l, win) {

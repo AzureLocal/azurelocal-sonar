@@ -2001,6 +2001,35 @@ test('level filter: combined selections show exactly the levels that are on', fu
   eq(m.levelSet('all'), []); eq(m.levelSet(undefined), []); eq(m.levelSet('nonsense'), []);
 });
 
+test('level filter: every selection (each level alone, each pair, all three) shows exactly the levels selected', function () {
+  var all = ['info', 'warning', 'error'];
+  function shown(filter) { return all.filter(function (l) { return m.levelPasses(filter, l); }); }
+  [
+    ['info'], ['warning'], ['error'],
+    ['info', 'warning'], ['info', 'error'], ['warning', 'error'],
+    ['info', 'warning', 'error']
+  ].forEach(function (sel) {
+    eq(shown(sel.join(',')), sel, 'filter ' + sel.join(',') + ' shows exactly ' + sel.join(' + '));
+  });
+  eq(shown('all'), all, 'clearing the selection shows everything');
+  // the same selections reached by clicking the buttons, in every order
+  var click = function (clicks) { return clicks.reduce(function (f, c) { return m.toggleLevel(f, c); }, 'all'); };
+  eq(shown(click(['warning'])), ['warning']);
+  eq(shown(click(['error', 'warning'])), ['warning', 'error']);
+  eq(shown(click(['error', 'info'])), ['info', 'error']);
+  eq(shown(click(['warning', 'info', 'error'])), all, 'all three clicked is All');
+  eq(shown(click(['warning', 'error', 'error'])), ['warning'], 'clicking a level again switches it off');
+  eq(shown(click(['warning', 'all'])), all, 'All clears the selection');
+});
+
+test('level filter: regression, Warnings only does not include errors', function () {
+  eq(m.levelPasses('warning', 'warning'), true);
+  eq(m.levelPasses('warning', 'error'), false, 'an error line must not pass the Warnings-only filter');
+  eq(m.levelPasses(m.toggleLevel('all', 'warning'), 'error'), false, 'one click on Warnings must not show errors');
+  eq(m.levelPasses('error', 'warning'), false, 'and Errors only does not include warnings');
+  eq(m.levelSet(m.toggleLevel('all', 'warning')), ['warning']);
+});
+
 test('level filter: lines with an odd level count as info, like the page does', function () {
   eq(m.levelPasses('info', 'debug'), true);
   eq(m.levelPasses('info', ''), true);
