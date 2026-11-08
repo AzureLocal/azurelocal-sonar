@@ -1171,7 +1171,7 @@ function Invoke-AzlSonarTailerLoop {
             reason       = $Reason
             node         = $seed.name
             address      = $seed.address
-            credential   = if ($null -ne $Credential) { 'supplied' } else { 'current Windows identity' }
+            credential   = if ($null -ne $useCredential) { 'supplied' } else { 'current Windows identity' }
             trustedHosts = $trust
             missingPaths = @()
             fileErrors   = @()
@@ -1184,6 +1184,8 @@ function Invoke-AzlSonarTailerLoop {
 
     $session = $null
     $ssh = $null
+    $accountKind = ''
+    $useCredential = $Credential
     $transport = [string](Get-AzlSonarMember $Config.logs 'transport' 'auto')
     $fileState = @{}
     $firstRun = $true
@@ -1194,6 +1196,16 @@ function Invoke-AzlSonarTailerLoop {
     $renamedCount = 0
     try {
         while (-not $Shared.Stop) {
+            # Which account reads this node's logs: the local one until the node reports DomainJoined, then the domain one.
+            $pick = Select-AzlSonarNodeAccount -Shared $Shared -Config $Config -Node $seed.name -Local $Credential
+            $useCredential = $pick.Credential
+            if ($accountKind -and $accountKind -ne $pick.Account.kind -and (($null -ne $session -and $session.State -eq 'Opened') -or ($null -ne $ssh -and $ssh.Connected))) {
+                # The account changed (the node just joined the domain): reconnect with the new one.
+                if ($null -ne $session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+                if ($null -ne $ssh) { $null = Remove-SSHSession -SSHSession $ssh -ErrorAction SilentlyContinue }
+                $session = $null; $ssh = $null; $firstRun = $true; $forceDiscovery = $true
+            }
+            $accountKind = [string]$pick.Account.kind
             if (($null -eq $session -or $session.State -ne 'Opened') -and ($null -eq $ssh -or -not $ssh.Connected)) {
                 $session = $null; $ssh = $null
                 $reasons = [System.Collections.Generic.List[string]]::new()
@@ -1202,24 +1214,31 @@ function Invoke-AzlSonarTailerLoop {
                     try {
                         $options = New-PSSessionOption -OpenTimeout $script:AzlSonarTail.SessionOpenMs -OperationTimeout $script:AzlSonarTail.SessionOperationMs -NoMachineProfile
                         $sessionParameters = @{ ComputerName = $seed.address; SessionOption = $options; Name = 'AzlSonar'; ErrorAction = 'Stop' }
-                        if ($null -ne $Credential) { $sessionParameters.Credential = $Credential }
+                        if ($null -ne $useCredential) { $sessionParameters.Credential = $useCredential }
                         $session = New-PSSession @sessionParameters
                     }
                     catch {
                         $r = "WinRM: $($_.Exception.Message)"
+                        if ($pick.Account.kind -eq 'domain' -and (Test-AzlSonarAuthenticationFailure -Message $_.Exception.Message)) {
+                            # The node refused the domain account: use the local account for it from now on, and say so.
+                            Set-AzlSonarLogAccountRejected -Shared $Shared -Node $seed.name -Message (Protect-AzlSonarText -Text $_.Exception.Message -Secret $Shared.Redact)
+                            $reasons.Add($r + ' The domain account was rejected; trying the local account.')
+                            $session = $null
+                            continue
+                        }
                         if ($trust.required -and $trust.trusted -eq $false) { $r += ' ' + $trust.message }
                         $reasons.Add($r)
                         $session = $null
                     }
                 }
                 if ($null -eq $session -and $transport -in 'auto', 'ssh') {
-                    if ($null -eq $Credential) { $reasons.Add('SSH: needs a credential (prompt, -Credential or keyvault).') }
+                    if ($null -eq $useCredential) { $reasons.Add('SSH: needs a credential (prompt, -Credential or keyvault).') }
                     elseif (-not (Get-Module -ListAvailable -Name Posh-SSH)) { $reasons.Add('SSH: the Posh-SSH module is not installed on this workstation (Install-Module Posh-SSH -Scope CurrentUser).') }
                     else {
                         & $status 'connecting' "Opening an SSH session to $($seed.name) ($($seed.address))." $null
                         try {
                             Import-Module Posh-SSH -ErrorAction Stop
-                            $ssh = New-SSHSession -ComputerName $seed.address -Credential $Credential -AcceptKey -ConnectionTimeout ([int]($script:AzlSonarTail.SessionOpenMs / 1000)) -ErrorAction Stop -WarningAction SilentlyContinue
+                            $ssh = New-SSHSession -ComputerName $seed.address -Credential $useCredential -AcceptKey -ConnectionTimeout ([int]($script:AzlSonarTail.SessionOpenMs / 1000)) -ErrorAction Stop -WarningAction SilentlyContinue
                         }
                         catch { $reasons.Add("SSH: $($_.Exception.Message)"); $ssh = $null }
                     }

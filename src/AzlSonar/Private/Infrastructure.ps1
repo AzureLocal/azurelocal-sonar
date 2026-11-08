@@ -402,7 +402,9 @@ function ConvertFrom-AzlSonarInfrastructureTree {
         nodes[].name -> nodes[].name, the management address of a node = the ip_address of its network_adapters[] port with
         role management and ip_assignment static or dhcp_reservation (schema 5.0 and 5.1 files: nodes[].management.ip_address),
         the first listed node is the seed (schema 5.3 has no seed key),
-        provisioning.simplified.evidence_path\ztp-events.jsonl -> ztpEvents.path (simplified route only).
+        provisioning.simplified.evidence_path\ztp-events.jsonl -> ztpEvents.path (simplified route only),
+        provisioning.simplified.evidence_path\os-configuration-events.jsonl -> osConfigEventsPath (the OS configuration event
+        file, next to the ZTP one; on the ISO route only when evidence_path is set).
         Returns { Config; Problems }. Config is $null when there are problems.
     #>
     [CmdletBinding()]
@@ -494,6 +496,16 @@ function ConvertFrom-AzlSonarInfrastructureTree {
     }
 
     $ztpPath = $null
+    $osConfigPath = $null
+    $eventFile = {
+        param($folder, $name)
+        $folder = [Environment]::ExpandEnvironmentVariables([string]$folder)
+        $separator = if ($folder.Contains('\')) { '\' } else { '/' }
+        $path = $folder.TrimEnd('\', '/') + $separator + $name
+        $rooted = $path -match '^([A-Za-z]:[\\/]|\\\\|/)'
+        if (-not $rooted -and $BaseDirectory) { $path = [System.IO.Path]::GetFullPath((Join-Path -Path $BaseDirectory -ChildPath $path)) }
+        $path
+    }
     if ($route -eq 'simplified') {
         $evidence = Get-AzlSonarInfrastructureValue $Tree 'provisioning.simplified.evidence_path'
         if ($evidence) { $evidence = [string]$evidence }
@@ -509,7 +521,13 @@ function ConvertFrom-AzlSonarInfrastructureTree {
             $ztpPath = $evidence.TrimEnd('\', '/') + $separator + 'ztp-events.jsonl'
             $rooted = $ztpPath -match '^([A-Za-z]:[\\/]|\\\\|/)'
             if (-not $rooted -and $BaseDirectory) { $ztpPath = [System.IO.Path]::GetFullPath((Join-Path -Path $BaseDirectory -ChildPath $ztpPath)) }
+            $osConfigPath = & $eventFile $evidence 'os-configuration-events.jsonl'
         }
+    }
+    else {
+        # ISO route: OS configuration still writes its event file; follow it when the file names the evidence folder.
+        $isoEvidence = Get-AzlSonarInfrastructureValue $Tree 'provisioning.simplified.evidence_path'
+        if ($isoEvidence) { $osConfigPath = & $eventFile $isoEvidence 'os-configuration-events.jsonl' }
     }
 
     if ($problems.Count -gt 0) { return [pscustomobject]@{ Config = $null; Problems = $problems.ToArray() } }
@@ -528,6 +546,33 @@ function ConvertFrom-AzlSonarInfrastructureTree {
     if ($null -ne $PollSeconds) { $config['pollSeconds'] = [int]$PollSeconds }
     $config['nodes'] = $nodes.ToArray()
     if ($ztpPath) { $config['ztpEvents'] = [ordered]@{ path = $ztpPath } }
+    if ($osConfigPath) { $config['osConfigEventsPath'] = $osConfigPath }
+    # Which account reads a node's logs: the local administrator until the node has reported DomainJoined and
+    # DomainAdminsConfigured, then the domain account: the LCM user (identity.active_directory.lcm_user), or the optional
+    # override identity.active_directory.domain_join_account when it is present. Read defensively (either may be absent).
+    # Only names and a keyvault:// reference are kept; a plain password in the file is never read.
+    $localAdmin = Get-AzlSonarInfrastructureValue $Tree 'identity.local_admin.username'
+    $accounts = [ordered]@{}
+    if ($localAdmin -and ([string]$localAdmin).Trim()) { $accounts['local'] = [ordered]@{ username = ([string]$localAdmin).Trim() } }
+    if ($identityModel -eq 'ActiveDirectory') {
+        $netbios = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.netbios_name'
+        $joinUser = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.domain_join_account.username'
+        $joinRef = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.domain_join_account.password'
+        $source = 'domain_join_account'
+        if (-not ($joinUser -and ([string]$joinUser).Trim())) {
+            # no override: the LCM user is the account that joins the nodes and reads their logs
+            $joinUser = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.lcm_user.username'
+            $joinRef = Get-AzlSonarInfrastructureValue $Tree 'identity.active_directory.lcm_user.password'
+            $source = 'lcm_user'
+        }
+        if ($joinUser -and ([string]$joinUser).Trim()) {
+            $domain = [ordered]@{ username = ([string]$joinUser).Trim(); source = $source }
+            if ($netbios -and ([string]$netbios).Trim()) { $domain['netbios'] = ([string]$netbios).Trim() }
+            if ($joinRef -and $null -ne (ConvertFrom-AzlSonarKeyVaultReference -Reference ([string]$joinRef))) { $domain['passwordRef'] = [string]$joinRef }
+            $accounts['domain'] = $domain
+        }
+    }
+    if ($accounts.Count -gt 0) { $config['logAccounts'] = $accounts }
     # The credential never comes from the infrastructure file (it holds keyvault:// references only).
     $config['credential'] = [ordered]@{ source = 'prompt' }
     return [pscustomobject]@{ Config = $config; Problems = @() }
