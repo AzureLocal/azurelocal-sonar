@@ -46,6 +46,7 @@ Then pick what you want to do:
 | Watch a ZTP run, per machine | [docs/run.md](docs/run.md#watch-a-ztp-run) |
 | Watch the OEM image or ISO route | [docs/run.md](docs/run.md#watch-the-oem-image-or-iso-route) |
 | Watch OS configuration and Validate | [docs/run.md](docs/run.md#watch-os-configuration) |
+| Watch the toolkit's Validate and Deploy run (checks, validation results, deployment progress, known failures) | [docs/arm-run.md](docs/arm-run.md) |
 | Watch a deployment (steps, logs, WinRM or SSH) | [docs/run.md](docs/run.md#watch-a-deployment) |
 | Understand each ZTP stage (Boot, Bootstrap, Vouchers and claim, Install OS, Device, Network, Restore, Handoff) | [docs/stages.md](docs/stages.md) |
 | Which account and folders read the logs in each phase (the Log access window) | [docs/log-access.md](docs/log-access.md) |
@@ -240,6 +241,7 @@ Unknown fields are ignored. Sonar validates the file at start and lists every pr
 | `credential.passwordSecret` | for `keyvault` | | Secret that holds the password. |
 | `credential.password`, `.secret`, `.secretValue` | never | | Rejected: secrets never go in the config file. |
 | `osConfigEventsPath` | no | (none) | The event file of the toolkit's OS configuration run (`Invoke-AzureLocalOsConfiguration.ps1`; JSON Lines with `timestamp`, `node`, `stage`, `step`, `state`, `evidence`, `level`, `nextAction`, `method`, `transport`). Sonar follows it and builds the **OS configuration** mode from it. Relative to the config file. See [OS configuration](docs/stages.md#os-configuration). |
+| `armEventsPath` | no | master file: `<temp>/azl-arm-<cluster.name>/arm-deployment-events.jsonl`; else (none) | The event file of the toolkit's ARM Validate and Deploy run (`Invoke-AzureLocalArmDeployment.ps1`; JSON Lines with `timestamp`, `node`, `stage`, `step`, `state`, `evidence`, `level`, `nextAction`, `runId`, `mode`, `cluster`). Sonar follows it and shows the checks, validation results, deployment progress and known-failure hints in the **Validate** and **Deployment** modes. Relative to the config file. See [Validate and Deploy from the toolkit](docs/arm-run.md). |
 | `recordPath` | no | (none) | Record every run to this file, as with `-Record` (which overrides it). Relative to the config file. See [Record and replay](#record-and-replay). |
 | `ztpEvents.path` | no | (none) | The event file of the [azurelocal-ztp](https://github.com/AzureLocal/azurelocal-ztp) provisioning scripts (JSON Lines: `timestamp`, `node`, `state`, `evidence`, `nextAction`, `level`, `stage`). Sonar follows it and shows each event in the log pane. Relative to the config file. See [Follow ZTP provisioning](#follow-ztp-provisioning). |
 

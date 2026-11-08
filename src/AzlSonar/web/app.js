@@ -4646,9 +4646,10 @@
       var failed = r >= 4.9;
       if (r >= t) {
         var kid1 = { id: '0.41.1', name: 'Download the Arc resource bridge image', description: '', status: 'success', rawStatus: 'Success', start: at(t), end: at(t + 0.15), durationSeconds: 9, errors: [], children: [], arm: { kind: 'step', step: '0.41.1', depth: 1, failing: false, hint: '' } };
-        var hintText = 'The Arc machines are named after the device ID: Simplified provisioning names each Arc machine <device-id>-1, and on build 2690 the Arc infrastructure step looks it up by the host name (ParentResourceNotFound). Resubmitting does not fix it.';
+        var hintText = 'Simplified provisioning names each Arc machine <device-id>-1, and on build 2690 the Arc infrastructure step looks it up by the host name (ParentResourceNotFound). Validate passes, Deploy fails at step 0.41. Resubmitting does not fix it.';
+        var hintTitle = 'The Arc machines are named after the device ID';
         var kid2 = { id: '0.41.2', name: 'DeployVmoArcExtension', description: '', status: failed ? 'error' : 'running', rawStatus: failed ? 'Error' : 'InProgress', start: at(t + 0.15), end: failed ? at(4.9) : null, durationSeconds: Math.round(((failed ? 4.9 : r) - t - 0.15) * 60),
-          errors: failed ? ['ParentResourceNotFound: The Resource Microsoft.HybridCompute/machines/iic-azl-n02 was not found'] : [], children: [], arm: { kind: 'step', step: '0.41.2', depth: 1, failing: failed, hint: failed ? hintText : '' } };
+          errors: failed ? ['ParentResourceNotFound: The Resource Microsoft.HybridCompute/machines/iic-azl-n02 was not found'] : [], children: [], arm: { kind: 'step', step: '0.41.2', depth: 1, failing: failed, hint: failed ? hintTitle + ': ' + hintText : '' } };
         dsteps.push({ id: '0.41', name: 'Deploy Arc infrastructure components', description: '', status: failed ? 'error' : 'running', rawStatus: failed ? 'Error' : 'InProgress', start: at(t), end: failed ? at(4.9) : null,
           durationSeconds: Math.round(((failed ? 4.9 : r) - t) * 60), errors: failed ? ['ParentResourceNotFound: parent resource machines/iic-azl-n02 was not found'] : [], children: [kid1].concat(r >= t + 0.15 ? [kid2] : []), arm: { kind: 'step', step: '0.41', depth: 0, failing: false, hint: '' } });
         if (failed) {

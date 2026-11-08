@@ -37,6 +37,7 @@ The row under the top bar has one tile per mode: **Provisioning (ZTP)**, **OS co
 - The tile of the mode that is happening now is selected when the page opens. Click any tile to look at another mode: the summary box and the Steps box switch to it.
 - A tile that has not started is grey and has no state line. Hover it to see when it starts (*Starts after validation passes*).
 - **OS configuration** sits between Provisioning and Validate. It shows *2 of 3 converged* (and *1 retrying*) while the toolkit's run works, turns red when a machine fails, and is green only when every machine has converged; a finished plan with changes pending reads *Plan ready* and stays grey. Without `osConfigEventsPath` it is grey and the hover text says how to get its data. The page opens on it once ZTP is complete and an OS configuration run has started. [What it shows](stages.md#os-configuration)
+- **Validate** and **Deployment** follow the toolkit's ARM run while Azure has no steps of their own: *Checking*, *2 checks failed*, *Step 0.4 · 3m*, *Failed at 0.41.2*. Without `armEventsPath` (or the master file's default report directory) they show only what Azure reports. [What it shows](arm-run.md)
 - There are always six tiles. On the OEM image route the first tile reads **Provisioning (OS image)** instead of *Provisioning (ZTP)*. A run Sonar joined after provisioning has no machine data: the first tile is grey and its hover text says so (Sonar cannot tell whether provisioning was done, so it does not tick it).
 
 ## The summary box
@@ -74,6 +75,12 @@ The **Log access** button opens a window with everything about reading the node 
 ![The OS configuration mode](images/tour-osconfig.png)
 
 Between Provisioning and Validate. The summary has a card per machine: the method chip (**ZTP** or **ISO**, *expected* until the run resolves it, *differs from the file* with a warning when the master file says otherwise), the transport, the step it is on, *Retried* and *Restarted* counts, the account that reads its logs, and, during a guarded network change, the time left to confirm. The Steps box has the machine's steps with a stage chip each (*Planned*, *OK*, *Changing*, *Applied*, *Verified*, *Failed*, *Blocked*, *Not applicable*) and the toolkit's text; the **Azure** badge marks a step that runs as an Arc Run Command. **Details** lists the method, transport and versions of every machine. The full description is [here](stages.md#os-configuration). The screenshot is the demo (`?demo=1&route=osconfig`).
+
+## The Validate and Deployment modes (ARM run)
+
+![The Deployment mode after the toolkit's ARM run failed at step 0.41](images/tour-arm.png)
+
+The summary has the run in one sentence and its facts: the checks, the steps reported, the elapsed time, the known failure and the next action. The Steps box starts with the toolkit's checks (failures first) and the deployment steps in order with a duration each; the failing step carries the hint for the known failure. **Details** lists the run, the template and the state of each phase. The full description is [here](arm-run.md). The screenshot is the demo (`?demo=1&route=arm`).
 
 ## Help box
 

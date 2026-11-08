@@ -55,6 +55,10 @@
   // (or the -EventLogPath of Invoke-AzureLocalOsConfiguration.ps1). Relative paths are relative to this file. Without it the
   // OS configuration mode shows no steps and no [osconfig] log lines.
   "osConfigEventsPath": "D:\\Data\\azl-ztp\\example\\evidence\\os-configuration-events.jsonl",
+  // Optional. The event file the toolkit's ARM Validate and Deploy run writes: arm-deployment-events.jsonl in its -ReportDirectory
+  // (default <temp>/azl-arm-<cluster>). Relative paths are relative to this file. Without it the Validate and Deployment modes show
+  // only what Azure reports and there are no [arm] log lines.
+  "armEventsPath": "D:\\Data\\azl-arm\\example\\arm-deployment-events.jsonl",
   // Optional. Which account reads a node's logs: "local" while it is a workgroup machine, "domain" once the OS configuration has reported
   // DomainJoined and DomainAdminsConfigured. Only names and a keyvault:// reference for the password; a password in the file is refused.
   // The reference is keyvault://<vault>/<secret>, optionally /<version> (32 hex characters) to pin the secret version; an invalid one is

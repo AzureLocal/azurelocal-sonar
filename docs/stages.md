@@ -158,13 +158,19 @@ A machine is **converged** when the toolkit reports `NodeConverged` for it. The 
 4. If the step failed, the card and the step carry the toolkit's reason. Fix the cause on the node, then run `Invoke-AzureLocalOsConfiguration.ps1` again: steps that are already right are not repeated.
 5. If the run itself died (no `RunCompleted` line, the last event is old), the machines stay where they were. Start the toolkit run again; its next `RunStarted` clears the machines it names and the page follows the new run.
 
+## Validate and Deployment: the toolkit run
+
+**The toolkit does:** `Invoke-AzureLocalArmDeployment.ps1` checks the instance (read only), generates the ARM parameters, submits Validate, waits, asks for approval, submits Deploy and waits, and appends every step to `arm-deployment-events.jsonl`.
+
+**In Sonar:** the **Validate** and **Deployment** tiles and modes. Before Azure has steps of its own the tiles follow the toolkit (*Checking*, *2 checks failed*, *Step 0.4*, *Failed at 0.41.2*); the Steps box lists the checks (failures first) and the validation results or the deployment progress per step with its duration; a failure that matches the toolkit's known-issues list carries a hint, for example the device-ID Arc name problem at step 0.41. Set [`armEventsPath`](./config.md) when the toolkit run used its own report directory. The full description, the states and what Sonar never does are on [Validate and Deploy from the toolkit](./arm-run.md).
+
 ## After ZTP
 
 | Next step | In Sonar | How to run it |
 | --- | --- | --- |
 | **OS configuration** | The **OS configuration** mode: a card per machine, its steps, the method and versions, the guarded network change and the domain join. | The toolkit's `Invoke-AzureLocalOsConfiguration.ps1`, with Sonar pointed at its event file (`osConfigEventsPath`). [Details](#os-configuration). |
-| **Validate** | The **Validate** mode: Azure's validation steps (`deploymentSettings`), the running step with a live timer, errors expanded. Node logs from the seed node. | `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Credential (Get-Credential)` with the deployment local admin. [Details](./run.md#watch-os-configuration). |
-| **Deployment** | The **Deployment** mode: the nested step tree, the live logs, the account and folders in **Log access**. | The same command. [Details](./run.md#watch-a-deployment). |
+| **Validate** | The **Validate** mode: the toolkit's checks and validation results ([ARM run](./arm-run.md)), Azure's validation steps (`deploymentSettings`), the running step with a live timer, errors expanded. Node logs from the seed node. | `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Credential (Get-Credential)` with the deployment local admin. [Details](./run.md#watch-os-configuration). |
+| **Deployment** | The **Deployment** mode: the toolkit's progress per cluster step with the known-failure hint ([ARM run](./arm-run.md)), the nested step tree, the live logs, the account and folders in **Log access**. | The same command. [Details](./run.md#watch-a-deployment). |
 | **Update** | The **Update** mode: the update run's steps. | `track: update`, or `auto` when Azure reports an update. [Details](./run.md#follow-an-update). |
 | **Health** | The **Health** mode: each machine's Arc status. Sonar runs no health checks. | Any run on a deployed cluster. [Details](./run.md#look-at-a-deployed-cluster-health). |
 

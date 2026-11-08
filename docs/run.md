@@ -70,6 +70,8 @@ The event file is `<provisioning.simplified.evidence_path>/os-configuration-even
 ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Credential (Get-Credential)   # the deployment local admin
 ```
 
+**The toolkit's run.** When the toolkit's `Invoke-AzureLocalArmDeployment.ps1` runs Validate, the tile and the Steps box also show its checks before the submit (failures first), its validation results and the elapsed time, and a hint for a known failure. See [Validate and Deploy from the toolkit](./arm-run.md).
+
 **What to expect:** validation steps appear as Azure reports them (a few minutes after the deployment resource is created). A failed step shows its exception text expanded; select it to filter the logs to its time window.
 
 **Access:** Reader on the resource group. For logs from the seed node during Validate, the deployment local admin (`localAdminUserName`), not the built-in `Administrator`, which deployment renames to `ASBuiltInAdmin`. Active Directory: the local administrator.
@@ -82,6 +84,8 @@ Connect-AzAccount
 ```
 
 **What Sonar shows:** the phase **Deployment** with the nested step tree (steps within steps) with status, times, durations and errors; the **live logs** from the seed node (the first node in the master file, or the node marked `seed: true`), with filters by level, text, file and step; the **Log access** window (which account and folders for each phase, opened from the top bar). If Azure lags behind the node (the step list says *Deploy not started* while the node is running), Sonar labels the step the node log shows. When the deployment succeeds the phase is **Done**.
+
+**The toolkit's run.** When the toolkit deploys, the Deployment mode also lists its progress per cluster step with each step's duration, the elapsed time, and the known-failure hint when a step fails (for example step 0.41, the device-ID Arc name problem). See [Validate and Deploy from the toolkit](./arm-run.md).
 
 **WinRM or SSH.** Logs are read from the seed node with `logs.transport`: `auto` (WinRM first, then SSH), `winrm` or `ssh`. SSH needs the Posh-SSH module on the workstation (`Install-Module Posh-SSH -Scope CurrentUser`), `sshd` on the node and a credential. WinRM needs port 5985/5986 and, for IP addresses or workgroup nodes, `TrustedHosts`. If neither works, Sonar still runs: the step tree and node status come from Azure, and the log pane says why the logs are unavailable.
 

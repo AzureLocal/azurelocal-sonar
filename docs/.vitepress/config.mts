@@ -26,6 +26,7 @@ export default defineConfig({
       { text: 'Getting started', link: '/getting-started' },
       { text: 'Running Sonar, by purpose', link: '/run' },
       { text: 'Running Sonar, stage by stage', link: '/stages' },
+      { text: 'Validate and Deploy from the toolkit', link: '/arm-run' },
       { text: 'Log access', link: '/log-access' },
       { text: 'Configuration', link: '/config' },
       { text: 'Tour of the page', link: '/tour' },
