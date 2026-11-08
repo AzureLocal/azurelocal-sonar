@@ -514,7 +514,7 @@ function Get-AzlSonarArmHintFor {
     return [ordered]@{ id = $Id; title = "Known issue $Id"; text = 'The toolkit matched this failure to a known issue; its cause and remediation are in config/known-issues/arm-deployment.json and in the run''s next action.'; phase = '' }
 }
 
-function ConvertTo-AzlSonarArmSeconds {
+function ConvertTo-AzlSonarArmDuration {
     # Whole seconds between two event timestamps (strings or dates), or $null.
     param([AllowNull()][object]$From, [AllowNull()][object]$To)
     $a = ConvertTo-AzlSonarUtcDate $From
@@ -561,8 +561,8 @@ function ConvertTo-AzlSonarArmStepTree {
     foreach ($s in @($Step | Where-Object { $_ })) {
         $running = $s.Status -eq 'running'
         $duration = $null
-        if ($null -ne $s.Start -and $null -ne $s.End) { $duration = ConvertTo-AzlSonarArmSeconds $s.Start $s.End }
-        elseif ($running -and $null -ne $s.Start) { $duration = ConvertTo-AzlSonarArmSeconds $s.Start $Now }
+        if ($null -ne $s.Start -and $null -ne $s.End) { $duration = ConvertTo-AzlSonarArmDuration $s.Start $s.End }
+        elseif ($running -and $null -ne $s.Start) { $duration = ConvertTo-AzlSonarArmDuration $s.Start $Now }
         $text = Protect-AzlSonarText -Text ([string]$s.Error)
         $isFailing = [bool]($FailingStep -and $s.Id -eq $FailingStep)
         $kids = [System.Collections.Generic.List[object]]::new()
@@ -627,7 +627,7 @@ function Get-AzlSonarArmPhaseState {
     # The checks of the phase, failures first. A newer run's checks (not a Plan) make an older run's entry stale.
     $slotName = if ($Name -eq 'validation') { 'validate' } else { 'deploy' }
     $slot = if ($null -ne $Checks -and $Checks.ContainsKey($slotName)) { $Checks[$slotName] } else { $null }
-    $items = if ($null -ne $slot) { @($slot['Items']) } else { @() }
+    $items = @(if ($null -ne $slot) { $slot['Items'] })
     $rank = @{ Failed = 0; Warning = 1; Skipped = 2; Passed = 3 }
     $ordered = @($items | Sort-Object -Stable -Property @{ Expression = { $rank[[string]$_.Result] } })
     $failedChecks = @($items | Where-Object { $_.Result -eq 'Failed' }).Count
@@ -660,7 +660,7 @@ function Get-AzlSonarArmPhaseState {
     $skipped = $null -ne $e -and [bool]$e['Skipped']
     $resumed = $null
     if ($null -ne $e -and $null -ne $e['Resumed']) { $resumed = [ordered]@{ previous = [string]$e['Resumed']['Previous']; at = [string]$e['Resumed']['At']; text = (Protect-AzlSonarText -Text ([string]$e['Resumed']['Evidence'])) } }
-    $steps = if ($null -ne $e) { @($e['Steps']) } else { @() }
+    $steps = @(if ($null -ne $e) { $e['Steps'] })
     $failing = $null
     if ($null -ne $e -and $null -ne $e['Failing']) {
         $f = $e['Failing']
@@ -723,8 +723,8 @@ function Get-AzlSonarArmPhaseState {
     $completed = if ($null -ne $e) { $e['Completed'] } else { $null }
     $elapsed = $null
     if ($null -ne $started) {
-        if ($null -ne $completed) { $elapsed = ConvertTo-AzlSonarArmSeconds $started $completed }
-        elseif ($status -eq 'running') { $elapsed = ConvertTo-AzlSonarArmSeconds $started $Now }
+        if ($null -ne $completed) { $elapsed = ConvertTo-AzlSonarArmDuration $started $completed }
+        elseif ($status -eq 'running') { $elapsed = ConvertTo-AzlSonarArmDuration $started $Now }
     }
     $message = if ($null -ne $e) { Protect-AzlSonarText -Text ([string]$e['Message']) } else { '' }
     $nextAction = if ($null -ne $e) { Protect-AzlSonarText -Text ([string]$e['NextAction']) } else { '' }

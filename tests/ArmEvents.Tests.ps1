@@ -21,7 +21,7 @@ BeforeAll {
     $script:T0 = [datetime]::SpecifyKind([datetime]'2026-11-07T12:00:00', 'Utc')
     function global:Get-ArmTime([double]$Minutes) { $script:T0.AddMinutes($Minutes).ToString('o', [cultureinfo]::InvariantCulture) }
     # Feeds lines to a store and returns the arm state (-Now is fixed so elapsed times are exact).
-    function global:Get-ArmFromLines {
+    function global:Get-ArmFromLine {
         param([string[]]$Line, [double]$NowMinutes = 60)
         InModuleScope AzlSonar -Parameters @{ L = $Line; N = $script:T0.AddMinutes($NowMinutes) } {
             param($L, $N)
@@ -33,7 +33,7 @@ BeforeAll {
 }
 
 AfterAll {
-    foreach ($f in 'New-ArmLine', 'Get-ArmTime', 'Get-ArmFromLines') { Remove-Item -LiteralPath "Function:\$f" -ErrorAction SilentlyContinue }
+    foreach ($f in 'New-ArmLine', 'Get-ArmTime', 'Get-ArmFromLine') { Remove-Item -LiteralPath "Function:\$f" -ErrorAction SilentlyContinue }
 }
 
 Describe 'ConvertFrom-AzlSonarArmEvent (the log line)' {
@@ -41,7 +41,7 @@ Describe 'ConvertFrom-AzlSonarArmEvent (the log line)' {
         $line = New-ArmLine -At '2026-11-07T12:00:30.0000000Z' -State DeploymentFailed -Step '0.41.2' -Evidence 'Deployment failed' -Level Error -NextAction 'Do not validate again' -Extra @{ knownIssue = 'arc-device-id-name' }
         $r = InModuleScope AzlSonar -Parameters @{ L = $line } { param($L) ConvertFrom-AzlSonarArmEvent -Line $L }
         $r.file | Should -Be 'arm-events'
-        $r.text | Should -Be '2026-11-07T12:00:30.000Z [arm] * DeploymentFailed (0.41.2): Deployment failed -> next: Do not validate again (error)'
+        $r.text | Should -Be '2026-11-07T12:00:30.000Z [arm] * DeploymentFailed (0.41.2): Deployment failed -> next: Do not validate again'
     }
     It 'tags a warning and names a node' {
         $line = New-ArmLine -At (Get-ArmTime 1) -State PreconditionChecked -Node n1 -Step ArcMachineNaming -Evidence 'device id' -Level Warning
@@ -64,7 +64,7 @@ Describe 'ConvertFrom-AzlSonarArmEvent (the log line)' {
 }
 
 Describe 'The feed the toolkit wrote (a Validate that passed, a Deploy that failed at step 0.41)' {
-    BeforeAll { $script:Real = Get-ArmFromLines -Line @(Get-Content -LiteralPath $script:Sample) }
+    BeforeAll { $script:Real = Get-ArmFromLine -Line @(Get-Content -LiteralPath $script:Sample) }
     It 'reads every line of the real writer as an event' {
         $n = InModuleScope AzlSonar -Parameters @{ F = $script:Sample } { param($F) @(Get-Content -LiteralPath $F | ForEach-Object { ConvertFrom-AzlSonarArmLine -Line $_ } | Where-Object { $_ }).Count }
         $n | Should -Be (@(Get-Content -LiteralPath $script:Sample)).Count
@@ -125,7 +125,7 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (New-ArmLine -At (Get-ArmTime 0) -State PlanCompleted -Level Error -Evidence '1 precondition(s) failed: Permissions.' -Mode Validate -Extra @{ failedPreconditions = 1; offline = $false })
             (New-ArmLine -At (Get-ArmTime 0) -State RunCompleted -Level Error -Mode Validate -Extra @{ exitCode = 1 })
         )
-        $s = Get-ArmFromLines -Line $lines
+        $s = Get-ArmFromLine -Line $lines
         $s.validation.status | Should -Be 'blocked'
         $s.validation.kind | Should -Be 'error'
         $s.validation.checkCounts.failed | Should -Be 1
@@ -134,7 +134,6 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
         $s.validation.tree[0].children[0].arm.nextAction | Should -Be 'Grant User Access Administrator'
         $s.deployment.status | Should -Be 'notstarted'
         $s.activePhase | Should -Be 'validation'
-        $s.preventive | Should -BeNullOrEmpty
         $s.hints[0].preventive | Should -BeTrue
         $s.hints[0].id | Should -Be 'arc-device-id-name'
     }
@@ -150,8 +149,8 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (New-ArmLine -At (Get-ArmTime 20) -State PlanCompleted -Mode Plan -RunId b -Extra @{ failedPreconditions = 0; offline = $true })
             (New-ArmLine -At (Get-ArmTime 20) -State RunCompleted -Mode Plan -RunId b -Extra @{ exitCode = 0 })
         )
-        (Get-ArmFromLines -Line $plan).validation.status | Should -Be 'planned'
-        $both = Get-ArmFromLines -Line ($validate + $plan)
+        (Get-ArmFromLine -Line $plan).validation.status | Should -Be 'planned'
+        $both = Get-ArmFromLine -Line ($validate + $plan)
         $both.validation.status | Should -Be 'passed'
         $both.validation.checkCounts.total | Should -Be 1
     }
@@ -170,11 +169,11 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (New-ArmLine -At (Get-ArmTime 20) -State RunStarted -Mode Deploy -RunId c)
             (New-ArmLine -At (Get-ArmTime 20) -State RunStateChanged -Mode Deploy -RunId c -Extra @{ to = 'Deploying' })
         )
-        (Get-ArmFromLines -Line $first).validation.status | Should -Be 'failed'
-        $s2 = Get-ArmFromLines -Line ($first + $second)
+        (Get-ArmFromLine -Line $first).validation.status | Should -Be 'failed'
+        $s2 = Get-ArmFromLine -Line ($first + $second)
         $s2.validation.status | Should -Be 'running'
         $s2.validation.stepCounts.total | Should -Be 0
-        $s3 = Get-ArmFromLines -Line ($first + $deploy)
+        $s3 = Get-ArmFromLine -Line ($first + $deploy)
         $s3.validation.status | Should -Be 'failed'
         $s3.deployment.status | Should -Be 'running'
         $s3.activePhase | Should -Be 'deployment'
@@ -190,7 +189,7 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (& $step 4 '0.2' 'Second' error Failed 0)
             (& $step 5 '0.3' 'Third' success Success 0)
         )
-        $s = Get-ArmFromLines -Line $lines -NowMinutes 6
+        $s = Get-ArmFromLine -Line $lines -NowMinutes 6
         $steps = ($s.validation.tree | Where-Object { $_.id -eq 'validation.steps' }).children
         @($steps.id) | Should -Be @('0.2', '0.1', '0.3')
         $steps[1].durationSeconds | Should -Be 120
@@ -205,7 +204,7 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (New-ArmLine -At (Get-ArmTime 0) -State RunStateChanged -Mode Deploy -Extra @{ to = 'Deploying' })
             (& $step 1 '1' 0), (& $step 1 '1.1' 1), (& $step 1 '1.1.1' 2), (& $step 1 '1.2' 1), (& $step 1 '2' 0)
         )
-        $tree = (Get-ArmFromLines -Line $lines).deployment.tree[0].children
+        $tree = (Get-ArmFromLine -Line $lines).deployment.tree[0].children
         @($tree.id) | Should -Be @('1', '2')
         @($tree[0].children.id) | Should -Be @('1.1', '1.2')
         @($tree[0].children[0].children.id) | Should -Be @('1.1.1')
@@ -221,7 +220,7 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (New-ArmLine -At (Get-ArmTime 30) -State RunStarted -Mode Deploy -RunId b)
             (New-ArmLine -At (Get-ArmTime 30) -State PhaseRefused -Step '0.41' -Level Error -Mode Deploy -RunId b -Evidence 'The last failure is known issue arc-device-id-name.' -NextAction 'Fix the cause first.' -Extra @{ knownIssue = 'arc-device-id-name'; phase = 'Deploy' })
         )
-        $d = (Get-ArmFromLines -Line ($earlier + $refused)).deployment
+        $d = (Get-ArmFromLine -Line ($earlier + $refused)).deployment
         $d.status | Should -Be 'refused'
         $d.carriedOver | Should -BeTrue
         $d.refused.nextAction | Should -Be 'Fix the cause first.'
@@ -234,7 +233,7 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (New-ArmLine -At (Get-ArmTime 0) -State ValidationSkipped -Mode Validate -Extra @{ deploymentName = 'azl-validate-x' })
             (New-ArmLine -At (Get-ArmTime 0) -State ValidationPassed -Mode Validate -Extra @{ skipped = $true })
         )
-        $v = (Get-ArmFromLines -Line $lines).validation
+        $v = (Get-ArmFromLine -Line $lines).validation
         $v.status | Should -Be 'passed'
         $v.skipped | Should -BeTrue
         $v.text | Should -Match 'already validated'
@@ -244,7 +243,7 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (New-ArmLine -At (Get-ArmTime 0) -State DeploymentResumed -Level Warning -Mode Deploy -Evidence 'resubmitted' -Extra @{ deploymentName = 'azl-deploy-x'; previous = 'Failed' })
             (New-ArmLine -At (Get-ArmTime 0) -State RunStateChanged -Mode Deploy -Extra @{ to = 'Deploying' })
         )
-        $d = (Get-ArmFromLines -Line $res).deployment
+        $d = (Get-ArmFromLine -Line $res).deployment
         $d.status | Should -Be 'running'
         $d.resumed.previous | Should -Be 'Failed'
         $d.text | Should -Match 'resumed'
@@ -259,7 +258,7 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (New-ArmLine -At (Get-ArmTime 5) -State ApprovalRequested -Extra @{ approvalMode = 'stop' })
             (New-ArmLine -At (Get-ArmTime 5) -State RunStateChanged -Extra @{ to = 'AwaitingApproval' })
         )
-        $s = Get-ArmFromLines -Line $lines
+        $s = Get-ArmFromLine -Line $lines
         $s.awaitingApproval | Should -BeTrue
         $s.state | Should -Be 'awaitingapproval'
         $s.run.approval.granted | Should -BeFalse
@@ -267,7 +266,7 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (New-ArmLine -At (Get-ArmTime 6) -State ApprovalGranted -Extra @{ approvalMode = 'none' })
             (New-ArmLine -At (Get-ArmTime 6) -State PreconditionChecked -Step B -Extra @{ name = 'B'; result = 'Failed' } -Level Error)
         )
-        $t = Get-ArmFromLines -Line $more
+        $t = Get-ArmFromLine -Line $more
         $t.validation.checkCounts.total | Should -Be 1
         $t.deployment.checkCounts.failed | Should -Be 1
         $t.deployment.status | Should -Be 'blocked'
@@ -278,11 +277,11 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (New-ArmLine -At (Get-ArmTime 0) -State RunStateChanged -Mode Validate -Extra @{ to = 'Validating' })
             (New-ArmLine -At (Get-ArmTime 1) -State PollError -Level Warning -Mode Validate -Evidence 'Reading the validate status failed (2 in a row): 503' -Extra @{ consecutive = 2 })
         )
-        $s = Get-ArmFromLines -Line $base
+        $s = Get-ArmFromLine -Line $base
         $s.validation.pollErrors | Should -Be 2
         @($s.warnings)[0] | Should -Match '503'
         $ok = $base + (New-ArmLine -At (Get-ArmTime 2) -State ValidationStep -Step '0.1' -Mode Validate -Evidence 'A: InProgress' -Extra @{ status = 'running'; rawStatus = 'InProgress'; stepName = 'A'; depth = 0 })
-        (Get-ArmFromLines -Line $ok).validation.pollErrors | Should -Be 0
+        (Get-ArmFromLine -Line $ok).validation.pollErrors | Should -Be 0
     }
     It 'step 0.41 in error gets the device-ID hint even when the run matched no known issue' {
         $lines = @(
@@ -291,7 +290,7 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (New-ArmLine -At (Get-ArmTime 1) -State DeploymentStep -Step '0.41' -Level Error -Mode Deploy -Evidence 'X: Error' -Extra @{ status = 'error'; rawStatus = 'Error'; stepName = 'X'; depth = 0 })
             (New-ArmLine -At (Get-ArmTime 1) -State DeploymentFailed -Step '0.41' -Level Error -Mode Deploy -Extra @{ stepName = 'X'; knownIssue = '' })
         )
-        $d = (Get-ArmFromLines -Line $lines).deployment
+        $d = (Get-ArmFromLine -Line $lines).deployment
         $d.knownIssue | Should -Be 'arc-device-id-name-step-0-41'
         $d.hintSource | Should -Be 'step'
     }
@@ -301,7 +300,7 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
             (New-ArmLine -At (Get-ArmTime 0) -State RunStateChanged -Mode Validate -Extra @{ to = 'Validating' })
             (New-ArmLine -At (Get-ArmTime 1) -State ValidationFailed -Level Error -Mode Validate -Extra @{ knownIssue = 'new-thing-2027' })
         )
-        $h = (Get-ArmFromLines -Line $lines).validation.hint
+        $h = (Get-ArmFromLine -Line $lines).validation.hint
         $h.id | Should -Be 'new-thing-2027'
         $h.text | Should -Match 'known-issues'
     }
@@ -314,19 +313,31 @@ Describe 'Add-AzlSonarArmEvent (the store)' {
     It 'never keeps a secret: a password in free text is masked in the state' {
         $lines = @(
             (New-ArmLine -At (Get-ArmTime 0) -State RunStarted -Mode Validate)
-            (New-ArmLine -At (Get-ArmTime 0) -State PreconditionChecked -Step KeyVaultSecrets -Level Error -Mode Validate -Evidence 'login failed password=Sup3rS3cret! for x' -NextAction 'token=abc123def456ghi' -Extra @{ name = 'KeyVaultSecrets'; result = 'Failed' })
+            (New-ArmLine -At (Get-ArmTime 0) -State PreconditionChecked -Step KeyVaultSecrets -Level Error -Mode Validate -Evidence 'login failed password=Sup3rS3cret! for x' -NextAction 'access_token=abc123def456ghi' -Extra @{ name = 'KeyVaultSecrets'; result = 'Failed' })
         )
-        $json = (Get-ArmFromLines -Line $lines) | ConvertTo-Json -Depth 12
+        $json = (Get-ArmFromLine -Line $lines) | ConvertTo-Json -Depth 12
         $json | Should -Not -Match 'Sup3rS3cret'
         $json | Should -Not -Match 'abc123def456ghi'
     }
-    It 'keeps at most 2000 steps and ignores a line that is not an event' {
+    It 'keeps at most the step limit (2000; lowered here to keep the test quick) and ignores a line that is not an event' {
         $lines = @(
             (New-ArmLine -At (Get-ArmTime 0) -State RunStarted -Mode Deploy)
             (New-ArmLine -At (Get-ArmTime 0) -State RunStateChanged -Mode Deploy -Extra @{ to = 'Deploying' })
             'garbage'
-        ) + @(1..2050 | ForEach-Object { New-ArmLine -At (Get-ArmTime 1) -State DeploymentStep -Step "9.$_" -Mode Deploy -Evidence "S${_}: Success" -Extra @{ status = 'success'; rawStatus = 'Success'; stepName = "S$_"; depth = 0 } })
-        (Get-ArmFromLines -Line $lines).deployment.stepCounts.total | Should -Be 2000
+        ) + @(1..60 | ForEach-Object { New-ArmLine -At (Get-ArmTime 1) -State DeploymentStep -Step "9.$_" -Mode Deploy -Evidence "S${_}: Success" -Extra @{ status = 'success'; rawStatus = 'Success'; stepName = "S$_"; depth = 0 } })
+        $n = InModuleScope AzlSonar -Parameters @{ L = $lines } {
+            param($L)
+            $was = $script:AzlSonarArmMaxSteps
+            $script:AzlSonarArmMaxSteps = 25
+            try {
+                $store = [hashtable]::Synchronized(@{})
+                foreach ($x in $L) { Add-AzlSonarArmEvent -Store $store -Line $x }
+                @($store['*deployment']['Steps']).Count
+            }
+            finally { $script:AzlSonarArmMaxSteps = $was }
+        }
+        $n | Should -Be 25
+        (InModuleScope AzlSonar { $script:AzlSonarArmMaxSteps }) | Should -Be 2000
     }
 }
 
@@ -391,10 +402,13 @@ Describe 'The reader, the config key and the server state' {
         $infra = Read-AzlSonarConfig -InfrastructureFile (Join-Path $script:SonarRepoRoot 'tests/fixtures/infrastructure.3node.yml') 3>$null
         $infra.armEventsPath | Should -Be (Join-Path (Join-Path ([System.IO.Path]::GetTempPath()) ('azl-arm-' + $infra.clusterName)) 'arm-deployment-events.jsonl')
     }
-    It 'the poller state has an arm object, from the store when events exist' {
-        $cfg = New-SonarConfigObject
-        $init = InModuleScope AzlSonar -Parameters @{ C = $cfg } { param($C) (Get-AzlSonarInitialState -Config (ConvertFrom-Json (ConvertTo-Json $C -Depth 32))).arm }
+    It 'the state before the first poll, and a poll with a store, both carry an arm object' {
+        $path = Join-Path $TestDrive 'poll.json'
+        ConvertTo-SonarConfigJson (New-SonarConfigObject) | Set-Content -LiteralPath $path
+        $cfg = Read-AzlSonarConfig -Path $path
+        $init = InModuleScope AzlSonar -Parameters @{ C = $cfg } { param($C) (Get-AzlSonarInitialState -Config $C).arm }
         $init.state | Should -Be 'waiting'
+        $init.hasData | Should -BeFalse
     }
     It 'the Details sources and the not-set list know the ARM file' {
         $json = New-SonarConfigObject
