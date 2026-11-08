@@ -9,6 +9,9 @@ Beacon checks the environment before deployment. Sonar listens to the deployment
 - [Start here](#start-here)
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
+- [Monitors (-Monitor)](#monitors--monitor)
+- [Event files](#event-files)
+- [Start, stop and restart](#start-stop-and-restart)
 - [Record and replay](#record-and-replay)
 - [Configuration reference](#configuration-reference)
 - [Follow ZTP provisioning](#follow-ztp-provisioning)
@@ -73,6 +76,19 @@ On the workstation or jump server that runs Sonar:
 | Az.KeyVault | Only when `credential.source` is `keyvault`. |
 | A browser on the same machine | The page is served on `http://localhost:<port>/` and answers this machine only. |
 
+**Modules and versions.** The code states no minimum module version; these are what it loads, and when.
+
+| Module | When | Install |
+| --- | --- | --- |
+| `Az.Accounts` | Always for a live run (not for `-Replay`, and not for `-Monitor Discovery`). Sign in with `Connect-AzAccount` before you start. | `Install-Module Az.Accounts -Scope CurrentUser` |
+| `Az.KeyVault` | Only with `credential.source: keyvault`, or to read the domain account password for the log account. | `Install-Module Az.KeyVault -Scope CurrentUser` |
+| `Posh-SSH` | Only when WinRM to the seed node is blocked and `logs.transport` is `ssh` or `auto` falls through to SSH. | `Install-Module Posh-SSH -Scope CurrentUser` |
+
+Sonar needs no other module and no YAML module: it reads `infrastructure.yml` with its own reader. Sonar is run from a Windows workstation or jump server; the module manifest allows PowerShell Core on any OS, and WinRM from Linux needs the PSWSMan module.
+
+**Network and ports.** From the workstation: HTTPS (TCP 443) to `management.azure.com` and `login.microsoftonline.com`; to the seed node WinRM TCP 5985 (HTTP) or 5986 (HTTPS), or SSH TCP 22; with `credential.source: keyvault` also HTTPS to `*.vault.azure.net`. Sonar's page listens on the local port (default TCP 8642) on this machine only. The event files and the discovery folder are read from the local disk or a share this account can read; Sonar writes nothing to Azure or to the nodes.
+
+**Credentials.** The Azure sign-in is the Az context of the account that runs Sonar (Reader on the resource group is enough). The log account on the seed node comes from a prompt (default), `-Credential`, or a Key Vault secret pair (`credential.vault`, `usernameSecret`, `passwordSecret`); the config file never holds a password, and the master `infrastructure.yml` holds only `keyvault://` references that Sonar does not read.
 The full cross-tool matrix of roles and network paths is in the toolkit's [access-and-connectivity page](https://github.com/AzureLocal/azurelocal-toolkit/blob/main/docs/access-and-connectivity.md).
 
 Without log access Sonar still runs: the step tree, phases and node status come from Azure; the log pane shows why the logs are unavailable and which account and location to use.
@@ -153,6 +169,60 @@ There is nothing to install: no service, no database, no build step.
 
 Add `?demo=1` to the page URL to see the page with built-in sample data (a running deployment). `?demo=1&route=simplified` is a ZTP run of three machines (example names `iic-azl-n01` to `n03`): two are done, the third is installing the OS, and the ZTP events are in the logs. `?demo=1&route=osconfig` is an OS configuration run of three machines: a ZTP machine that converged after one retry, an ISO machine whose drivers step failed, and a ZTP machine still applying. `?demo=1&route=oem` shows two machines registering on the OEM image route (one updating its OS image, in `Download`; one bootstrapping, in `ArcConfiguration > ArcRegistration`). `?demo=1&replay=1` plays the demo deployment as a built-in recording, so you can try the replay controls without a file. Add `#details`, `#logaccess` or `#help` to open the Details pop-down, the Log access window or the Help box. Demo mode makes no API call of its own; when a Sonar back end serves the page it reads `/api/about` and `/api/guidance` only, to show the real version, links and phase guidance.
 
+## Monitors (-Monitor)
+
+`./Start-AzlSonar.ps1 -Monitor <name>` (or the `monitor` key of the config; the parameter wins) chooses what Sonar watches. `Auto`, the default, follows the whole flow and shows every tile for which it has data. A single monitor shows only its own tile and section, reads only the sources it needs, lists only its phases in **Log access**, and names itself in the page title. The name is accepted in any case and with dashes (`os-configuration`, `add-node`).
+
+| `-Monitor` | Follows | Reads | Event or input file | Azure sign-in | Node access |
+| --- | --- | --- | --- | --- | --- |
+| `Auto` (default) | The whole flow, in order | Everything the config names | All of the files below | Yes | Seed node log, if reachable |
+| `Discovery` | The toolkit's hardware discovery, before ZTP | The discovery folder only | `discoveryPath`: the folder `Invoke-HardwareDiscovery.ps1 -OutputPath` wrote (`<ServiceTag>.json` per node, `discovery-summary.json`) | No | No |
+| `Provisioning` | ZTP, or the OEM image route | Azure (edge machines, Arc machines), the ZTP events, the OEM image probes | `ztpEvents.path` (`ztp-events.jsonl`) | Yes | Probes on the OEM image route only |
+| `OsConfiguration` | The toolkit's OS configuration run | The OS configuration events and, for Arc Run Commands, Azure | `osConfigEventsPath` (`os-configuration-events.jsonl`) | Yes | No node logs |
+| `Validate` | The toolkit's ARM Validate | The validation resources in Azure, the cluster resource, the ARM events, the seed node log | `armEventsPath` (`arm-deployment-events.jsonl`) | Yes | Seed node log |
+| `Deployment` | The toolkit's ARM Deploy, then the post-deployment steps | The deployment resources in Azure, the cluster resource, the ARM events, the seed node log | `armEventsPath` | Yes | Seed node log |
+| `Update` | A solution update | The update resources in Azure, the cluster resource, the seed node log | none | Yes | Seed node log |
+| `AddNode` | Adding a node | The Arc machines, the cluster resource, the seed node log | none | Yes | Seed node log |
+| `Repair` | Repairing a node | The Arc machines, the cluster resource, the seed node log | none | Yes | Seed node log |
+| `Verification` | The toolkit's pre-cluster verification gate, between OS configuration and Validate: can the cluster deployment start, and what blocks it | The gate's event file only | `verificationEventsPath` (`precluster-verification-events.jsonl`) | No | No |
+
+**Verification.** The tile and mode that follow the pre-cluster verification gate (verdict, counts, checks by category, and skipped checks that block). It reads only the gate's event file, so it needs no Azure sign-in and no node access; in `Auto` it is a tile between OS configuration and Validate. Everything about it is in [docs/verification.md](docs/verification.md). Sonar never runs or fixes a check.
+
+Examples:
+
+```powershell
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor Discovery        # before ZTP, no Azure sign-in
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor Provisioning     # during ZTP
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor OsConfiguration  # during OS configuration
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor Verification     # the pre-cluster verification gate, no Azure sign-in
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor Validate         # during ARM Validate
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor Deployment       # during ARM Deploy
+```
+
+Each monitor is explained, with a screenshot, in [Run one stage on its own](docs/run.md#run-one-stage-on-its-own--monitor) and in [the stages](docs/stages.md).
+
+## Event files
+
+Sonar follows the files the other tools write; it never writes them. Each is JSON Lines (one object per line), read from the start at every Sonar start, so a restart rebuilds the same view. A path in a config file is relative to that file. With `-InfrastructureFile`, Sonar derives the paths below from the master file.
+
+| Tool | Config key | Default from the master file | The file | Fields | Reference |
+| --- | --- | --- | --- | --- | --- |
+| azurelocal-toolkit hardware discovery | `discoveryPath` | `provisioning.simplified.evidence_path\discovery` | A folder: `<ServiceTag>.json` per node and `discovery-summary.json` | Identity, BMC MAC, network ports, BOSS, warnings | [Discovery](docs/stages.md#discovery) |
+| azurelocal-ztp | `ztpEvents.path` | `provisioning.simplified.evidence_path\ztp-events.jsonl` (simplified route only) | `ztp-events.jsonl` | `timestamp`, `node`, `state`, `evidence`, `nextAction`, `level`, `stage` | [Follow ZTP provisioning](#follow-ztp-provisioning) |
+| azurelocal-toolkit OS configuration | `osConfigEventsPath` | `provisioning.simplified.evidence_path\os-configuration-events.jsonl` (on the ISO route only when `evidence_path` is set) | `os-configuration-events.jsonl` in the run's `-ReportDirectory` | `timestamp`, `node`, `stage`, `step`, `state`, `evidence`, `level`, `nextAction`, `method`, `transport` | [OS configuration](docs/stages.md#os-configuration) |
+| azurelocal-toolkit ARM Validate and Deploy | `armEventsPath` | `<temp>/azl-arm-<cluster.name>/arm-deployment-events.jsonl` | `arm-deployment-events.jsonl` in the run's report directory | `timestamp`, `node`, `stage`, `step`, `state`, `evidence`, `level`, `nextAction`, `runId`, `mode`, `cluster` | [Validate and Deploy](docs/arm-run.md) |
+| azurelocal-toolkit pre-cluster verification gate | `verificationEventsPath` | master file: `<evidence folder>/arm-report/verification/live/precluster-verification-events.jsonl` | `precluster-verification-events.jsonl` in the gate's report directory | `schema`, `runId`, `seq`, `ts`, `type`, `checkId`, `category`, `status`, `node`, `blocking`, `verdict` | [Verification](docs/verification.md#the-event-contract) |
+| Sonar itself | `recordPath` / `-Record` | none | A recording you ask for | Sonar's own session format | [Record and replay](#record-and-replay) |
+
+The event contract, with the state values each tool uses, is in [docs/reference/events.md](docs/reference/events.md) and [its JSON schema](docs/reference/events.schema.json).
+
+## Start, stop and restart
+
+- **Start:** `Connect-AzAccount`, then `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml` (or `-ConfigPath`). It prints the URL with this start's access token and opens the browser. With no arguments it prints the three ways to configure Sonar and offers the guided setup.
+- **Stop:** Ctrl+C in the window. Nothing changes in Azure or on the machines.
+- **Restart:** run the same command again. Everything is read again from Azure and from the event files (the ZTP, OS configuration and ARM files are read from their start), so the view returns in full. The browser page notices the new instance and reloads; the access token is new, so open the URL Sonar prints. A recording is appended to, with a new session header. Restart after the master file or the config changes the node set, the route or the identity model, and after the log account changes. Sonar logs a notice when it sees the node set change in the master file (the file is checked every 60 seconds).
+- **Port taken:** `-Port <other>`; Sonar says when 8642 is in use.
+- **Unattended or on a runner:** `-NoBrowser`, `-Credential` or a Key Vault credential so nothing prompts, and `-Record` to keep the run. See [Run from a pipeline](docs/run.md#run-from-a-pipeline-or-an-unattended-session) and [Restart Sonar mid-run](docs/run.md#restart-sonar-mid-run).
 ## Record and replay
 
 Sonar can keep what the page was sent during a run and play it back later through the same page: the step tree, timers, phase chip, node status, tailer status and log pane rebuild exactly as they were at any moment of the run.
@@ -219,6 +289,7 @@ Unknown fields are ignored. Sonar validates the file at start and lists every pr
 | `edgeApiVersion` | no | `2026-10-01` | api-version for `edgeMachines` and their `jobs` (GA from 2026-10-01; the earlier versions are previews, from `2025-12-01-preview`). |
 | `track` | no | `auto` | `auto` follows the deployment and an update when Azure reports one. `add-node` or `repair` shows that operation after deployment (guidance, the Arc machines and the node log; Azure reports no steps for them). `update` always reads the update resources. Add node and repair are unverified against a live run. |
 | `updateTrack` | no | `auto` | `off` never calls the update resources (`updateSummaries`, `updates`, `updateRuns`). |
+| `monitor` | no | `Auto` | Which stage to watch alone: `Auto`, `Discovery`, `Provisioning`, `OsConfiguration`, `Validate`, `Deployment`, `Update`, `AddNode` or `Repair` (any case, dashes ignored). `-Monitor` overrides it. See [Monitors](#monitors--monitor). |
 | `provisioningRoute` | no | `auto` | How the machines get ready before deployment: `simplified` (simplified machine provisioning, edge machines), `oem-image` (OEM image + Arc registration; edge machines are never read) or `auto` (simplified when edge machines for the configured nodes exist in the resource group, else oem-image). See [the two routes](#how-the-machines-get-ready-the-two-routes). |
 | `identityModel` | yes | | `LocalIdentity` or `ActiveDirectory`. Picks the account guidance and whether `TrustedHosts` is needed. |
 | `pollSeconds` | no | `20` | Azure poll interval, 5 to 3600 seconds. |
