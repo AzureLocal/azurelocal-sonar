@@ -15,11 +15,15 @@ Set-StrictMode -Version Latest
 #    authentication rejection by any node opens the breaker: no node is given the domain account for a back-off (15 minutes,
 #    doubling to 2 hours). After the back-off exactly ONE probe is allowed at a time (a lease: a node that makes no attempt
 #    loses the slot after AzlSonarProbeLeaseSeconds); a rejected probe doubles the back-off; after maxRejections rejections
-#    (default 2) the breaker latches until the secret's version changes (then ONE probe, closing only on its ok), the operator
-#    confirms the unlock, or Sonar restarts. A locked-out account latches at once. A rejected account is never retried per
-#    poll. Every connection reports back with the ticket it was handed (an epoch): a result older than the breaker's last
-#    change is ignored, and only the probe holder can close the breaker or release the slot.
-#  - Key Vault is read by the probe holder, outside the lock.
+#    (default 2) the breaker latches until the secret's version changes (then ONE probe, closing only on its ok) or Sonar
+#    restarts. A locked-out, disabled or expired account latches at once. A rejected account is never retried per poll.
+#    Every connection reports back with the ticket it was handed (an epoch): a result older than the breaker's last change is
+#    ignored, and only the probe holder can close the breaker or release the slot. Three results in a row that cannot be
+#    classified also latch it.
+#  - While the account is in use at most maxRejections connection attempts are in flight at once, and the secret's version
+#    is looked at (a Key Vault read, not an attempt) about once a minute: a rotated password is noticed before every node
+#    has tried the old one.
+#  - Key Vault is read by the probe holder (or the one caller that rechecks the version), outside the lock.
 #  - A credential that cannot be had (Key Vault outage, Az.KeyVault missing, an expired Azure sign-in) is not a rejection: the
 #    local account is used and the credential is asked for again after 1, 2, then 5 minutes. No node is marked rejected.
 #  - An account that logs on but is not an administrator of the node (authorization) does not open the breaker; the local
@@ -37,7 +41,10 @@ $script:AzlSonarBreakerMaxMinutes = 120
 $script:AzlSonarUnavailableMinutes = @(1, 2, 5)
 $script:AzlSonarAuthorizationMinutes = 5
 $script:AzlSonarDefaultMaxRejections = 2
-$script:AzlSonarProbeLeaseSeconds = 120
+$script:AzlSonarProbeLeaseSeconds = 180
+$script:AzlSonarVersionRecheckSeconds = 60
+$script:AzlSonarMaxOtherResults = 3
+$script:AzlSonarProbeRetryMinutes = 5
 
 function ConvertFrom-AzlSonarKeyVaultReference {
     <#
@@ -196,6 +203,16 @@ function Get-AzlSonarLogAccount {
             'probing' {
                 $result.reason = "domain-joined, but another node is checking $domainName first: using $localText"
             }
+            'unusable' {
+                $result.rejected = $true
+                $result.reason = "domain-joined, but $domainName is disabled, expired or must change its password; the domain account stays paused until its password changes or Sonar restarts: using $localText"
+                $result.warning = "$domainName cannot be used (disabled, expired or must change its password). Using $localText."
+            }
+            'unclassified' {
+                $result.rejected = $true
+                $result.reason = "domain-joined, but connections with $domainName kept failing in a way Sonar cannot tell from a wrong password; the domain account stays paused until its password changes or Sonar restarts: using $localText"
+                $result.warning = "Connections with $domainName failed three times in a row without a recognised reason. Sonar stopped presenting it to every node. Using $localText."
+            }
             'open' {
                 $result.rejected = $true
                 $result.reason = "domain-joined, but $domainName was rejected; the domain account is paused for every node$(& $at $until): using $localText"
@@ -244,19 +261,24 @@ function New-AzlSonarBreakerRecord {
         State closed|open|latched. Epoch counts the events that change what an earlier connection may report (a rejection, a
         reset, a reclaimed probe): a result that carries an older epoch is stale. ProbeInFlight/ProbeId/ProbeNode/ProbeStartedAt
         are the single probe slot (a lease: it is reclaimed after AzlSonarProbeLeaseSeconds). Verified: a connection with the
-        current password has worked since the last reset; until then the account is given to ONE node at a time.
+        current password has worked since the last reset; until then the account is given to ONE node at a time. InFlight lists
+        the connection attempts that were handed the verified credential and have not reported yet (capped at MaxRejections).
+        OtherCount counts consecutive results Sonar could not classify. VersionCheckedAt is when the secret's version was last
+        looked at while the account was in use.
     #>
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Builds an in-memory record only.')]
     [CmdletBinding()]
     param(
         [string]$Account = '', [string]$State = 'closed', [int]$Failures = 0, [int]$MaxRejections = 2, [object]$OpenedAt, [object]$NextProbeAt,
         [int]$BackoffMinutes = 0, [bool]$ProbeInFlight = $false, [object]$ProbeStartedAt, [string]$ProbeNode = '', [string]$ProbeId = '',
-        [long]$Epoch = 0, [bool]$Verified = $false, [string]$LastClass = '', [string]$SecretVersion = ''
+        [long]$Epoch = 0, [bool]$Verified = $false, [string]$LastClass = '', [string]$SecretVersion = '',
+        [object]$VersionCheckedAt, [object[]]$InFlight = @(), [int]$OtherCount = 0
     )
     [pscustomobject]@{
         Account = $Account; State = $State; Failures = $Failures; MaxRejections = $MaxRejections; OpenedAt = $OpenedAt; NextProbeAt = $NextProbeAt
         BackoffMinutes = $BackoffMinutes; ProbeInFlight = $ProbeInFlight; ProbeStartedAt = $ProbeStartedAt; ProbeNode = $ProbeNode; ProbeId = $ProbeId
         Epoch = $Epoch; Verified = $Verified; LastClass = $LastClass; SecretVersion = $SecretVersion
+        VersionCheckedAt = $VersionCheckedAt; InFlight = @($InFlight); OtherCount = $OtherCount
     }
 }
 
@@ -273,6 +295,14 @@ function Copy-AzlSonarBreakerRecord {
     foreach ($p in $Base.PSObject.Properties) { $copy[$p.Name] = $p.Value }
     foreach ($k in $Change.Keys) { $copy[$k] = $Change[$k] }
     return [pscustomobject]$copy
+}
+
+function New-AzlSonarTicket {
+    # What a connection is handed with the credential and reports back with.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Builds an in-memory record only.')]
+    [CmdletBinding()]
+    param([long]$Epoch, [datetime]$StartedAt, [bool]$Probe = $false, [string]$ProbeId = '', [string]$TicketId = '')
+    [pscustomobject]@{ Epoch = $Epoch; StartedAt = $StartedAt; Probe = $Probe; ProbeId = $ProbeId; TicketId = $TicketId }
 }
 
 function Get-AzlSonarAccountBreaker {
@@ -315,9 +345,10 @@ function Get-AzlSonarNodePauseFor {
         Why the domain account must not be presented to this node now: a -Pause record for Get-AzlSonarLogAccount, or $null.
     .DESCRIPTION
         Reads the account-wide breaker, the credential-unavailable record and the node's own record, from the table of
-        Shared.LogAccount. Kinds: latched, lockedOut, open (with the time of the next check), probing (another node is
-        checking the account first), unavailable, authorization. The node's published record is output only (what it was
-        given); it is never read back as a reason to pause.
+        Shared.LogAccount. Kinds: latched, lockedOut, unusable (disabled, expired, must change its password), unclassified
+        (connections kept failing in a way Sonar cannot tell from a wrong password), open (with the time of the next check),
+        probing (another node is checking the account first), unavailable, authorization. The node's published record is
+        output only (what it was given); it is never read back as a reason to pause.
     #>
     [CmdletBinding()]
     param([AllowNull()][System.Collections.IDictionary]$Table, [string]$Node, [datetime]$Now = [datetime]::UtcNow)
@@ -325,7 +356,10 @@ function Get-AzlSonarNodePauseFor {
     if ($null -eq $Table) { return $null }
     $breaker = Get-AzlSonarAccountBreaker -Table $Table
     $locked = ($breaker.LastClass -eq 'lockedOut')
-    if ($breaker.State -eq 'latched') { return [pscustomobject]@{ Kind = $(if ($locked) { 'lockedOut' } else { 'latched' }); Until = $null; Message = '' } }
+    if ($breaker.State -eq 'latched') {
+        $kind = switch ([string]$breaker.LastClass) { 'lockedOut' { 'lockedOut' } 'accountUnusable' { 'unusable' } 'other' { 'unclassified' } default { 'latched' } }
+        return [pscustomobject]@{ Kind = $kind; Until = $null; Message = '' }
+    }
     if ($breaker.State -eq 'open') {
         return [pscustomobject]@{ Kind = $(if ($locked) { 'lockedOut' } else { 'open' }); Until = $breaker.NextProbeAt; Message = '' }
     }
@@ -342,12 +376,19 @@ function Get-AzlSonarNodePauseFor {
 }
 
 function Get-AzlSonarFailureCode {
-    # The Windows error numbers a failure carries (ErrorCode, HResult in the Win32 facility, 0x8007xxxx in the text).
+    <#
+    .SYNOPSIS
+        The error numbers a failure carries: { Win32 (int[]), Hex (8-digit unsigned HRESULTs, lower case) }.
+    .DESCRIPTION
+        From ErrorCode and HResult of each exception (signed or unsigned), and from 0x........ in the text. A Win32 number is
+        the low word of an 0x8007xxxx HRESULT, or a small ErrorCode as WinRM reports it (5, 1326). SSPI errors such as
+        0x8009030c stay whole in Hex.
+    #>
     [CmdletBinding()]
-    [OutputType([int[]])]
     param([object[]]$Exception, [string]$Text)
 
-    $codes = [System.Collections.Generic.List[int]]::new()
+    $win32 = [System.Collections.Generic.List[int]]::new()
+    $hex = [System.Collections.Generic.List[string]]::new()
     foreach ($ex in $Exception) {
         if ($null -eq $ex) { continue }
         foreach ($name in 'ErrorCode', 'HResult') {
@@ -355,29 +396,37 @@ function Get-AzlSonarFailureCode {
             $v = 0L
             if (-not [int64]::TryParse([string]$ex.$name, [ref]$v)) { continue }
             $u = $v -band 0xFFFFFFFFL
-            if (($u -band 0xFFFF0000L) -eq 0x80070000L) { $codes.Add([int]($u -band 0xFFFFL)) }
-            elseif ($name -eq 'ErrorCode' -and $v -gt 0 -and $v -lt 65536) { $codes.Add([int]$v) }
+            if ($u -ge 65536L) { $hex.Add($u.ToString('x8')) }
+            if (($u -band 0xFFFF0000L) -eq 0x80070000L) { $win32.Add([int]($u -band 0xFFFFL)) }
+            elseif ($name -eq 'ErrorCode' -and $v -gt 0 -and $v -lt 65536) { $win32.Add([int]$v) }
         }
     }
-    foreach ($m in [regex]::Matches($Text, '(?i)0x8007([0-9a-f]{4})(?![0-9a-f])')) { $codes.Add([Convert]::ToInt32($m.Groups[1].Value, 16)) }
-    return [int[]]$codes.ToArray()
+    foreach ($m in [regex]::Matches($Text, '(?i)0x([0-9a-f]{8})(?![0-9a-f])')) {
+        $h = $m.Groups[1].Value.ToLowerInvariant()
+        $hex.Add($h)
+        if ($h.StartsWith('8007', [System.StringComparison]::Ordinal)) { $win32.Add([Convert]::ToInt32($h.Substring(4), 16)) }
+    }
+    return [pscustomobject]@{ Win32 = [int[]]$win32.ToArray(); Hex = [string[]]$hex.ToArray() }
 }
 
 function Get-AzlSonarConnectionFailureClass {
     <#
     .SYNOPSIS
-        What a failed connection means for the account: { Class, Reason }, Class one of rejected, authorization, lockedOut,
-        unreachable or other.
+        What a failed connection means for the account: { Class, Reason }, Class one of rejected, lockedOut, accountUnusable,
+        authorization, unreachable or other.
     .DESCRIPTION
-        Numeric Windows error codes first (the language of the text is not reliable), then specific phrases; a broad word
-        such as "authentication", "credential" or "logon failure" alone is NOT enough.
-          lockedOut      1909 (0x80070775), "account locked out", "referenced account is currently locked out"
-          authorization  1385 (0x80070569) "logon type not granted": the password was right, the account may not log on this way
-          rejected       1326 (0x8007052e), 1331, 1330, 1907, 0x8009030c, "user name or password is incorrect", "bad password";
-                         SSH "Permission denied (publickey,password)"; and "access is denied" (5, 0x80070005, AccessDenied) while
-                         the session is being OPENED: over Negotiate a wrong password fails exactly like that
-          authorization  "access is denied" AFTER a session opened (-Stage use): the account got in but may not do this
-          unreachable    timeouts, "credential provider", network errors, a host that does not answer
+        Numeric error codes first (the language of the text is not reliable), then specific phrases; a broad word such as
+        "authentication", "credential" or "logon failure" alone is NOT enough.
+          lockedOut        1909 (0x80070775), "account locked out", "referenced account is currently locked out"
+          accountUnusable  1330, 1331, 1907 (expired, disabled, must change its password): these do not raise the bad-password
+                           count, but retrying cannot work
+          authorization    1385 (0x80070569) "logon type not granted": the password was right, the account may not log on this way
+          rejected         1326 (0x8007052e), 0x8009030c, "user name or password is incorrect", "bad password"; SSH "Permission
+                           denied (publickey,password)"; and "access is denied" (5, 0x80070005, AccessDenied) while the session
+                           is being OPENED: over Negotiate a wrong password fails exactly like that
+          authorization    "access is denied" AFTER a session opened (-Stage use): the account got in but may not do this
+          unreachable      timeouts, 0x8009030e and 0x80090311 (no credentials, no authority to contact), "credential provider",
+                           network errors, a host that does not answer
         Only rejected and lockedOut count against the account's lockout threshold.
     .PARAMETER Transport
         winrm or ssh.
@@ -421,19 +470,22 @@ function Get-AzlSonarConnectionFailureClass {
     }
     $all = ($texts -join ' | ')
     $types = ($typeNames -join ' ')
-    $codes = @(Get-AzlSonarFailureCode -Exception $chain.ToArray() -Text $all)
+    $codes = Get-AzlSonarFailureCode -Exception $chain.ToArray() -Text $all
+    $w = @($codes.Win32)
+    $h = @($codes.Hex)
     $result = { param($c, $r) [pscustomobject]@{ Class = $c; Reason = $r } }
 
-    if ($codes -contains 1909 -or $all -match '(?i)account locked out|referenced account is currently locked out|account has been locked') { return & $result 'lockedOut' 'the account is locked out' }
-    if ($codes -contains 1385 -or $all -match '(?i)not been granted the requested logon type') { return & $result 'authorization' 'the account may not log on to the node this way (logon type not granted)' }
+    if ($w -contains 1909 -or $all -match '(?i)account locked out|referenced account is currently locked out|account has been locked') { return & $result 'lockedOut' 'the account is locked out' }
+    if ($w -contains 1385 -or $all -match '(?i)not been granted the requested logon type') { return & $result 'authorization' 'the account may not log on to the node this way (logon type not granted)' }
     if ($Transport -eq 'ssh') {
         if ($types -match 'SshAuthenticationException' -or $all -match '(?i)permission denied \(') { return & $result 'rejected' 'the node refused the password' }
         if ($all -match '(?i)timed? ?out|connection (refused|reset|attempt failed)|no such host|network|unreachable|host key') { return & $result 'unreachable' 'the node did not answer' }
         return & $result 'other' 'an error that says nothing about the account'
     }
-    if (@($codes | Where-Object { $_ -in 1326, 1331, 1330, 1907 }).Count -gt 0 -or $all -match '(?i)0x8009030c|user name or password is incorrect|bad password') { return & $result 'rejected' 'the node refused the user name or password' }
-    if ($all -match '(?i)credential provider|credential (could not|cannot|failed)|no credentials? are available|logon session') { return & $result 'unreachable' 'a credential provider failed before the account was tried' }
-    if ($codes -contains 5 -or $all -match '(?i)access\s*(is\s*)?denied' -or $types -match 'UnauthorizedAccessException') {
+    if (@($w | Where-Object { $_ -in 1330, 1331, 1907 }).Count -gt 0) { return & $result 'accountUnusable' 'the account is disabled, expired or must change its password' }
+    if ($w -contains 1326 -or $h -contains '8009030c' -or $all -match '(?i)user name or password is incorrect|bad password') { return & $result 'rejected' 'the node refused the user name or password' }
+    if ($h -contains '8009030e' -or $h -contains '80090311' -or $all -match '(?i)credential provider|credential (could not|cannot|failed)|no credentials? are available|logon session') { return & $result 'unreachable' 'no credentials or authority were available before the account was tried' }
+    if ($w -contains 5 -or $all -match '(?i)access\s*(is\s*)?denied' -or $types -match 'UnauthorizedAccessException') {
         if ($Stage -eq 'open') { return & $result 'rejected' 'the node refused the account while the session was being opened (access denied)' }
         return & $result 'authorization' 'not an administrator of the node'
     }
@@ -446,23 +498,36 @@ function Get-AzlSonarWorstFailureClass {
     .SYNOPSIS
         The worst class over the transport legs of one connection attempt: { Class, Reason }.
     .DESCRIPTION
-        A connection failure text reads 'WinRM: ... | SSH: ...'. Every leg is classified for its own transport (an SSH
-        "Permission denied (" is a rejection however the WinRM leg failed), and the worst wins: lockedOut, rejected,
-        authorization, unreachable, other.
+        -Leg takes the legs Open-AzlSonarNodeConnection returns ({ Transport, Exception, Message }), so the error codes and the
+        exception type are used. -Reason takes the joined text 'WinRM: ... | SSH: ...' (every leg is split off by its prefix).
+        Every leg is classified for its own transport (an SSH "Permission denied (" is a rejection however the WinRM leg
+        failed), and the worst wins: lockedOut, accountUnusable, rejected, authorization, unreachable, other.
     #>
     [CmdletBinding()]
     [OutputType([pscustomobject])]
-    param([AllowNull()][AllowEmptyString()][string]$Reason = '', [ValidateSet('open', 'use')][string]$Stage = 'open')
+    param([AllowNull()][object[]]$Leg, [AllowNull()][AllowEmptyString()][string]$Reason = '', [ValidateSet('open', 'use')][string]$Stage = 'open')
 
-    $rank = @{ lockedOut = 5; rejected = 4; authorization = 3; unreachable = 2; other = 1 }
+    $rank = @{ lockedOut = 6; accountUnusable = 5; rejected = 4; authorization = 3; unreachable = 2; other = 1 }
     $worst = [pscustomobject]@{ Class = 'other'; Reason = 'an error that says nothing about the account' }
-    if ([string]::IsNullOrWhiteSpace($Reason)) { return $worst }
-    foreach ($leg in [regex]::Split($Reason, '\s\|\s(?=(?:WinRM|SSH):)')) {
-        $transport = if ($leg -match '^\s*SSH:') { 'ssh' } else { 'winrm' }
-        $text = [regex]::Replace($leg, '^\s*(?:WinRM|SSH):\s*', '')
-        $c = Get-AzlSonarConnectionFailureClass -Transport $transport -Message $text -Stage $Stage
-        if ($rank[$c.Class] -gt $rank[$worst.Class]) { $worst = $c }
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    $skippedLegs = 0
+    if ($null -ne $Leg -and @($Leg).Count -gt 0) {
+        foreach ($l in $Leg) {
+            if ([bool](Get-AzlSonarMember $l 'Skipped' $false)) { $skippedLegs++; continue }
+            $t = [string](Get-AzlSonarMember $l 'Transport' 'winrm')
+            $candidates.Add((Get-AzlSonarConnectionFailureClass -Transport $(if ($t -eq 'ssh') { 'ssh' } else { 'winrm' }) -Exception (Get-AzlSonarMember $l 'Exception') -Message ([string](Get-AzlSonarMember $l 'Message' '')) -Stage $Stage))
+        }
     }
+    elseif (-not [string]::IsNullOrWhiteSpace($Reason)) {
+        foreach ($part in [regex]::Split($Reason, '\s\|\s(?=(?:WinRM|SSH):)')) {
+            # a leg that was not tried (no credential, no Posh-SSH, not with the domain password) says nothing
+            if ($part -match '^\s*SSH:\s*(not tried|needs a credential|the Posh-SSH module)') { $skippedLegs++; continue }
+            $transport = if ($part -match '^\s*SSH:') { 'ssh' } else { 'winrm' }
+            $candidates.Add((Get-AzlSonarConnectionFailureClass -Transport $transport -Message ([regex]::Replace($part, '^\s*(?:WinRM|SSH):\s*', '')) -Stage $Stage))
+        }
+    }
+    if ($candidates.Count -eq 0 -and $skippedLegs -gt 0) { return [pscustomobject]@{ Class = 'unreachable'; Reason = 'no connection was attempted' } }
+    foreach ($c in $candidates) { if ($rank[$c.Class] -gt $rank[$worst.Class]) { $worst = $c } }
     return $worst
 }
 
@@ -525,16 +590,18 @@ function Register-AzlSonarAccountResult {
     .SYNOPSIS
         Records what a connection told about the domain account, in the breaker, the credential-unavailable record or the node's record.
     .DESCRIPTION
-        Class: ok (a connection with the domain account worked), rejected, lockedOut, authorization, unreachable, other,
-        credentialUnavailable. All under Shared.CredentialLock, as new immutable records. Only rejected and lockedOut count
-        against the account: the first one opens the breaker for every node (15 minutes, then doubling to 2 hours), the
-        breaker latches after MaxRejections of them, and a locked-out account latches at once (until its secret changes or
-        the operator confirms the unlock).
-        -Ticket is what Select-AzlSonarNodeAccount handed out with the credential: { Epoch, StartedAt, Probe, ProbeId }. A
-        result whose ticket is older than the breaker's last change (an earlier epoch, or started before it opened) is stale
+        Class: ok (a connection with the domain account worked), rejected, lockedOut, accountUnusable, authorization,
+        unreachable, other, credentialUnavailable. All under Shared.CredentialLock, as new immutable records. Only rejected and
+        lockedOut count against the account: the first one opens the breaker for every node (15 minutes, then doubling to 2
+        hours), the breaker latches after MaxRejections of them, and a locked-out or unusable (disabled, expired) account
+        latches at once (until its secret changes or Sonar restarts). Results Sonar cannot classify ('other') are counted;
+        the third in a row latches the account too, because a rejection that is worded unexpectedly must not be retried for ever.
+        -Ticket is what Select-AzlSonarNodeAccount handed out with the credential: { Epoch, StartedAt, Probe, ProbeId, TicketId }.
+        A result whose ticket is older than the breaker's last change (an earlier epoch, or started before it opened) is stale
         and ignored, so a second failure of the same wave does not double the back-off and a late ok does not close what
         another node just opened. ok closes the breaker, and any result releases the probe slot, ONLY when it comes from the
-        probe holder. Without a ticket the holder is the node named in the slot.
+        probe holder. Without a ticket the holder is the node named in the slot. A probe that ends in unreachable or other
+        pushes the next probe of an open or latched breaker 5 minutes out.
     #>
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Updates an in-memory table only.')]
     [CmdletBinding()]
@@ -542,7 +609,7 @@ function Register-AzlSonarAccountResult {
         [Parameter(Mandatory)][System.Collections.IDictionary]$Shared,
         [Parameter(Mandatory)][object]$Config,
         [Parameter(Mandatory)][string]$Node,
-        [Parameter(Mandatory)][ValidateSet('ok', 'rejected', 'lockedOut', 'authorization', 'unreachable', 'other', 'credentialUnavailable')][string]$Class,
+        [Parameter(Mandatory)][ValidateSet('ok', 'rejected', 'lockedOut', 'accountUnusable', 'authorization', 'unreachable', 'other', 'credentialUnavailable')][string]$Class,
         [string]$Message = '',
         [datetime]$Now = [datetime]::UtcNow,
         [AllowNull()][object]$Ticket
@@ -561,6 +628,12 @@ function Register-AzlSonarAccountResult {
             $b = Copy-AzlSonarBreakerRecord -Base $b -Change @{ ProbeInFlight = $false; ProbeId = ''; ProbeNode = ''; ProbeStartedAt = $null; Epoch = [long]$b.Epoch + 1 }
             $table[$script:AzlSonarBreakerKey] = $b
         }
+        # this attempt has reported: it no longer counts as in flight
+        $ticketId = if ($null -ne $Ticket) { [string](Get-AzlSonarMember $Ticket 'TicketId' '') } else { '' }
+        if ($ticketId -and @($b.InFlight | Where-Object { $_.Id -eq $ticketId }).Count -gt 0) {
+            $b = Copy-AzlSonarBreakerRecord -Base $b -Change @{ InFlight = @($b.InFlight | Where-Object { $_.Id -ne $ticketId }) }
+            $table[$script:AzlSonarBreakerKey] = $b
+        }
         $stale = $false
         $isProbe = $false
         if ($null -ne $Ticket) {
@@ -570,25 +643,38 @@ function Register-AzlSonarAccountResult {
         else {
             $isProbe = [bool]$b.ProbeInFlight -and [string]$b.ProbeNode -eq $Node
         }
-        $release = { Copy-AzlSonarBreakerRecord -Base $b -Change @{ ProbeInFlight = $false; ProbeId = ''; ProbeNode = ''; ProbeStartedAt = $null; Account = $account; MaxRejections = $max } }
+        # The probe slot given back; an open or latched breaker is not probed again for 5 minutes after an inconclusive result.
+        $release = {
+            param([hashtable]$Extra = @{})
+            $change = @{ ProbeInFlight = $false; ProbeId = ''; ProbeNode = ''; ProbeStartedAt = $null; Account = $account; MaxRejections = $max }
+            foreach ($k in $Extra.Keys) { $change[$k] = $Extra[$k] }
+            Copy-AzlSonarBreakerRecord -Base $b -Change $change
+        }
+        $push = if ($b.State -in 'open', 'latched') { @{ NextProbeAt = $Now.AddMinutes($script:AzlSonarProbeRetryMinutes) } } else { @{} }
         switch ($Class) {
             'ok' {
                 if ($isProbe) {
                     $table[$script:AzlSonarBreakerKey] = Copy-AzlSonarBreakerRecord -Base $b -Change @{
                         State = 'closed'; Failures = 0; OpenedAt = $null; NextProbeAt = $null; BackoffMinutes = 0; ProbeInFlight = $false; ProbeId = ''; ProbeNode = ''
-                        ProbeStartedAt = $null; Verified = $true; LastClass = ''; Account = $account; MaxRejections = $max
+                        ProbeStartedAt = $null; Verified = $true; LastClass = ''; Account = $account; MaxRejections = $max; OtherCount = 0; VersionCheckedAt = $Now
                     }
                     $table[$script:AzlSonarUnavailableKey] = $null
                 }
+                elseif (-not $stale -and $b.State -eq 'closed' -and $b.Verified -and [int]$b.OtherCount -gt 0) {
+                    $table[$script:AzlSonarBreakerKey] = Copy-AzlSonarBreakerRecord -Base $b -Change @{ OtherCount = 0 }
+                }
             }
-            { $_ -in 'rejected', 'lockedOut' } {
+            { $_ -in 'rejected', 'lockedOut', 'accountUnusable' } {
                 if (-not $stale) {
-                    $failures = [int]$b.Failures + 1
-                    $backoff = if ($Class -eq 'lockedOut') { $script:AzlSonarBreakerMaxMinutes } elseif ([int]$b.BackoffMinutes -le 0) { $script:AzlSonarBreakerStartMinutes } else { [Math]::Min($script:AzlSonarBreakerMaxMinutes, 2 * [int]$b.BackoffMinutes) }
-                    $state = if ($Class -eq 'lockedOut' -or $failures -ge $max) { 'latched' } else { 'open' }
+                    # A disabled or expired account does not raise the bad-password count: it latches without counting a failure.
+                    $counts = $Class -ne 'accountUnusable'
+                    $failures = if ($counts) { [int]$b.Failures + 1 } else { [int]$b.Failures }
+                    $backoff = if (-not $counts -or $Class -eq 'lockedOut') { $script:AzlSonarBreakerMaxMinutes } elseif ([int]$b.BackoffMinutes -le 0) { $script:AzlSonarBreakerStartMinutes } else { [Math]::Min($script:AzlSonarBreakerMaxMinutes, 2 * [int]$b.BackoffMinutes) }
+                    $state = if (-not $counts -or $Class -eq 'lockedOut' -or $failures -ge $max) { 'latched' } else { 'open' }
                     $table[$script:AzlSonarBreakerKey] = Copy-AzlSonarBreakerRecord -Base $b -Change @{
                         State = $state; Failures = $failures; OpenedAt = $Now; NextProbeAt = $Now.AddMinutes($backoff); BackoffMinutes = $backoff; ProbeInFlight = $false; ProbeId = ''
                         ProbeNode = ''; ProbeStartedAt = $null; Epoch = [long]$b.Epoch + 1; Verified = $false; LastClass = $Class; Account = $account; MaxRejections = $max
+                        InFlight = @(); OtherCount = 0
                     }
                 }
             }
@@ -603,9 +689,25 @@ function Register-AzlSonarAccountResult {
                 $table[$script:AzlSonarUnavailableKey] = [pscustomobject]@{ Attempt = $attempt; Until = $Now.AddMinutes($minutes); Message = $clean }
                 if ($isProbe) { $table[$script:AzlSonarBreakerKey] = & $release }
             }
+            'other' {
+                if (-not $stale) {
+                    $count = [int]$b.OtherCount + 1
+                    if ($count -ge $script:AzlSonarMaxOtherResults) {
+                        # Three results in a row that Sonar cannot classify: pause the account (a rejection worded unexpectedly
+                        # must not be retried for ever). A new secret version, or a restart, lets it back.
+                        $table[$script:AzlSonarBreakerKey] = Copy-AzlSonarBreakerRecord -Base $b -Change @{
+                            State = 'latched'; OpenedAt = $Now; NextProbeAt = $Now.AddMinutes($script:AzlSonarBreakerStartMinutes); BackoffMinutes = $script:AzlSonarBreakerStartMinutes
+                            ProbeInFlight = $false; ProbeId = ''; ProbeNode = ''; ProbeStartedAt = $null; Epoch = [long]$b.Epoch + 1; Verified = $false; LastClass = 'other'
+                            Account = $account; MaxRejections = $max; InFlight = @(); OtherCount = $count
+                        }
+                    }
+                    elseif ($isProbe) { $table[$script:AzlSonarBreakerKey] = & $release (@{ OtherCount = $count } + $push) }
+                    else { $table[$script:AzlSonarBreakerKey] = Copy-AzlSonarBreakerRecord -Base $b -Change @{ OtherCount = $count } }
+                }
+            }
             default {
-                # unreachable, other: nothing about the account; a probe that could not reach its node gives the slot back
-                if ($isProbe) { $table[$script:AzlSonarBreakerKey] = & $release }
+                # unreachable: nothing about the account; a probe that could not reach its node gives the slot back
+                if ($isProbe) { $table[$script:AzlSonarBreakerKey] = & $release $push }
             }
         }
     }
@@ -620,18 +722,23 @@ function Request-AzlSonarDomainAccess {
         Under Shared.CredentialLock, with the breaker read inside the lock (never before it):
           local    the domain account is not presented (a pause says why)
           use      the breaker is closed and verified and the credential is cached: hand it out (a plain ticket)
+          recheck  as use, but the secret's version has not been looked at for a minute: the caller reads Key Vault (a read,
+                   not an attempt with the account) before using the cached credential; a changed version resets the breaker
           read     this node holds the single probe slot and must read Key Vault (outside the lock) and report back with
                    Complete-AzlSonarDomainRead. Probes are: the first use after a start or a reset (nobody else gets the
                    account until the probe reports ok), the probe after an open breaker's back-off, and the version check of
                    a latched breaker.
-        An expired probe slot (a node that made no attempt) is reclaimed here.
+        An expired probe slot (a node that made no attempt) is reclaimed here. With -Connect the attempt is counted as in
+        flight; at most MaxRejections attempts are in flight at once, so a rotated password can cost the account at most that
+        many bad passwords before the breaker opens.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][System.Collections.IDictionary]$Shared,
         [Parameter(Mandatory)][object]$Config,
         [Parameter(Mandatory)][string]$Node,
-        [datetime]$Now = [datetime]::UtcNow
+        [datetime]$Now = [datetime]::UtcNow,
+        [bool]$Connect = $true
     )
 
     $table = $Shared['LogAccount']
@@ -659,7 +766,17 @@ function Request-AzlSonarDomainAccess {
         else {
             if ($null -ne $pause) { return & $local $pause }
             if ($b.Verified -and $Shared.Contains('DomainCredential') -and $null -ne $Shared['DomainCredential']) {
-                return @{ Action = 'use'; Credential = $Shared['DomainCredential']; Ticket = [pscustomobject]@{ Epoch = [long]$b.Epoch; StartedAt = $Now; Probe = $false; ProbeId = '' } }
+                $live = @($b.InFlight | Where-Object { $null -ne $_ -and ($Now - [datetime]$_.StartedAt).TotalSeconds -lt $script:AzlSonarProbeLeaseSeconds })
+                if ($Connect -and $live.Count -ge $max) { return & $local ([pscustomobject]@{ Kind = 'probing'; Until = $null; Message = '' }) }
+                $ticketId = if ($Connect) { [guid]::NewGuid().ToString('N') } else { '' }
+                $recheck = ($null -eq $b.VersionCheckedAt) -or (($Now - [datetime]$b.VersionCheckedAt).TotalSeconds -ge $script:AzlSonarVersionRecheckSeconds)
+                $change = @{}
+                if ($Connect) { $change.InFlight = @($live) + [pscustomobject]@{ Id = $ticketId; Node = $Node; StartedAt = $Now } }
+                elseif ($live.Count -ne @($b.InFlight).Count) { $change.InFlight = $live }
+                if ($recheck) { $change.VersionCheckedAt = $Now }
+                if ($change.Count -gt 0) { $b = Copy-AzlSonarBreakerRecord -Base $b -Change $change; $table[$script:AzlSonarBreakerKey] = $b }
+                $ticket = New-AzlSonarTicket -Epoch ([long]$b.Epoch) -StartedAt $Now -TicketId $ticketId
+                return @{ Action = $(if ($recheck) { 'recheck' } else { 'use' }); Mode = 'recheck'; Credential = $Shared['DomainCredential']; Ticket = $ticket; Epoch = [long]$b.Epoch }
             }
             if ($b.ProbeInFlight) { return & $local ([pscustomobject]@{ Kind = 'probing'; Until = $null; Message = '' }) }
             $mode = 'probe'
@@ -675,13 +792,14 @@ function Request-AzlSonarDomainAccess {
 function Complete-AzlSonarDomainRead {
     <#
     .SYNOPSIS
-        Step 2: publish what the Key Vault read of the probe holder found, under the lock.
+        Step 2: publish what the Key Vault read of the probe holder (or of a version recheck) found, under the lock.
     .DESCRIPTION
-        A failed read is a credentialUnavailable (asked again after 1, 2, 5 minutes), never a rejection, and releases the slot.
-        A read whose secret VERSION differs from the one the account was last rejected with resets the breaker to closed but
-        unverified, and this node keeps the slot as the ONE probe: the breaker closes only on that probe's ok. A latched
-        breaker whose version did not change stays latched and is looked at again after its back-off. A holder whose lease
-        was reclaimed meanwhile publishes nothing.
+        A failed read of a probe is a credentialUnavailable (asked again after 1, 2, 5 minutes), never a rejection, and
+        releases the slot. A read whose secret VERSION differs from the one the account was last rejected with (or last used)
+        resets the breaker to closed but unverified, and this node keeps (or takes) the slot as the ONE probe: the breaker
+        closes only on that probe's ok. A latched breaker whose version did not change stays latched and is looked at again
+        after its back-off. A holder whose lease was reclaimed meanwhile publishes nothing. A failed recheck changes nothing:
+        the cached credential stays in use. -Now should be the time AFTER the read (it stamps the probe lease).
     #>
     [CmdletBinding()]
     param(
@@ -699,6 +817,26 @@ function Complete-AzlSonarDomainRead {
     [System.Threading.Monitor]::Enter($lock)
     try {
         $b = Get-AzlSonarAccountBreaker -Table $table
+        if ($Request.Action -eq 'recheck') {
+            if ([long]$b.Epoch -ne [long]$Request.Epoch -or $b.State -ne 'closed' -or -not $b.Verified) {
+                return @{ Action = 'local'; Pause = (Get-AzlSonarNodePauseFor -Table $table -Node $Node -Now $Now) }
+            }
+            $version = if ($Failure -or $null -eq $Resolved) { '' } else { [string]$Resolved.Version }
+            if (-not ([bool]$b.SecretVersion -and [bool]$version -and [string]$b.SecretVersion -ne $version)) {
+                return @{ Action = 'use'; Credential = $Request.Credential; Ticket = $Request.Ticket }
+            }
+            # The password was rotated: the attempts with the old one stop here; this node is the ONE probe with the new one.
+            Add-AzlSonarRedaction -Shared $Shared -Secret $Resolved.Credential.Password
+            $Shared['DomainCredential'] = $Resolved.Credential
+            $table[$script:AzlSonarUnavailableKey] = $null
+            $id = [guid]::NewGuid().ToString('N')
+            $new = Copy-AzlSonarBreakerRecord -Base $b -Change @{
+                Failures = 0; OpenedAt = $null; NextProbeAt = $null; BackoffMinutes = 0; Verified = $false; LastClass = ''; SecretVersion = $version; Epoch = [long]$b.Epoch + 1
+                InFlight = @(); OtherCount = 0; VersionCheckedAt = $Now; ProbeInFlight = $true; ProbeStartedAt = $Now; ProbeNode = $Node; ProbeId = $id
+            }
+            $table[$script:AzlSonarBreakerKey] = $new
+            return @{ Action = 'use'; Credential = $Shared['DomainCredential']; Ticket = (New-AzlSonarTicket -Epoch ([long]$new.Epoch) -StartedAt $Now -Probe $true -ProbeId $id) }
+        }
         if ([string]$b.ProbeId -ne [string]$Request.ProbeId -or -not $b.ProbeInFlight) {
             return @{ Action = 'local'; Pause = (Get-AzlSonarNodePauseFor -Table $table -Node $Node -Now $Now) }
         }
@@ -722,7 +860,7 @@ function Complete-AzlSonarDomainRead {
         if ($changed) {
             $new = Copy-AzlSonarBreakerRecord -Base $b -Change @{
                 State = 'closed'; Failures = 0; OpenedAt = $null; NextProbeAt = $null; BackoffMinutes = 0; Verified = $false; LastClass = ''
-                SecretVersion = $version; Epoch = [long]$b.Epoch + 1; ProbeStartedAt = $Now
+                SecretVersion = $version; Epoch = [long]$b.Epoch + 1; ProbeStartedAt = $Now; InFlight = @(); OtherCount = 0; VersionCheckedAt = $Now
             }
         }
         elseif ($Request.Mode -eq 'check') {
@@ -730,10 +868,10 @@ function Complete-AzlSonarDomainRead {
             return @{ Action = 'local'; Pause = (Get-AzlSonarNodePauseFor -Table $table -Node $Node -Now $Now) }
         }
         else {
-            $new = Copy-AzlSonarBreakerRecord -Base $b -Change @{ SecretVersion = $(if ($version) { $version } else { [string]$b.SecretVersion }); ProbeStartedAt = $Now }
+            $new = Copy-AzlSonarBreakerRecord -Base $b -Change @{ SecretVersion = $(if ($version) { $version } else { [string]$b.SecretVersion }); ProbeStartedAt = $Now; VersionCheckedAt = $Now }
         }
         $table[$script:AzlSonarBreakerKey] = $new
-        return @{ Action = 'use'; Credential = $Shared['DomainCredential']; Ticket = [pscustomobject]@{ Epoch = [long]$new.Epoch; StartedAt = $Now; Probe = $true; ProbeId = [string]$new.ProbeId } }
+        return @{ Action = 'use'; Credential = $Shared['DomainCredential']; Ticket = (New-AzlSonarTicket -Epoch ([long]$new.Epoch) -StartedAt $Now -Probe $true -ProbeId ([string]$new.ProbeId)) }
     }
     finally { [System.Threading.Monitor]::Exit($lock) }
 }
@@ -748,6 +886,8 @@ function Select-AzlSonarNodeAccount {
         otherwise at most ONE node at a time is the probe), the probe holder reads Key Vault OUTSIDE the lock, and
         Complete-AzlSonarDomainRead publishes the result under the lock (registering the password's fingerprint for
         masking). The caller reports how its connection went with Register-AzlSonarAccountResult and the returned Ticket.
+        -Connect $false: the caller already has a connection and only asks which account applies (no attempt will be made, so
+        none is counted as in flight).
         Returns { Credential, Account, Probe, Ticket } (Probe: this connection is the single probe).
     #>
     [CmdletBinding()]
@@ -756,7 +896,8 @@ function Select-AzlSonarNodeAccount {
         [Parameter(Mandatory)][object]$Config,
         [Parameter(Mandatory)][string]$Node,
         [AllowNull()][pscredential]$Local,
-        [datetime]$Now = [datetime]::UtcNow
+        [datetime]$Now = [datetime]::UtcNow,
+        [bool]$Connect = $true
     )
 
     $store = if ($Shared.Contains('OsConfigEvents')) { $Shared['OsConfigEvents'] } else { $null }
@@ -771,13 +912,15 @@ function Select-AzlSonarNodeAccount {
 
     $wantsDomain = $domain.Joined -and $domain.AdminsConfigured -and [string]$base.domainAccount -ne '' -and [string](Get-AzlSonarMember $Config 'identityModel' '') -eq 'ActiveDirectory'
     if ($wantsDomain) {
-        $decision = Request-AzlSonarDomainAccess -Shared $Shared -Config $Config -Node $Node -Now $Now
-        if ($decision.Action -eq 'read') {
-            # The slot holder reads Key Vault with no lock held; nobody else reads meanwhile.
+        $decision = Request-AzlSonarDomainAccess -Shared $Shared -Config $Config -Node $Node -Now $Now -Connect $Connect
+        if ($decision.Action -in 'read', 'recheck') {
+            # Key Vault is read with no lock held: by the probe holder, or by the one caller that rechecks the secret's version.
             $resolved = $null
             $failure = $null
             try { $resolved = Resolve-AzlSonarDomainCredential -Config $Config } catch { $failure = $_.Exception.Message }
-            $decision = Complete-AzlSonarDomainRead -Shared $Shared -Node $Node -Request $decision -Resolved $resolved -Failure $failure -Now $Now
+            # the probe lease starts when the read is over, in real time (a test clock is used as given)
+            $stamp = if ($PSBoundParameters.ContainsKey('Now')) { $Now } else { [datetime]::UtcNow }
+            $decision = Complete-AzlSonarDomainRead -Shared $Shared -Node $Node -Request $decision -Resolved $resolved -Failure $failure -Now $stamp
         }
         if ($decision.Action -eq 'use') { $credential = $decision.Credential; $ticket = $decision.Ticket }
         else { $pause = $decision.Pause }
@@ -802,10 +945,10 @@ function Select-AzlSonarNodeAccount {
 function Confirm-AzlSonarAccountUnlock {
     <#
     .SYNOPSIS
-        The operator confirms the domain account was unlocked (or its password reset): the breaker goes back to closed, unverified.
+        Internal: the breaker goes back to closed, unverified (the next node that asks is the single probe).
     .DESCRIPTION
-        The next node that asks is the single probe. A latched breaker (rejected repeatedly, or locked out) is otherwise
-        left only by a new secret version or by restarting Sonar.
+        Not exported and not wired to a command or API: today a latched breaker is left by a new secret version or by
+        restarting Sonar. This is the hook a future operator action would call.
     #>
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Updates an in-memory table only.')]
     [CmdletBinding()]
@@ -818,7 +961,7 @@ function Confirm-AzlSonarAccountUnlock {
         $b = Get-AzlSonarAccountBreaker -Table $table
         $table[$script:AzlSonarBreakerKey] = Copy-AzlSonarBreakerRecord -Base $b -Change @{
             State = 'closed'; Failures = 0; OpenedAt = $null; NextProbeAt = $null; BackoffMinutes = 0; ProbeInFlight = $false; ProbeId = ''; ProbeNode = ''
-            ProbeStartedAt = $null; Verified = $false; LastClass = ''; Epoch = [long]$b.Epoch + 1
+            ProbeStartedAt = $null; Verified = $false; LastClass = ''; Epoch = [long]$b.Epoch + 1; InFlight = @(); OtherCount = 0
         }
         $table[$script:AzlSonarUnavailableKey] = $null
     }

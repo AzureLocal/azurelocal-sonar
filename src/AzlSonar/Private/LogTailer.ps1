@@ -1197,14 +1197,21 @@ function Invoke-AzlSonarTailerLoop {
     try {
         while (-not $Shared.Stop) {
             # Which account reads this node's logs: the local one until the node reports DomainJoined, then the domain one.
-            $pick = Select-AzlSonarNodeAccount -Shared $Shared -Config $Config -Node $seed.name -Local $Credential
+            # (With a session already open this only asks which account applies; no attempt is made, so none is counted.)
+            $hasOpen = ($null -ne $session -and $session.State -eq 'Opened') -or ($null -ne $ssh -and $ssh.Connected)
+            $pick = Select-AzlSonarNodeAccount -Shared $Shared -Config $Config -Node $seed.name -Local $Credential -Connect (-not $hasOpen)
             $useCredential = $pick.Credential
-            if (($pick.Probe -or ($accountKind -and $accountKind -ne $pick.Account.kind)) -and (($null -ne $session -and $session.State -eq 'Opened') -or ($null -ne $ssh -and $ssh.Connected))) {
+            if ($hasOpen -and ($pick.Probe -or ($accountKind -and $accountKind -ne $pick.Account.kind))) {
                 # The account changed (the node just joined the domain), or this connection is the probe of the domain account
                 # and must prove the current password with a new session: reconnect.
                 if ($null -ne $session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
                 if ($null -ne $ssh) { $null = Remove-SSHSession -SSHSession $ssh -ErrorAction SilentlyContinue }
                 $session = $null; $ssh = $null; $firstRun = $true; $forceDiscovery = $true
+                if (-not $pick.Probe -and $pick.Account.kind -eq 'domain') {
+                    # a new connection with the domain account is an attempt: ask again, so that it is counted
+                    $pick = Select-AzlSonarNodeAccount -Shared $Shared -Config $Config -Node $seed.name -Local $Credential -Connect $true
+                    $useCredential = $pick.Credential
+                }
             }
             $accountKind = [string]$pick.Account.kind
             if (($null -eq $session -or $session.State -ne 'Opened') -and ($null -eq $ssh -or -not $ssh.Connected)) {
@@ -1233,7 +1240,7 @@ function Invoke-AzlSonarTailerLoop {
                             $class = Get-AzlSonarConnectionFailureClass -Transport winrm -Exception $_ -Stage open
                             Register-AzlSonarAccountResult -Shared $Shared -Config $Config -Node $seed.name -Class $class.Class -Message $failureText -Ticket $pick.Ticket
                             $registered = $true
-                            if ($class.Class -in 'rejected', 'lockedOut', 'authorization') {
+                            if ($class.Class -in 'rejected', 'lockedOut', 'accountUnusable', 'authorization') {
                                 $reasons.Add($r + " The domain account was not accepted ($($class.Reason)); using the local account.")
                                 $session = $null
                                 continue
@@ -1269,7 +1276,7 @@ function Invoke-AzlSonarTailerLoop {
                 }
                 if ($pick.Account.kind -eq 'domain' -and -not $registered) {
                     # No connection was attempted with the domain account (Posh-SSH missing, no transport left): give the probe slot back.
-                    Register-AzlSonarAccountResult -Shared $Shared -Config $Config -Node $seed.name -Class other -Message 'No connection was attempted with the domain account.' -Ticket $pick.Ticket
+                    Register-AzlSonarAccountResult -Shared $Shared -Config $Config -Node $seed.name -Class unreachable -Message 'No connection was attempted with the domain account.' -Ticket $pick.Ticket
                 }
                 if ($null -eq $session -and $null -eq $ssh) {
                     & $status 'unavailable' ("Cannot reach the logs on $($seed.name) ($($seed.address)). " + ($reasons -join ' | ')) @{ retryInSeconds = $script:AzlSonarTail.RetrySeconds }
@@ -1331,7 +1338,7 @@ function Invoke-AzlSonarTailerLoop {
                 if ($pick.Account.kind -eq 'domain') {
                     # A session was open: an access denied now is a missing administrator right (authorization), not a wrong password.
                     $useClass = Get-AzlSonarConnectionFailureClass -Transport $(if ($null -ne $session) { 'winrm' } else { 'ssh' }) -Exception $_ -Stage use
-                    if ($useClass.Class -in 'rejected', 'lockedOut', 'authorization') {
+                    if ($useClass.Class -in 'rejected', 'lockedOut', 'accountUnusable', 'authorization') {
                         Register-AzlSonarAccountResult -Shared $Shared -Config $Config -Node $seed.name -Class $useClass.Class -Message (Protect-AzlSonarText -Text $_.Exception.Message -Secret $Shared.Redact) -Ticket $pick.Ticket
                     }
                 }
