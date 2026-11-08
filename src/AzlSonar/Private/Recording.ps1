@@ -336,6 +336,41 @@ function Get-AzlSonarRecorderSecret {
     return [object[]]$values.ToArray()
 }
 
+function Update-AzlSonarRecorderSecret {
+    <#
+    .SYNOPSIS
+        Adds what Shared.Redact holds now to the recorder's secrets (exact strings and fingerprints), when it changed.
+    .DESCRIPTION
+        Shared.Redact is replaced by a new array whenever a secret is registered, so a reference comparison tells whether
+        there is anything new. The secrets the recorder already has are kept.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Updates the recorder record in memory only.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Recorder,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$Shared
+    )
+
+    if (-not $Shared.Contains('Redact')) { return }
+    $current = $Shared['Redact']
+    if ($Recorder.ContainsKey('RedactSeen') -and [object]::ReferenceEquals($current, $Recorder['RedactSeen'])) { return }
+    $merged = [System.Collections.Generic.List[object]]::new()
+    foreach ($s in @($Recorder.Secret)) { $merged.Add($s) }
+    foreach ($s in @($current)) {
+        if ($s -is [string]) { if ($s -and -not ($merged -contains $s)) { $merged.Add($s) } }
+        elseif (Test-AzlSonarFingerprint -Value $s) {
+            $known = $false
+            foreach ($m in $merged) { if ((Test-AzlSonarFingerprint -Value $m) -and [string]$m.Sha256 -eq [string]$s.Sha256 -and [string]$m.Rolling -eq [string]$s.Rolling) { $known = $true; break } }
+            if (-not $known) { $merged.Add($s) }
+        }
+    }
+    $Recorder.Secret = [object[]]$merged.ToArray()
+    $Recorder['RedactSeen'] = $current
+}
+
 function Resolve-AzlSonarRecordPath {
     <#
     .SYNOPSIS
@@ -514,6 +549,9 @@ function Invoke-AzlSonarRecorderStep {
 
         [datetime]$Now = [datetime]::UtcNow
     )
+
+    # A password registered after the recording started (the domain account is read when a node first needs it) is masked from now on.
+    Update-AzlSonarRecorderSecret -Recorder $Recorder -Shared $Shared
 
     [System.Threading.Monitor]::Enter($Shared.Lock)
     try {

@@ -39,33 +39,43 @@ Sonar reads the logs of the seed node (and, on the OEM image route, probes every
 ### The domain account's password
 
 - **A pinned version.** `keyvault://<vault>/<secret>/<version>` reads exactly that secret version (32 hexadecimal characters); without it, the current version. The vault name follows Azure's rules (3 to 24 characters, starts with a letter, letters, digits and single hyphens, no hyphen at the end) and the secret name is 1 to 127 letters, digits and hyphens. An invalid reference is refused when the file is read (`Test-AzlSonarConfig`, `-InfrastructureFile`), naming the key, before anything is connected.
-- **Kept as a secure string, masked by fingerprint.** To hide the password in text Sonar stores or serves, the shared mask holds a salted fingerprint of it (length, a rolling hash and a salted SHA-256), computed once from the secure string while its characters sit in a buffer that is cleared afterwards. No plain text copy of the password lives in the shared state, so serialising that state cannot leak it. A fingerprint cannot give the password back; it is held in memory only and never served, logged or recorded. The recorder works on a startup snapshot of the mask, so a password registered after a recording starts is masked in the page and the log pane, and the recording names no secret either way.
-- **One lock.** Reading the secret, registering its fingerprint and publishing the credential happen in one critical section (`Shared.CredentialLock`), so several nodes asking at once read Key Vault once. The per-node account records are immutable: a new record replaces the old one.
+- **Kept as a secure string, masked by fingerprint.** To hide the password in text Sonar stores or serves, the shared mask holds a salted fingerprint of it (length, a rolling hash and a salted SHA-256), computed once from the secure string while its characters sit in a buffer that is cleared afterwards. No plain text copy of the password lives in the shared state, so serialising that state cannot leak it. A fingerprint cannot give the password back; it is held in memory only and never served, logged or recorded. The recorder refreshes its list of secrets on every step, so a password registered after a recording started is masked in the recording from the next step on.
+- **One lock, and Key Vault outside it.** Deciding who may use the account, publishing the credential and the breaker records happen in critical sections of `Shared.CredentialLock`. The Key Vault read itself does **not** hold the lock: only the node that holds the single probe slot reads it, and it publishes the result under the lock afterwards. The per-node account records are immutable: a new record replaces the old one.
 
 ### The lockout circuit breaker
 
-Every wrong password counts towards the account's Active Directory lockout threshold, and it counts for the whole domain, not for one node. So the breaker is **account-wide**:
+Every wrong password counts towards the account's Active Directory lockout threshold, and it counts for the whole domain, not for one node. So the breaker is **account-wide**, and it is decided under the lock (never from a value read before it):
 
 | State | Meaning | What happens |
 | --- | --- | --- |
-| **closed** | Nothing is wrong. | The domain account is given to every node that is ready for it. |
-| **open** | A node rejected the account (wrong user name or password) or the domain reported it locked out. | The **first** rejection by any node stops the account for **all** nodes. Every node uses the local account. After a back-off (15 minutes, doubling to 30, 60, then 120 minutes) exactly **one** node, one connection at a time, may try again: the probe. A probe that works closes the breaker and resets the count; a rejected probe doubles the back-off. There is no retry per poll. |
-| **latched** | The account was rejected `maxRejections` times (default 2; `logAccounts.domain.maxRejections`, 1 to 5). | No more probes, however long Sonar runs. Once per back-off Sonar looks at the secret's **version** in Key Vault (the account is not tried): a new version means the password was changed, and the breaker resets to closed. Restarting Sonar also resets it. |
+| **closed, not yet verified** | First use after Sonar starts, and after any reset. | **One** node at a time is the probe: only it is given the account until its connection reports ok. Every other node uses the local account (*another node is checking the account first*). |
+| **closed, verified** | A connection with the current password has worked. | The domain account is given to every node that is ready for it. |
+| **open** | A node rejected the account (wrong user name or password). | The **first** rejection by any node stops the account for **all** nodes. Every node uses the local account. After a back-off (15 minutes, doubling to 30, 60, then 120 minutes) exactly **one** node, one connection at a time, may try again: the probe. A probe that works closes the breaker and resets the count; a rejected probe doubles the back-off. There is no retry per poll. |
+| **latched** | The account was rejected `maxRejections` times (default 2; `logAccounts.domain.maxRejections`, 1 to 5), **or** the domain reported it locked out. | No more probes, however long Sonar runs. Once per back-off (at least every 120 minutes for a lockout) Sonar looks at the secret's **version** in Key Vault (the account is not tried). A new version means the password was changed: the breaker goes back to *closed, not yet verified* and the node that noticed is the one probe; it closes only when that probe reports ok. The operator can also confirm the unlock (`Confirm-AzlSonarAccountUnlock`), and restarting Sonar resets it too. |
 
-A locked-out account (`0x80070775`, "account locked out") opens the breaker at once with the longest back-off (120 minutes) and a warning that names the account. Details shows the breaker under **Domain account**: the account name, its state, `1 of 2 rejections`, the next check, the last class and the back-off, never a secret.
+How a result is trusted:
+
+- **Tickets and epochs.** The credential is handed out with a ticket (the breaker's epoch when it was given, whether it is the probe). The epoch changes on every rejection, reset and reclaimed probe. A result whose ticket is older than the last change is stale and is ignored: a second node failing in the same wave does not double the back-off or latch the breaker, and a late *ok* from an ordinary connection does not close what another node just opened.
+- **Only the probe holder** can close the breaker with *ok* or release the probe slot with any other result.
+- **A lease on the probe slot.** A probe that never reports (for example Posh-SSH is missing, or no transport was left to try) loses its slot after 120 seconds; the next node becomes the probe and the old holder's late result is ignored.
+
+A locked-out account (1909, `0x80070775`, "account locked out") latches the breaker at once, with a warning that names the account. Details shows the breaker under **Domain account**: the account name, its state, `1 of 2 rejections`, the next check, the last class and the back-off, never a secret.
 
 ### What a failed connection says about the account
 
-Sonar classifies the failure from the transport's own codes and phrases; a broad word is not enough.
+Sonar classifies the failure from the Windows error number first (the language of the text is not reliable: `ErrorCode`, the Win32 part of `HResult`, `0x8007xxxx` in the text) and then from specific phrases. A broad word such as "authentication", "credential" or "logon failure" alone is not enough.
 
 | Class | Seen as | Effect on the account |
 | --- | --- | --- |
-| **rejected** | WinRM `0x8009030c`, `0x8007052e`, "logon failure", "the user name or password is incorrect", "unknown user name or bad password"; SSH `Permission denied (publickey,password)` | Counts: opens or advances the breaker. |
-| **lockedOut** | `0x80070775`, "account locked out", "referenced account is currently locked out" | Opens the breaker for the longest back-off. |
-| **authorization** | `0x80070005`, "access is denied", `UnauthorizedAccessException` | The account got in but is not an administrator of that node: that node uses the local account for 5 minutes. The others keep the domain account; the breaker is untouched. |
+| **rejected** | 1326 (`0x8007052e`), 1331, 1330, 1907, `0x8009030c`, "the user name or password is incorrect", "bad password"; SSH `Permission denied (publickey,password)`; and **access denied (5, `0x80070005`, `AccessDenied`) while the session is being opened** | Counts: opens or advances the breaker. Over Negotiate a wrong password fails at *open* exactly like "Access is denied", so an access denied at open is treated as a rejection. |
+| **lockedOut** | 1909 (`0x80070775`), "account locked out", "referenced account is currently locked out" | Latches the breaker. |
+| **authorization** | 1385 (`0x80070569`, "logon type not granted": the password was right); or access denied **after** a session opened (a later step) | The account got in but may not do this: that node uses the local account for 5 minutes. The others keep the domain account; the breaker is untouched. |
 | **unreachable** | timeouts, network errors, "credential provider" failures | Nothing about the account. A probe that never reached its node gives its slot back. |
-| **other** | anything else, "authentication mechanism ... not supported" | Nothing about the account. |
+| **other** | anything else, "authentication mechanism ... not supported", "the target account name is incorrect" | Nothing about the account. |
 | **credentialUnavailable** | Key Vault could not be read (no sign-in, no access, Az.KeyVault missing, an empty secret) | Never marks the account or a node rejected. The local account is used; Sonar asks again after 1, 2, then every 5 minutes. |
+
+**One transport per password.** With the domain account and `logs.transport: auto`, Sonar tries WinRM only: after any WinRM failure the domain password is **not** sent over SSH (the reason says so). Each transport leg of an attempt is classified for its own transport and the worst class wins (an SSH `Permission denied (` is a rejection however the WinRM leg failed).
+
 
 ## The seven modes of the window
 

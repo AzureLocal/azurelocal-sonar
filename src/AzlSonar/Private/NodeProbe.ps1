@@ -155,10 +155,14 @@ function Open-AzlSonarNodeConnection {
     param(
         [Parameter(Mandatory)][string]$Address,
         [AllowNull()][pscredential]$Credential,
-        [ValidateSet('auto', 'winrm', 'ssh')][string]$Transport = 'auto'
+        [ValidateSet('auto', 'winrm', 'ssh')][string]$Transport = 'auto',
+
+        # The credential is the domain account: its password is never sent over a second transport after a WinRM failure.
+        [switch]$DomainAccount
     )
 
     $reasons = [System.Collections.Generic.List[string]]::new()
+    $winrmFailed = $false
     if ($Transport -in 'auto', 'winrm') {
         try {
             $options = New-PSSessionOption -OpenTimeout $script:AzlSonarProbe.SessionOpenMs -OperationTimeout $script:AzlSonarProbe.SessionOperationMs -NoMachineProfile
@@ -166,10 +170,11 @@ function Open-AzlSonarNodeConnection {
             if ($null -ne $Credential) { $parameters.Credential = $Credential }
             return @{ Session = (New-PSSession @parameters); Ssh = $null; Reason = $null }
         }
-        catch { $reasons.Add("WinRM: $($_.Exception.Message)") }
+        catch { $winrmFailed = $true; $reasons.Add("WinRM: $($_.Exception.Message)") }
     }
     if ($Transport -in 'auto', 'ssh') {
-        if ($null -eq $Credential) { $reasons.Add('SSH: needs a credential.') }
+        if ($DomainAccount -and $winrmFailed) { $reasons.Add('SSH: not tried with the domain account after a WinRM failure (its password is not sent over a second transport).') }
+        elseif ($null -eq $Credential) { $reasons.Add('SSH: needs a credential.') }
         elseif (-not (Get-Module -ListAvailable -Name Posh-SSH)) { $reasons.Add('SSH: the Posh-SSH module is not installed on this workstation.') }
         else {
             try {
@@ -352,16 +357,17 @@ function Invoke-AzlSonarNodeProbeLoop {
                     if ($null -ne $connection) { Close-AzlSonarNodeConnection $connection }
                     # The local account until the node reports DomainJoined, then the domain account (back to the local one if it is refused).
                     $pick = Select-AzlSonarNodeAccount -Shared $Shared -Config $Config -Node $node.name -Local $Credential
-                    $connection = Open-AzlSonarNodeConnection -Address $node.address -Credential $pick.Credential -Transport $transport
+                    $connection = Open-AzlSonarNodeConnection -Address $node.address -Credential $pick.Credential -Transport $transport -DomainAccount:($pick.Account.kind -eq 'domain')
                     if ($pick.Account.kind -eq 'domain') {
                         # The same rules as the log tailer: the account-wide breaker, one probe at a time, never a retry per poll.
+                        # Every transport leg is classified for its own transport and the worst wins; the result carries the ticket.
                         $opened = $null -ne $connection.Session -or $null -ne $connection.Ssh
                         $reason = Protect-AzlSonarText -Text ([string]$connection.Reason) -Secret $Shared.Redact
-                        $class = if ($opened) { [pscustomobject]@{ Class = 'ok' } } else { Get-AzlSonarConnectionFailureClass -Transport $(if ($reason -match '^SSH') { 'ssh' } else { 'winrm' }) -Message $reason }
-                        Register-AzlSonarAccountResult -Shared $Shared -Config $Config -Node $node.name -Class $class.Class -Message $reason
+                        $class = if ($opened) { [pscustomobject]@{ Class = 'ok' } } else { Get-AzlSonarWorstFailureClass -Reason $reason }
+                        Register-AzlSonarAccountResult -Shared $Shared -Config $Config -Node $node.name -Class $class.Class -Message $reason -Ticket $pick.Ticket
                         if ($class.Class -in 'rejected', 'lockedOut', 'authorization') {
                             $pick = Select-AzlSonarNodeAccount -Shared $Shared -Config $Config -Node $node.name -Local $Credential
-                            $connection = Open-AzlSonarNodeConnection -Address $node.address -Credential $pick.Credential -Transport $transport
+                            $connection = Open-AzlSonarNodeConnection -Address $node.address -Credential $pick.Credential -Transport $transport -DomainAccount:($pick.Account.kind -eq 'domain')
                         }
                     }
                     $connections[$node.name] = $connection
