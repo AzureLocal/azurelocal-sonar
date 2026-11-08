@@ -45,9 +45,26 @@ Connect-AzAccount
 
 **Access:** Reader on the resource group; WinRM (5985/5986) or SSH to each node from the Sonar workstation with an account in the node's local Administrators (the built-in `Administrator` works while machines register); an IP address or workgroup node must be in this workstation's `TrustedHosts` (Sonar checks and tells you, it never changes it).
 
-## Watch OS configuration and Validate
+## Watch OS configuration
 
-**What Sonar does here.** Sonar does not follow the OS configuration scripts themselves (OEM drivers, `C:\SBE`, DHCP off, DNS, time, the deployment admin). On the simplified route the page stays at **ZTP complete** with the note that OS configuration is next. Start Sonar again, or leave it running, and when you start the ARM Validate the page switches to the **Validation** phase: Azure's validation step tree (`deploymentSettings`), each step with status, start, end, duration and error text, the running step with a live timer.
+**When:** after ZTP (or an ISO install) and before Validate, the toolkit's `Invoke-AzureLocalOsConfiguration.ps1` configures every node.
+
+```powershell
+Connect-AzAccount -Tenant <tenant-id>
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml
+```
+
+The event file is `<provisioning.simplified.evidence_path>/os-configuration-events.jsonl` in the master file, next to the ZTP event file; with a config file or when the toolkit run was given `-EventLogPath`, set `osConfigEventsPath`. Start Sonar on the machine that runs the toolkit (or where that folder is shared).
+
+**What Sonar shows:** the **OS configuration** mode: a card per machine (method ZTP or ISO, transport, the step it is on, converged, failed or retrying), the run in one sentence with the wipe list, and the machine's steps with the toolkit's text (*current -> desired*), retries, restarts, the guarded network change with its countdown, the domain join, and the versions. The `[osconfig]` lines are in the log pane (file `os-config-events`). The stages, the method and version display, what a stuck step looks like and what to do are in [Running Sonar, stage by stage](./stages.md#os-configuration).
+
+**What to expect:** the plan fills every machine's steps first (read only, nothing changes), then the apply moves node by node, then the verification marks the steps *Verified* and the machine *Converged*. A run in Plan mode ends with *Plan finished: N changes pending. Nothing was changed.* and the tile stays grey.
+
+**Access:** Reader on the resource group (Sonar reads the Arc machines' run commands, read-only, to show their state); the log account as in [Log access](./log-access.md#which-account-reads-which-node-local-first-then-the-domain-account): the local administrator until a node is domain-joined, then the domain account.
+
+## Watch Validate
+
+**What Sonar does here.** When you start the ARM Validate the page switches to the **Validation** phase: Azure's validation step tree (`deploymentSettings`), each step with status, start, end, duration and error text, the running step with a live timer. The **Validate** tile says it starts after OS configuration has converged on every machine; that is information, not a gate.
 
 ```powershell
 ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Credential (Get-Credential)   # the deployment local admin

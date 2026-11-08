@@ -103,14 +103,67 @@ The screens below use the page's own demo data (`?demo=1&route=simplified`); see
 
 **In Sonar:** `StageCompleted` for Handoff, and the end of the run on the page: when every machine is Provisioned, its Network step succeeded and its Restore step succeeded or is not applicable, each card reads **ZTP complete** with *Next: OS configuration*, the Provisioning tile reads *ZTP complete*, and the summary says "ZTP is complete: all N machines are provisioned. Next: OS configuration". A link under the header opens the OS configuration guide.
 
-**What to do:** nothing in Sonar. ZTP's job is over. Start OS configuration (OEM drivers, `C:\SBE`, DHCP off, DNS and time, the deployment admin), then Validate. Sonar stays at **ZTP complete** until you start the ARM Validate.
+**What to do:** nothing in Sonar. ZTP's job is over. Start OS configuration (OEM drivers, `C:\SBE`, DHCP off, DNS and time, the deployment admin), then Validate. Sonar stays at **ZTP complete** until the OS configuration run starts and writes its events (the **OS configuration** mode takes over), then Validate.
+
+## OS configuration
+
+![The OS configuration mode: a ZTP machine that converged after a retry, an ISO machine whose drivers step failed, and a ZTP machine still applying](images/tour-osconfig.png)
+
+**The toolkit does:** [azurelocal-toolkit's](https://github.com/AzureLocal/azurelocal-toolkit) `Invoke-AzureLocalOsConfiguration.ps1` configures the operating system of every node after ZTP (or an ISO install) and before Validate: remote management, the management address, DNS, time, the computer name, the domain join, unused adapters, the local administrator, MPIO and the SAN checks, the storage wipe, the SBE package and the OEM drivers, and, for an ISO machine, the Azure Arc registration. It plans first (read only), applies node by node and then proves each node matches the master file. While it runs it appends what it does to the OS configuration event file, `os-configuration-events.jsonl` (the feed is described in the toolkit's [OS configuration guide](https://github.com/AzureLocal/azurelocal-toolkit/blob/main/docs/os-configuration-and-arm-deployment.md#the-event-feed-what-the-run-tells-a-viewer)).
+
+**How to run Sonar for it:** point Sonar at that file and start it where the file is (or where its folder is shared).
+
+```powershell
+Connect-AzAccount -Tenant <tenant-id>
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml
+```
+
+With the master file the file is `<provisioning.simplified.evidence_path>/os-configuration-events.jsonl`, next to `ztp-events.jsonl`. If the toolkit run was given `-EventLogPath`, or you use a config file, set [`osConfigEventsPath`](./config.md) (`Set-AzlSonarConfig -Key osConfigEventsPath -Value <file>`). Sonar tails the file every 2 seconds, read-only. Without it the **OS configuration** tile stays grey and says how to get the data.
+
+**In Sonar:** the **OS configuration** tile (between **Provisioning** and **Validate**), the **OS configuration** mode and its lines in the log pane (file `os-config-events`, each tagged `[osconfig]`).
+
+- **The summary box.** The run in one sentence (*1 of 3 machines converged*), then the run state, the machines converged, the wipe list (*pending* until the listed machines have cleared their storage) and the mode (Plan or Apply). One card per machine: its name, a state chip, the method chip and the transport, the step it is on, the retries and restarts, the account that reads its logs and any warning.
+- **The Steps box.** One row per machine with its method, transport, versions and the guarded network change; under it, its steps in the order the toolkit runs them: remote management, network, DNS, time, computer name, domain join, unused adapters, local administrator, MPIO, SAN verification, clear storage, SBE package, OEM drivers and Azure Arc registration. Each step has a stage chip and the toolkit's own text: what it found and, for a change, *current -> desired*. A click on a step shows only that machine's lines for that step in the log pane. A step that runs as an Arc Run Command carries the **Azure** badge; under the machine, Sonar shows the run command it reads from Azure (`machines/{name}/runCommands`, read-only) with its state and age, and warns when one has been *Creating* for more than 10 minutes.
+
+**What the stages mean.**
+
+| Stage | Meaning |
+| --- | --- |
+| *Waiting* | The run has not reached this step on this machine. |
+| *Planned* | The plan found a difference (`StepPlanned`, action Change); the *current* and *desired* values are in the text. Nothing was changed. |
+| *OK* | The plan found nothing to change. |
+| *Changing* | The apply is changing it now (`StepApplying`). |
+| *Applied* | The apply reports it done (`StepApplied`); the verification pass has not confirmed it yet. |
+| *Verified* | The verification pass found the step matching the master file (`StepVerified`). |
+| *Failed* | The apply or the verification pass failed on it (`StepFailed`), with the toolkit's reason. |
+| *Blocked* | The plan cannot go on without you (for example leftover storage with the wipe off). |
+| *Not applicable* | The step does not apply, with the reason (*not selected with -Step*, *no SBE bundle*, *the storage wipe is off*, *the identity design is local*). |
+| *Verify only: OK* | ZTP did this step (the computer name, the Azure Arc registration); the run checks it and does not change it. |
+
+A machine is **converged** when the toolkit reports `NodeConverged` for it. The mode is **ready** when every machine has converged: the tile reads *3 of 3 converged* and the summary says *Next: Validate*. It is information only: Sonar blocks nothing, and **Provisioning** never stays *running* because of OS configuration. Validate says it starts after OS configuration has converged on every machine.
+
+**Which method, which versions.** Each machine says how it was installed: **ZTP** (provisioned by simplified machine provisioning) or **ISO** (installed by hand). Before the run has resolved it, Sonar shows the method it expects (from `scenario.os_install` and from whether ZTP events exist for the machine) marked *expected*. When the declaration and the evidence disagree the chip says *differs from the file* and a warning names both; the evidence wins, as it does in the toolkit. The step list follows the method: on a ZTP machine the computer name and the Arc registration are *verify only*, on an ISO machine they are real steps. A mixed cluster shows both side by side. The machine row and **Details** show the versions the toolkit reported: the OS (caption, version, build) and the computer name the node reported, the SBE (publisher, family, version, package and how it reaches the node), the master file's `schema_version` and the toolkit's own version, and the transport (Arc Run Command or WinRM, per machine and per step).
+
+**The guarded network change.** Changing the management address can cut a node off, so the toolkit applies it as a *commit confirmed* change: the node snapshots itself, applies, checks itself, and reverts on its own unless the orchestrator confirms in time. Sonar shows it on the **Network** step and the machine: *Staged*, *Checking the node* (`NetworkChangeVerifying`), *Waiting for the confirmation* (`NetworkChangeAwaitingConfirm`, with the time left in the window, ten minutes by default), *Committed*, *Repaired* (with the repair rung) and, when it did not hold, *Rolled back* or *Refused* with the **reason the node gives**. A rolled-back or refused change turns the machine red; read the reason, fix the address, the gateway or the VLAN, and run the OS configuration again.
+
+**The domain join and the account for the logs.** In an Active Directory design the `DomainJoin` step joins each node to the domain after its name, network, DNS and time (`DomainJoinPlanned`, `DomainJoinApplying`, `DomainJoined`, `DomainAdminsConfigured`, or `DomainJoinFailed` with the AD error text). Sonar reads a node's logs with the local account (`identity.local_admin`, for example `azl-admin`) until the node has reported both `DomainJoined` and `DomainAdminsConfigured` (the step that adds the LCM user, or the listed principals, to the node's local Administrators: before that a domain account cannot read the logs). In between the card says *joined, waiting for domain administrators*. After both, Sonar uses the domain account `NETBIOS\username` of the LCM user (`identity.active_directory.lcm_user`, or the optional `domain_join_account` override), its password read from the Key Vault reference in the file. If the node refuses the domain account, Sonar goes back to the local one and warns. The account in use and why (*domain-joined: using IIC\svc-join*, *workgroup: using azl-admin*) is on each card, in the Log access window and in **Details**; the password is never shown. See [Log access](./log-access.md#which-account-reads-which-node-local-first-then-the-domain-account).
+
+**Done:** every card reads *Converged* and the tile is green. **Failed:** a machine reads *Failed*, *Blocked*, *Rolled back* or *Refused*, the tile turns red and the summary names the machine. **Retrying, not a problem:** an Arc Run Command that ends in state `Unknown` (the node's agent lost its connection, for example while its network changes) is run again up to three times; the card says *Retrying* and counts the tries, and the verification pass decides the outcome, not the command's status.
+
+**What to do when a step is stuck.**
+
+1. Open the machine's steps. The step in *Changing* is the one running; its time is the time since it began. A step that has run much longer than its neighbours is the one to look at.
+2. Look under the machine for the **run command** line. *Creating* for more than 10 minutes means Azure has not handed the command to the node's agent: check that the machine is *Connected* in Azure Arc, and that nothing blocks its outbound connection. A run command that is *Running* for long can simply be a long step (the SBE package, the drivers).
+3. Read the lines of that step in the log pane (click the step). A `NodeRetry` line says the command was lost and is being tried again; three of them in a row end in the verification pass, which reads the node again.
+4. If the step failed, the card and the step carry the toolkit's reason. Fix the cause on the node, then run `Invoke-AzureLocalOsConfiguration.ps1` again: steps that are already right are not repeated.
+5. If the run itself died (no `RunCompleted` line, the last event is old), the machines stay where they were. Start the toolkit run again; its next `RunStarted` clears the machines it names and the page follows the new run.
 
 ## After ZTP
 
 | Next step | In Sonar | How to run it |
 | --- | --- | --- |
-| OS configuration | Not followed. The page stays at *ZTP complete*. | Leave Sonar running, or start it again later. |
-| **Validate** | The **Validate** mode: Azure's validation steps (`deploymentSettings`), the running step with a live timer, errors expanded. Node logs from the seed node. | `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Credential (Get-Credential)` with the deployment local admin. [Details](./run.md#watch-os-configuration-and-validate). |
+| **OS configuration** | The **OS configuration** mode: a card per machine, its steps, the method and versions, the guarded network change and the domain join. | The toolkit's `Invoke-AzureLocalOsConfiguration.ps1`, with Sonar pointed at its event file (`osConfigEventsPath`). [Details](#os-configuration). |
+| **Validate** | The **Validate** mode: Azure's validation steps (`deploymentSettings`), the running step with a live timer, errors expanded. Node logs from the seed node. | `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Credential (Get-Credential)` with the deployment local admin. [Details](./run.md#watch-os-configuration). |
 | **Deployment** | The **Deployment** mode: the nested step tree, the live logs, the account and folders in **Log access**. | The same command. [Details](./run.md#watch-a-deployment). |
 | **Update** | The **Update** mode: the update run's steps. | `track: update`, or `auto` when Azure reports an update. [Details](./run.md#follow-an-update). |
 | **Health** | The **Health** mode: each machine's Arc status. Sonar runs no health checks. | Any run on a deployed cluster. [Details](./run.md#look-at-a-deployed-cluster-health). |

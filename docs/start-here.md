@@ -6,7 +6,7 @@ Pick what you want to do. Each purpose has its own section in [Running Sonar](./
 | --- | --- |
 | Watch a ZTP run (simplified machine provisioning), machine by machine | [Watch a ZTP run](./run.md#watch-a-ztp-run) |
 | Watch machines come up from an OEM image or an ISO and register with Arc | [Watch the OEM image or ISO route](./run.md#watch-the-oem-image-or-iso-route) |
-| Follow OS configuration, then the Validate step in Azure | [Watch OS configuration and Validate](./run.md#watch-os-configuration-and-validate) |
+| Follow OS configuration, then the Validate step in Azure | [Watch OS configuration and Validate](./run.md#watch-os-configuration) |
 | Follow a deployment: step tree, live logs from the seed node | [Watch a deployment](./run.md#watch-a-deployment) |
 | Understand one ZTP stage: Boot, Bootstrap, Vouchers and the claim, Install OS, Device, Network, Restore, Handoff | [Running Sonar, stage by stage](./stages.md) |
 | Know which account and folders read the logs in each phase, and how Sonar reaches the node | [Log access](./log-access.md) |
@@ -20,7 +20,7 @@ Pick what you want to do. Each purpose has its own section in [Running Sonar](./
 
 ## What you will see
 
-A top bar (cluster, status, **Details**, **Log access**), one tile per mode (Provisioning, Validate, Deployment, Update, Health), a summary with a card per machine, the steps of the selected mode and the live logs. The [tour of the page](tour.md) explains each part with screenshots; **Details** in the top bar shows what Sonar read from your configuration and where it came from.
+A top bar (cluster, status, **Details**, **Log access**), one tile per mode (Provisioning, OS configuration, Validate, Deployment, Update, Health), a summary with a card per machine, the steps of the selected mode and the live logs. The [tour of the page](tour.md) explains each part with screenshots; **Details** in the top bar shows what Sonar read from your configuration and where it came from.
 
 ## Three ways to configure Sonar
 
