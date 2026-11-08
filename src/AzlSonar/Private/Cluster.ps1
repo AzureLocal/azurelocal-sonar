@@ -39,7 +39,7 @@ function Get-AzlSonarClusterResource {
     return $out
 }
 
-function New-AzlSonarClusterState {
+function Get-AzlSonarClusterObject {
     <#
     .SYNOPSIS
         The clusterResource object of /api/state (state.cluster is the cluster name): the cluster resource as read, plus the cluster-level facts the sections already hold.

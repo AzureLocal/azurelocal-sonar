@@ -56,18 +56,18 @@ Describe 'Get-AzlSonarClusterResource (one read-only GET)' {
     }
 }
 
-Describe 'New-AzlSonarClusterState' {
+Describe 'Get-AzlSonarClusterObject' {
     It 'is not read by default; a missing deployment settings object means the cluster does not exist yet; a resource passes through' {
         $n = @($script:Config.nodes).Count
-        $none = InModuleScope AzlSonar -Parameters @{ C = $script:Config } { param($C) New-AzlSonarClusterState -Config $C -Resource $null }
+        $none = InModuleScope AzlSonar -Parameters @{ C = $script:Config } { param($C) Get-AzlSonarClusterObject -Config $C -Resource $null }
         $none.read | Should -BeFalse
         $null -eq $none.exists | Should -BeTrue
         $none.nodesConfigured | Should -Be $n
         $none.name | Should -Be $script:Config.clusterName
-        $missing = InModuleScope AzlSonar -Parameters @{ C = $script:Config } { param($C) New-AzlSonarClusterState -Config $C -Resource $null -SettingsMissing }
+        $missing = InModuleScope AzlSonar -Parameters @{ C = $script:Config } { param($C) Get-AzlSonarClusterObject -Config $C -Resource $null -SettingsMissing }
         $missing.read | Should -BeTrue
         $missing.exists | Should -BeFalse
-        $res = InModuleScope AzlSonar -Parameters @{ C = $script:Config } { param($C) New-AzlSonarClusterState -Config $C -Resource ([ordered]@{ exists = $true; status = 'Connected'; connectivityStatus = 'Connected'; provisioningState = 'Succeeded'; solutionVersion = '1'; nodeCount = 2; error = '' }) -DeploymentState 'Provisioning' -DeploymentMode 'Deploy' }
+        $res = InModuleScope AzlSonar -Parameters @{ C = $script:Config } { param($C) Get-AzlSonarClusterObject -Config $C -Resource ([ordered]@{ exists = $true; status = 'Connected'; connectivityStatus = 'Connected'; provisioningState = 'Succeeded'; solutionVersion = '1'; nodeCount = 2; error = '' }) -DeploymentState 'Provisioning' -DeploymentMode 'Deploy' }
         $res.read | Should -BeTrue
         $res.deploymentState | Should -Be 'Provisioning'
         $res.deploymentMode | Should -Be 'Deploy'

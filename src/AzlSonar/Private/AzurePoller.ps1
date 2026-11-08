@@ -1132,7 +1132,7 @@ function Get-AzlSonarInitialState {
         activePhase       = $phase
         provisioning      = [ordered]@{ manualInstall = [bool](Test-AzlSonarManualInstall -Config $Config -Route $route); route = $route; routeSource = $(if ($route) { 'config' } else { 'auto' }); phase = $phase; status = 'notstarted'; readyForValidate = $false; ztpComplete = $false; nextStep = $null; nodes = @() }
         monitor           = [string](Get-AzlSonarMember $Config 'monitor' 'Auto')
-        clusterResource   = New-AzlSonarClusterState -Config $Config -Resource $null
+        clusterResource   = Get-AzlSonarClusterObject -Config $Config -Resource $null
         discovery         = Get-AzlSonarDiscoveryState -Config $Config -Cache $DiscoveryCache
         osConfiguration   = Get-AzlSonarOsConfigurationState -Store $null -Config $Config -ExpectedRoute $(if ($route) { $route } else { '' })
         arm               = Get-AzlSonarArmState -Store $null -Config $Config
@@ -1383,7 +1383,7 @@ function Get-AzlSonarDeploymentState {
     # exists (it is a child of the cluster, so the cluster exists too); before that the cluster does not exist yet.
     $clusterPlan = Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))
     $clusterResource = if ($clusterPlan.cluster -and $null -ne $properties) { Get-AzlSonarClusterResource -Config $Config } else { $null }
-    $clusterState = if ($clusterPlan.cluster) { New-AzlSonarClusterState -Config $Config -Resource $clusterResource -DeploymentState ([string]$provisioningStateValue) -DeploymentMode ([string]$modeValue) -SettingsMissing:($null -eq $properties) } else { New-AzlSonarClusterState -Config $Config -Resource $null }
+    $clusterState = if ($clusterPlan.cluster) { Get-AzlSonarClusterObject -Config $Config -Resource $clusterResource -DeploymentState ([string]$provisioningStateValue) -DeploymentMode ([string]$modeValue) -SettingsMissing:($null -eq $properties) } else { Get-AzlSonarClusterObject -Config $Config -Resource $null }
     foreach ($profileWarning in @((Get-AzlSonarDeploymentProfile -Config $Config).warnings)) { $warnings.Add([string]$profileWarning) }
     $armDeployment = if ($provisioningStateValue -ne 'Succeeded') { Get-AzlSonarRunningArmDeployment -Config $Config } else { $null }
     $lag = Get-AzlSonarLagStatus -Mode $modeValue -DeploymentTree $deploymentTree -ProvisioningState $provisioningStateValue -SettingsModifiedAt ([string](Get-AzlSonarMember $settings.Body 'systemData.lastModifiedAt' '')) -LogHint $LogHint -ArmDeployment $armDeployment -Now $Now
