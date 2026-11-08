@@ -24,14 +24,15 @@
   };
   var DEMO = typeof location !== 'undefined' && /(?:^|[?&])demo=(?:1|true|yes)(?:&|$)/i.test(location.search);
   // ?demo=1&route=simplified|oem shows the machine-readiness phase of that route instead of a running deployment;
-  // route=osconfig shows an OS configuration run (one ZTP and one ISO machine side by side).
+  // route=osconfig shows an OS configuration run (one ZTP and one ISO machine side by side); route=arm the toolkit's ARM
+  // Validate and Deploy run (checks, validation, deployment, and the step 0.41 failure).
   // ?demo=1&replay=1 plays the demo deployment as a built-in recording (the replay transport bar without a file).
   var DEMO_REPLAY = DEMO && /(?:^|[?&])replay=(?:1|true|yes)(?:&|$)/i.test(location.search);
   var REPLAY_SPEEDS = [1, 30, 60, 240];
   var DEMO_ROUTE = (function () {
     if (typeof location === 'undefined') return '';
-    var m = /(?:^|[?&])route=(simplified|oem|oem-image|osconfig)(?:&|$)/i.exec(location.search);
-    return m ? (m[1].toLowerCase() === 'simplified' ? 'simplified' : m[1].toLowerCase() === 'osconfig' ? 'osconfig' : 'oem-image') : '';
+    var m = /(?:^|[?&])route=(simplified|oem|oem-image|osconfig|arm)(?:&|$)/i.exec(location.search);
+    return m ? (m[1].toLowerCase() === 'simplified' ? 'simplified' : m[1].toLowerCase() === 'osconfig' ? 'osconfig' : m[1].toLowerCase() === 'arm' ? 'arm' : 'oem-image') : '';
   })();
 
   // ------------------------------------------------------------------ state
@@ -56,15 +57,15 @@
     follow: true,
     newWhilePaused: 0,
     rendered: 0,
-    treeSig: { provisioning: null, osconfiguration: null, validation: null, extensions: null, deployment: null, update: null },
+    treeSig: { provisioning: null, osconfiguration: null, armvalidation: null, validation: null, extensions: null, armdeployment: null, deployment: null, update: null },
     expanded: new Map(),        // key -> bool (user choice)
-    sectionCollapsed: { provisioning: false, osconfiguration: false, validation: false, extensions: false, deployment: false, update: false },
+    sectionCollapsed: { provisioning: false, osconfiguration: false, armvalidation: false, validation: false, extensions: false, armdeployment: false, deployment: false, update: false },
     provAutoCollapsed: false,   // the provisioning section was collapsed once validation started
     provTree: [],               // one synthetic tree item per machine (provisioningTreeOf)
     oscTree: [],                // OS configuration: one tree item per machine with its steps (osConfigTreeOf)
     extTree: [],                // OEM image route, from Validate on: one item per machine with its extensions
     stepIndex: new Map(),       // key -> { node, section, parentKey }
-    focusKey: { provisioning: null, osconfiguration: null, validation: null, extensions: null, deployment: null, update: null },
+    focusKey: { provisioning: null, osconfiguration: null, armvalidation: null, validation: null, extensions: null, armdeployment: null, deployment: null, update: null },
     selectedKey: null,
     currentKey: null,
     lastAutoKey: null,
@@ -372,6 +373,8 @@
   // The OS configuration event lines: "<time> [osconfig] <node> <State> (<Step>): ..." (file os-config-events). The stage is
   // osc.<step>; the guarded network change events belong to the Network step even when they name none.
   var OSC_LINE = /^(?:\S+\s+)?\[osconfig\]\s+(\S+)\s+([A-Za-z]+)(?:\s+\(([A-Za-z]+)\))?/;
+  // The ARM run's event lines: "<time> [arm] <node|*> <State> (<step>): ..." (file arm-events).
+  var ARM_LINE = /^(?:\S+\s+)?\[arm\]\s+(\S+)\s+([A-Za-z]+)/;
   function lineScope(l) {
     if (l.scope) return l.scope;
     if (l.file === 'os-config-events' || /^(?:\S+\s+)?\[osconfig\]\s/.test(str(l.text))) {
@@ -381,6 +384,11 @@
         l.scope = { node: o[1], stage: ostep ? 'osc.' + ostep.toLowerCase() : '' };
         return l.scope;
       }
+    }
+    if (l.file === 'arm-events' || /^(?:\S+\s+)?\[arm\]\s/.test(str(l.text))) {
+      // The toolkit's ARM run: '*' is the run itself (no machine), a node name is a check of that machine.
+      var a = ARM_LINE.exec(str(l.text));
+      if (a) { l.scope = { node: a[1] === '*' ? '' : a[1], stage: '' }; return l.scope; }
     }
     var m = l.file === 'ztp-events' || /^(?:\S+\s+)?\[ztp\]\s/.test(str(l.text)) ? ZTP_LINE.exec(str(l.text)) : null;
     l.scope = m ? { node: m[1], stage: ztpStageOfState(m[2]) } : { node: '', stage: '' };
@@ -682,6 +690,122 @@
     return out;
   }
 
+  // ------------------------------------------------------------------ ARM Validate and Deploy (pure; also run by tests under Node)
+  //
+  // The toolkit's Invoke-AzureLocalArmDeployment.ps1 checks the instance, submits Validate, waits, asks for approval,
+  // submits Deploy and waits; its event feed becomes state.arm (Get-AzlSonarArmState): the run, and for each phase
+  // (validation, deployment) its checks (failures first), its steps, its elapsed time and a hint for a known failure.
+  // The page shows that inside the Validate and Deployment modes, next to the steps Azure reports itself. Azure's own
+  // trees stay the truth once Azure has steps; the feed covers what Azure cannot: the checks before the submit, a refusal,
+  // and the toolkit's words for a failure.
+
+  var ARM_STATE_LABEL = {
+    waiting: 'Waiting for a run', checking: 'Checking', planned: 'Plan ready', validating: 'Validating', validated: 'Validated',
+    awaitingapproval: 'Waiting for approval', deploying: 'Deploying', deployed: 'Deployed', failed: 'Failed'
+  };
+  var ARM_RESULT_KIND = { Passed: 'ok', Failed: 'err', Warning: 'warn', Skipped: 'idle' };
+  var ARM_MODE_WORD = { Plan: 'Plan', Validate: 'Validate', Deploy: 'Deploy', ValidateAndDeploy: 'Validate and Deploy' };
+  var ARM_PHASE_OF_MODE = { validate: 'validation', deploy: 'deployment' };
+
+  // The sample run of ?demo=1&route=arm (example names), declared here because the exports below are reached before the demo code.
+  var ARM_DEMO_CHECKS = [['AzureContext', '*'], ['ResourceGroup', '*'], ['ResourceProviders', '*'], ['Permissions', '*'], ['NamesAvailable', '*'], ['KeyVaultSecrets', '*'],
+    ['ArcMachinesConnected', 'iic-azl-n01'], ['ArcMachinesConnected', 'iic-azl-n02'], ['ArcMachinesConnected', 'iic-azl-n03'],
+    ['ArcMachineNaming', 'iic-azl-n01'], ['ArcMachineNaming', 'iic-azl-n02'], ['ArcMachineNaming', 'iic-azl-n03'],
+    ['OsConfigurationConverged', 'iic-azl-n01'], ['OsConfigurationConverged', 'iic-azl-n02'], ['OsConfigurationConverged', 'iic-azl-n03'],
+    ['OsBuildConsistent', '*'], ['DnsAndTime', '*'], ['ActiveDirectoryPrepared', '*']];
+  var ARM_DEMO_VSTEPS = [['0.1', 'Check Arc connectivity'], ['0.2', 'Check hardware requirements'], ['0.3', 'Check network settings'], ['0.4', 'Check storage'],
+    ['0.5', 'Check Active Directory'], ['0.6', 'Check Key Vault access'], ['0.7', 'Check time and DNS'], ['0.8', 'Create the validation resources']];
+
+  function armOf(state) { return isObj(state) && isObj(state.arm) ? state.arm : null; }
+  function armHasData(arm) { return isObj(arm) && arm.hasData === true; }
+  function armPhaseOf(state, which) { var a = armOf(state); return a && isObj(a[which]) ? a[which] : null; }
+  function armPhaseHasData(ph) { return isObj(ph) && !!str(ph.status) && ph.status !== 'notstarted'; }
+  // The tree of a phase: the checks group, then the steps group (both built by the back end).
+  function armTreeOf(state, which) { var ph = armPhaseOf(state, which); return ph ? arr(ph.tree).filter(isObj) : []; }
+
+  // The mode the ARM run is in, when it is further on than the Azure phase says: validate or deploy, else ''.
+  function armActiveMode(state) {
+    var a = armOf(state);
+    if (!armHasData(a)) return '';
+    var ph = armPhaseOf(state, a.activePhase === 'deployment' ? 'deployment' : 'validation');
+    if (!armPhaseHasData(ph) || ph.status === 'planned') return '';
+    return a.activePhase === 'deployment' ? 'deploy' : 'validate';
+  }
+
+  // The tile of Validate or Deployment from the ARM run, or null when Azure already has steps of its own for the mode.
+  function armTile(state, modeId, azureStatus) {
+    var ph = armPhaseOf(state, ARM_PHASE_OF_MODE[modeId]);
+    if (!armPhaseHasData(ph)) return null;
+    if (azureStatus !== 'notstarted' && azureStatus !== 'unknown') return null;
+    var c = isObj(ph.checkCounts) ? ph.checkCounts : {}, cur = isObj(ph.current) ? ph.current : null, fail = isObj(ph.failing) ? ph.failing : null;
+    var tip = str(ph.text) + (str(ph.nextAction) ? '. Next: ' + firstLine(ph.nextAction, 200) : '');
+    switch (ph.status) {
+      case 'checking': return { status: 'run', line: 'Checking', tip: tip };
+      case 'planned': return { status: 'idle', line: 'Plan ready', tip: tip };
+      case 'blocked': return { status: 'err', line: (Number(c.failed) || 0) + ' check' + (Number(c.failed) === 1 ? '' : 's') + ' failed', tip: tip };
+      case 'running': {
+        var sec = Number(ph.elapsedSeconds);
+        return { status: 'run', line: (cur ? 'Step ' + str(cur.step) : 'Running') + (sec >= 0 && !isNaN(sec) ? ' · ' + (fmtDuration(sec) || '0s') : ''), tip: tip };
+      }
+      case 'passed': return { status: 'ok', line: modeId === 'validate' ? 'Passed' : 'Done', tip: tip };
+      case 'failed': return { status: 'err', line: fail && str(fail.step) ? 'Failed at ' + str(fail.step) : 'Failed', tip: tip };
+      case 'timedout': return { status: 'err', line: 'Timed out', tip: tip };
+      case 'refused': return { status: 'err', line: 'Not started', tip: tip };
+    }
+    return null;
+  }
+
+  // One sentence for the summary box, from the phase of the ARM run.
+  function armHeadline(ph) {
+    if (!isObj(ph)) return '';
+    var c = isObj(ph.checkCounts) ? ph.checkCounts : {}, s = isObj(ph.stepCounts) ? ph.stepCounts : {}, cur = isObj(ph.current) ? ph.current : null, fail = isObj(ph.failing) ? ph.failing : null;
+    switch (ph.status) {
+      case 'checking': return 'The toolkit is checking the instance before ' + str(ph.label) + ': ' + (Number(c.total) || 0) + ' check' + (Number(c.total) === 1 ? '' : 's') + ' so far';
+      case 'planned': return str(ph.text) + '. Nothing was submitted';
+      case 'blocked': return firstLine(ph.message, 200) || ((Number(c.failed) || 0) + ' check(s) failed; nothing was submitted');
+      case 'running': return str(ph.label) + ' is running: ' + (Number(s.total) || 0) + ' step' + (Number(s.total) === 1 ? '' : 's') + ' reported' + (cur ? ' (now ' + str(cur.step) + ' ' + str(cur.name) + ')' : '');
+      case 'passed': return str(ph.text);
+      case 'failed': return str(ph.text) + (fail && str(fail.message) ? ': ' + firstLine(fail.message, 180) : '');
+      case 'timedout': return str(ph.text);
+      case 'refused': return firstLine(ph.text, 220);
+    }
+    return '';
+  }
+
+  // Facts under the headline: [{ k, v, warn }].
+  function armFacts(arm, which) {
+    var ph = isObj(arm) && isObj(arm[which]) ? arm[which] : null, out = [];
+    if (!armPhaseHasData(ph)) return out;
+    var run = isObj(arm.run) ? arm.run : {}, c = isObj(ph.checkCounts) ? ph.checkCounts : {}, s = isObj(ph.stepCounts) ? ph.stepCounts : {};
+    out.push({ k: 'Toolkit run', v: (ARM_MODE_WORD[str(run.mode)] || str(run.mode) || 'run') + ', ' + (ARM_STATE_LABEL[str(arm.state)] || str(arm.state)).toLowerCase() });
+    if (Number(c.total) > 0) {
+      out.push({ k: 'Checks', v: (Number(c.passed) || 0) + ' passed, ' + (Number(c.failed) || 0) + ' failed' + (c.warning ? ', ' + c.warning + ' with a warning' : '') + (c.skipped ? ', ' + c.skipped + ' skipped' : ''), warn: Number(c.failed) > 0 });
+    }
+    if (Number(s.total) > 0) {
+      out.push({ k: 'Steps', v: s.total + ' reported: ' + (Number(s.success) || 0) + ' done' + (s.running ? ', ' + s.running + ' running' : '') + (s.error ? ', ' + s.error + ' failed' : ''), warn: Number(s.error) > 0 });
+    }
+    var sec = Number(ph.elapsedSeconds);
+    if (ph.elapsedSeconds !== null && ph.elapsedSeconds !== undefined && !isNaN(sec)) out.push({ k: 'Elapsed', v: (fmtDuration(sec) || '0s') + (ph.status === 'running' ? ' so far' : '') });
+    if (which === 'validation' && str(run.template)) out.push({ k: 'Template', v: str(run.template) + (str(run.parameterHash) ? ' · parameters ' + str(run.parameterHash) : '') });
+    if (ph.skipped) out.push({ k: 'Validation', v: 'already passed with these parameters; not submitted again' });
+    if (isObj(ph.resumed)) out.push({ k: 'Resumed', v: 'resubmitted after ' + (str(ph.resumed.previous) || 'an earlier run').toLowerCase() + '; the first steps show where Azure restarted', warn: true });
+    if (which === 'validation' && arm.awaitingApproval === true) out.push({ k: 'Approval', v: 'waiting; run Mode Deploy to go on', warn: true });
+    if (isObj(ph.hint)) out.push({ k: 'Known failure', v: str(ph.hint.title), warn: true });
+    else if (isObj(ph.preventiveHint)) out.push({ k: 'Heads-up', v: str(ph.preventiveHint.title) + (arr(ph.preventiveHint.nodes).length ? ' (' + arr(ph.preventiveHint.nodes).map(str).join(', ') + ')' : '') + '; Deploy would stop at step 0.41', warn: true });
+    if (str(ph.nextAction)) out.push({ k: 'Next', v: firstLine(ph.nextAction, 220) });
+    return out;
+  }
+
+  // The top-bar text when the ARM run is what is happening and Azure has no steps for the phase yet, or null.
+  function armOverall(state) {
+    var m = armActiveMode(state);
+    if (!m) return null;
+    var ph = armPhaseOf(state, ARM_PHASE_OF_MODE[m]), az = sectionStatus(isObj(state) ? state[ARM_PHASE_OF_MODE[m]] : null);
+    if (az !== 'notstarted' && az !== 'unknown') return null;
+    var key = ph.kind === 'running' ? 'running' : ph.kind === 'success' ? 'success' : ph.kind === 'error' ? 'error' : 'unknown';
+    return { key: key, label: str(ph.label) + ': ' + str(ph.text) };
+  }
+
   // ------------------------------------------------------------------ modes and summary (pure; also run by tests under Node)
   //
   // The page shows one "mode" at a time: Provisioning, Validate, Deployment, Update, Health. A mode maps onto the phase the
@@ -721,6 +845,9 @@
       var osc = oscOf(state);
       if (osc && (oscHasData(osc) || (osc.configured === true && ztpComplete(state)))) return 'osconfig';
     }
+    // The toolkit's ARM run can be ahead of what Azure reports (checks that failed before anything was submitted).
+    var armMode = armActiveMode(state);
+    if (armMode && MODE_IDS.indexOf(armMode) > MODE_IDS.indexOf(mode) && p !== 'done') return armMode;
     return mode;
   }
 
@@ -801,7 +928,9 @@
 
     [['validate', s.validation, MODE_IDS.indexOf('validate')], ['deploy', s.deployment, MODE_IDS.indexOf('deploy')]].forEach(function (x) {
       var sec = isObj(x[1]) ? x[1] : null, st = sec ? sectionStatus(sec) : 'notstarted', pr = stepProgress(sec && sec.tree);
-      if (st === 'success') tile(x[0], 'ok', x[0] === 'validate' ? 'Passed' : 'Done');
+      var at = order <= x[2] && phase !== 'done' ? armTile(s, x[0], st) : null;   // Azure has no steps for it yet: the ARM run says
+      if (at) tile(x[0], at.status, at.line, false, at.tip);
+      else if (st === 'success') tile(x[0], 'ok', x[0] === 'validate' ? 'Passed' : 'Done');
       else if (st === 'running') tile(x[0], 'run', pr.total ? 'Step ' + pr.current + ' of ' + pr.total : 'Running');
       else if (st === 'error') tile(x[0], 'err', 'Failed');
       else if (order > x[2] || phase === 'done') tile(x[0], 'ok', x[0] === 'validate' ? 'Passed' : 'Done');
@@ -992,6 +1121,22 @@
       if (me.status === 'run') card.progress = pct;
       return card;
     });
+    if (me.id === 'validate' || me.id === 'deploy') {
+      var which = ARM_PHASE_OF_MODE[me.id], aph = armPhaseOf(s, which);
+      if (armPhaseHasData(aph)) {
+        // Azure has no steps for the mode yet: the ARM run supplies the headline and the times. Either way its facts show.
+        var azSt = sec ? sectionStatus(sec) : 'notstarted';
+        if (azSt === 'notstarted' || azSt === 'unknown') {
+          out.headline = armHeadline(aph) || out.headline;
+          var as = parseTime(aph.started), ae = parseTime(aph.completed);
+          if (!isNaN(as)) out.startedAt = as;
+          if (!isNaN(ae) && me.status !== 'run') out.endedAt = ae;
+        } else if (aph.status === 'failed' && isObj(aph.hint)) {
+          out.headline += '. Known failure: ' + str(aph.hint.title);
+        }
+        out.facts = armFacts(armOf(s), which);
+      }
+    }
     return out;
   }
 
@@ -1004,7 +1149,7 @@
   // the step's time window, or, for a ZTP stage, to the ZTP event lines tagged with that stage. A machine row selects
   // the machine, like its card.
 
-  var MODE_SECTIONS = { prov: ['provisioning'], osconfig: ['osconfiguration'], validate: ['validation', 'extensions'], deploy: ['deployment'], update: ['update'], health: [] };
+  var MODE_SECTIONS = { prov: ['provisioning'], osconfig: ['osconfiguration'], validate: ['armvalidation', 'validation', 'extensions'], deploy: ['armdeployment', 'deployment'], update: ['update'], health: [] };
 
   // chain: the items from the top of the section down to the clicked step ({ id, name, ... }).
   // Returns { side: 'machine' | 'azure' | 'node', node, stage, window }.
@@ -1025,6 +1170,8 @@
       var ostep = isObj(list[1].osc) ? str(list[1].osc.step) : '';
       return { side: 'node', node: str(top.name), stage: ostep ? 'osc.' + ostep.toLowerCase() : '', window: false };
     }
+    // The toolkit's own checks and steps: reported by the ARM run, not by a node (no log window) and not read from Azure.
+    if (section === 'armvalidation' || section === 'armdeployment') return { side: 'arm', node: '', stage: '', window: false };
     if (section === 'validation' || section === 'extensions') return { side: 'azure', node: '', stage: '', window: false };
     return { side: 'node', node: '', stage: '', window: true };
   }
@@ -1173,6 +1320,13 @@
     oscn.forEach(function (n) {
       arr(n.warnings).slice(0, 2).forEach(function (w) { out.push({ kind: 'osconfig', text: 'OS configuration, ' + str(n.name) + ': ' + firstLine(w, 220) }); });
     });
+    var armA = armOf(s);
+    if (armHasData(armA)) {
+      arr(armA.hints).filter(isObj).forEach(function (h) {
+        out.push({ kind: 'arm', text: (h.preventive === true ? 'Before Deploy: ' : 'Known failure: ') + str(h.title) + '. ' + firstLine(h.text, 300) });
+      });
+      arr(armA.warnings).slice(0, 2).forEach(function (w) { out.push({ kind: 'arm', text: 'ARM run: ' + firstLine(w, 220) }); });
+    }
     var tr = str(s.track).toLowerCase();
     if (tr === 'add-node' || tr === 'repair') {
       out.push({ kind: 'track', text: phaseLabel(tr) + ' (set in the config): Sonar shows the Arc machines and the node log; the steps are not reported by Azure. Unverified against a live run.' });
@@ -1811,7 +1965,9 @@
       lifecyclePlain: lifecyclePlain, arcInfo: arcInfo, machineWaits: machineWaits, machineList: machineList,
       oscOf: oscOf, oscNodes: oscNodes, oscHasData: oscHasData, osConfigTreeOf: osConfigTreeOf, oscMethodChip: oscMethodChip, oscVersionLines: oscVersionLines,
       oscCard: oscCard, oscHeadline: oscHeadline, oscFacts: oscFacts, oscCountdown: oscCountdown, fmtCountdown: fmtCountdown,
-      oscDemoState: oscDemoState, oscDemoLines: oscDemoLines
+      oscDemoState: oscDemoState, oscDemoLines: oscDemoLines,
+      armOf: armOf, armHasData: armHasData, armPhaseOf: armPhaseOf, armPhaseHasData: armPhaseHasData, armTreeOf: armTreeOf, armActiveMode: armActiveMode,
+      armTile: armTile, armHeadline: armHeadline, armFacts: armFacts, armOverall: armOverall, armDemoState: armDemoState, armDemoLines: armDemoLines
     };
     return;
   }
@@ -2120,6 +2276,8 @@
       if (k === 'unknown') label = str(isObj(s[phase]) ? s[phase].status : '') || 'Unknown';
       return { key: k, label: label };
     }
+    var armO = armOverall(s);   // the toolkit's ARM run is ahead of Azure (checks before the submit, a refusal)
+    if (armO) return armO;
     var osc = oscOf(s);
     if (osc && oscHasData(osc) && activeModeId(s) === 'osconfig') {
       var okey = osc.status === 'success' ? 'success' : osc.status === 'error' ? 'error' : osc.status === 'running' ? 'running' : 'unknown';
@@ -2166,6 +2324,11 @@
     if (min === Infinity && oscRun && activeModeId(s) === 'osconfig' && !isNaN(parseTime(oscRun.started))) {
       min = parseTime(oscRun.started);   // OS configuration is the mode to watch: time since its run began
       if (!isNaN(parseTime(oscRun.completed))) max = parseTime(oscRun.completed); else running = true;
+    }
+    var armPh = armPhaseOf(s, armActiveMode(s) === 'deploy' ? 'deployment' : 'validation');
+    if (min === Infinity && armPhaseHasData(armPh) && armActiveMode(s) && !isNaN(parseTime(armPh.started))) {
+      min = parseTime(armPh.started);   // the toolkit's run is the mode to watch: time since its phase began
+      if (!isNaN(parseTime(armPh.completed))) max = parseTime(armPh.completed); else running = armPh.status === 'running';
     }
     if (min === Infinity) walk(app.provTree);   // before validation: time since the machines started getting ready
     if (min === Infinity) return null;
@@ -2305,8 +2468,10 @@
     app.stepIndex = new Map();
     indexSection('provisioning');
     indexSection('osconfiguration');
+    indexSection('armvalidation');
     indexSection('validation');
     indexSection('extensions');
+    indexSection('armdeployment');
     indexSection('deployment');
     indexSection('update');
     var stillIndexed = !!filterKey && app.stepIndex.has(filterKey);
@@ -2346,6 +2511,7 @@
 
   function indexSection(section) {
     var sec = app.state && app.state[section === 'osconfiguration' ? 'osConfiguration' : section];
+    var armTree = section === 'armvalidation' ? armTreeOf(app.state, 'validation') : section === 'armdeployment' ? armTreeOf(app.state, 'deployment') : null;
     var seen = new Set();
     function walk(nodes, parentKey) {
       arr(nodes).forEach(function (n, i) {
@@ -2358,7 +2524,7 @@
         walk(n.children, k);
       });
     }
-    walk(section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'extensions' ? app.extTree : (isObj(sec) ? sec.tree : null), section);
+    walk(armTree ? armTree : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'extensions' ? app.extTree : (isObj(sec) ? sec.tree : null), section);
   }
 
   function findCurrentKey() {
@@ -2469,14 +2635,15 @@
     });
     var shown = 0;
     wanted.forEach(function (section) {
-      var sec = section === 'provisioning' ? (isObj(s.provisioning) ? s.provisioning : {}) : section === 'osconfiguration' ? (isObj(s.osConfiguration) ? s.osConfiguration : {}) : (isObj(s[section]) ? s[section] : {});
-      var tree = section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'extensions' ? app.extTree : arr(sec.tree);
+      var armWhich = section === 'armvalidation' ? 'validation' : section === 'armdeployment' ? 'deployment' : '';
+      var sec = armWhich ? (armPhaseOf(s, armWhich) || {}) : section === 'provisioning' ? (isObj(s.provisioning) ? s.provisioning : {}) : section === 'osconfiguration' ? (isObj(s.osConfiguration) ? s.osConfiguration : {}) : (isObj(s[section]) ? s[section] : {});
+      var tree = armWhich ? armTreeOf(s, armWhich) : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'extensions' ? app.extTree : arr(sec.tree);
       var only = section === 'provisioning' || section === 'osconfiguration' ? str(app.filter.node).toLowerCase() : '';
       if (only) tree = tree.filter(function (n) { return str(n.name).toLowerCase() === only; });
       var wrap = host.querySelector('.tree-section[data-section="' + section + '"]');
       if (!tree.length) { if (wrap) wrap.remove(); app.treeSig[section] = null; return; }
       shown++;
-      var sig = JSON.stringify([tree, sec.status, app.selectedKey, app.currentKey, only, Array.from(app.expanded.entries())],
+      var sig = JSON.stringify([tree, sec.status, app.selectedKey, app.currentKey, only, Array.from(app.expanded.entries()), section === 'validation' || section === 'deployment' ? armTreeOf(s, section).length : 0],
         function (k, v) { return k === '__key' ? undefined : v; });
       if (wrap && app.treeSig[section] === sig) return;
       app.treeSig[section] = sig;
@@ -2520,8 +2687,13 @@
   function buildSection(section, tree) {
     var wrap = el('div', { class: 'tree-section', 'data-section': section });
     var title = section === 'provisioning' || section === 'osconfiguration' ? 'Machines' : section === 'extensions' ? 'Extensions (installed during Validate)' :
+      section === 'armvalidation' ? 'Toolkit run: checks and validation results' : section === 'armdeployment' ? 'Toolkit run: checks and deployment progress' :
       section === 'validation' ? 'Validation' : section === 'update' ? 'Update (unverified against a live run)' : 'Deployment';
-    if (section === 'extensions') wrap.appendChild(el('h3', { class: 'sub-h', text: title }));
+    if (section === 'extensions' || section === 'armvalidation' || section === 'armdeployment') wrap.appendChild(el('h3', { class: 'sub-h', text: title }));
+    // When the toolkit's run is shown above, say that the next list is what Azure itself reports.
+    if ((section === 'validation' && armTreeOf(app.state, 'validation').length) || (section === 'deployment' && armTreeOf(app.state, 'deployment').length)) {
+      wrap.appendChild(el('h3', { class: 'sub-h', text: (section === 'validation' ? 'Validation' : 'Deployment') + ' steps reported by Azure' }));
+    }
     var ul = el('ul', { class: 'tree', role: 'tree', id: 'tree-' + section, 'aria-label': title + ' steps' });
     var tabKey = app.focusKey[section] && app.stepIndex.has(app.focusKey[section]) ? app.focusKey[section] :
       (app.currentKey && app.stepIndex.get(app.currentKey) && app.stepIndex.get(app.currentKey).section === section ? app.currentKey : null);
@@ -2569,7 +2741,8 @@
     row.appendChild(ic);
 
     var nameEl = el('span', { class: 'step-name' });
-    if (rule.side !== 'machine' && section !== 'provisioning' && section !== 'osconfiguration' && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
+    if (isObj(n.arm) && n.arm.kind === 'step') nameEl.appendChild(el('span', { class: 'idx', text: str(n.arm.step) }));
+    else if (!isObj(n.arm) && rule.side !== 'machine' && section !== 'provisioning' && section !== 'osconfiguration' && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
     nameEl.appendChild(el('span', { class: 'sn', text: name }));
     if (rule.side === 'azure') nameEl.appendChild(el('span', { class: 'az', title: 'This step runs in Azure: Sonar reads its status from Azure, there are no node log lines for it.', text: 'Azure' }));
     if (isObj(n.osc) && n.osc.arc === true) nameEl.appendChild(el('span', { class: 'az', title: 'This step runs as an Azure Arc Run Command: Azure starts it on the node and Sonar can read the run command from Azure.', text: 'Azure' }));
@@ -2605,6 +2778,7 @@
     li.appendChild(row);
     if (isObj(n.prov)) li.appendChild(buildProvMeta(n, st));
     if (isObj(n.osc) && n.osc.machine === true) li.appendChild(buildOscMeta(n));
+    if (isObj(n.arm)) li.appendChild(buildArmMeta(n));
 
     if (selected && rule.side === 'azure') li.appendChild(buildAzureDetail(n, st, name));
     var errs = arr(n.errors).map(str).filter(Boolean);
@@ -2621,6 +2795,23 @@
       li.appendChild(g);
     }
     return li;
+  }
+
+  // Under a check or a step of the toolkit's run: the result chip of a check, its next action, and for the failing step the
+  // hint for the known failure. All of it is text from the feed, rendered as text.
+  function buildArmMeta(n) {
+    var a = n.arm, parts = [];
+    if (a.kind === 'check') {
+      if (a.result && a.result !== 'Passed') parts.push(chipEl(ARM_RESULT_KIND[a.result] || 'idle', a.result === 'Warning' ? 'Warning' : a.result === 'Skipped' ? 'Skipped' : 'Failed', 'The result of this check before the submit.'));
+      if (a.node && a.node !== '*') parts.push(el('span', { class: 'arm-node', title: 'The machine this check ran for', text: a.node }));
+      if (str(a.nextAction) && a.result !== 'Passed') parts.push(el('span', { class: 'prov-msg arm-next', text: 'Next: ' + a.nextAction }));
+    }
+    if (a.kind === 'step' && a.failing === true) parts.push(chipEl('err', 'Failing step', 'The step the toolkit names as the one that stopped the run.'));
+    if (a.kind === 'step' && str(a.hint)) parts.push(el('span', { class: 'prov-msg arm-hint', role: 'note', text: 'Known failure: ' + a.hint }));
+    if (!parts.length) return document.createDocumentFragment();
+    var meta = el('div', { class: 'prov-meta arm-meta' });
+    parts.forEach(function (p) { meta.appendChild(p); });
+    return meta;
   }
 
   // Under a clicked Azure step: what Azure says about it (status, start and end, its message, any error).
@@ -2851,7 +3042,7 @@
 
   // ------------------------------------------------------------------ mode bar
 
-  var MODE_OF_SECTION = { provisioning: 'prov', osconfiguration: 'osconfig', validation: 'validate', extensions: 'validate', deployment: 'deploy', update: 'update' };
+  var MODE_OF_SECTION = { provisioning: 'prov', osconfiguration: 'osconfig', armvalidation: 'validate', validation: 'validate', extensions: 'validate', armdeployment: 'deploy', deployment: 'deploy', update: 'update' };
 
   // The mode shown: the one the user clicked while the run is still in the same mode, else the active one.
   function currentModeId() {
@@ -3429,6 +3620,13 @@
     } else {
       row(g4, 'OS configuration events', replay ? '' : 'no event file set', [srcGroup([replay ? '' : 'the OS configuration mode shows no steps'])]);
     }
+    var ae = isObj(s.armEvents) ? s.armEvents : {};
+    if (ae.configured) {
+      row(g4, 'ARM run events', ae.events + ' event' + (ae.events === 1 ? '' : 's'),
+        [srcGroup([ae.lastEventAt ? ageEl('last ', ae.lastEventAt) : (ae.events ? null : 'none yet'), ae.fileFound ? 'file ' + ae.file : 'file ' + ae.file + ' not found yet (no toolkit run has started)'])]);
+    } else {
+      row(g4, 'ARM run events', replay ? '' : 'no event file set', [srcGroup([replay ? '' : 'Validate and Deployment show only what Azure reports'])]);
+    }
     var nl = isObj(s.nodeLogs) ? s.nodeLogs : {};
     // A replay shows the recorded tailer, not the idle one of the replay server.
     if (replay && isObj(app.tailer)) nl = { state: app.tailer.state, node: app.tailer.node, credential: app.tailer.credential, reason: app.tailer.reason };
@@ -3453,6 +3651,27 @@
           verLines.length ? el('span', { class: 'src', text: verLines.join(' · ') }) : el('span', { class: 'src', text: 'no versions reported yet' }),
           isObj(n.logAccount) && str(n.logAccount.reason) ? el('span', { class: 'src', text: 'log access: ' + str(n.logAccount.reason) }) : null
         ]));
+      });
+    }
+
+    // The toolkit's ARM Validate and Deploy run: what it is doing, the template, and the known failure it matched.
+    var armState = armOf(app.state);
+    if (armHasData(armState)) {
+      var gA2 = group('ARM Validate and Deploy', true);
+      var arun = isObj(armState.run) ? armState.run : {};
+      row(gA2, 'Run', (ARM_MODE_WORD[str(arun.mode)] || str(arun.mode) || 'run') + ', ' + (ARM_STATE_LABEL[str(armState.state)] || str(armState.state)).toLowerCase(),
+        [srcGroup([arun.started ? 'started ' + fmtClock(parseTime(arun.started)) : null, arun.exitCode !== null && arun.exitCode !== undefined ? 'exit code ' + arun.exitCode : null,
+          str(arun.runId) ? 'run ' + str(arun.runId) : null])]);
+      if (str(arun.template)) row(gA2, 'Template', str(arun.template), [srcGroup([str(arun.parameterHash) ? 'parameters ' + str(arun.parameterHash) : null, str(arun.schemaVersion) ? 'schema ' + str(arun.schemaVersion) : null])]);
+      [['validation', 'Validate'], ['deployment', 'Deploy']].forEach(function (x) {
+        var ph = armPhaseOf(app.state, x[0]);
+        if (!armPhaseHasData(ph)) return;
+        var cc = isObj(ph.checkCounts) ? ph.checkCounts : {}, sc = isObj(ph.stepCounts) ? ph.stepCounts : {}, el0 = Number(ph.elapsedSeconds);
+        row(gA2, x[1], str(ph.text), [srcGroup([Number(cc.total) ? cc.total + ' checks, ' + (cc.failed || 0) + ' failed' : null, Number(sc.total) ? sc.total + ' steps' : null,
+          ph.elapsedSeconds !== null && ph.elapsedSeconds !== undefined && !isNaN(el0) ? fmtDuration(el0) || '0s' : null, str(ph.deploymentName) ? 'ARM deployment ' + str(ph.deploymentName) : null])]);
+      });
+      arr(armState.hints).filter(isObj).forEach(function (h) {
+        row(gA2, h.preventive === true ? 'Heads-up' : 'Known failure', str(h.title), [srcGroup([str(h.id), h.phase ? str(h.phase) : null])]);
       });
     }
 
@@ -3503,6 +3722,7 @@
         azure: { pollSeconds: Number(cfg.pollSeconds) || 20, lastAnswerAt: str(state.polledAt) || iso(12000), ok: true, message: '' },
         ztpEvents: { configured: simplified, file: 'ztp-events.jsonl', fileFound: true, events: 212, lastEventAt: iso(4000) },
         osConfigEvents: { configured: !!oscOf(state), file: 'os-configuration-events.jsonl', fileFound: true, events: 118, lastEventAt: iso(3000) },
+        armEvents: { configured: !!armOf(state) && armHasData(armOf(state)), file: 'arm-deployment-events.jsonl', fileFound: true, events: armOf(state) && armOf(state).run ? Number(armOf(state).run.events) || 0 : 0, lastEventAt: iso(3000) },
         nodeLogs: { state: str(app.tailer && app.tailer.state) || 'connected', node: str(app.tailer && app.tailer.node), credential: 'supplied', transport: 'auto',
           reason: str(app.tailer && app.tailer.reason), lastLineAt: iso(3000) }
       },
@@ -4337,6 +4557,208 @@
     app.demoExport = function () { return { config: app.config, timeline: [state], logs: app.store.lines.map(function (l) { return { seq: l.seq, time: l.time, received: l.received, timeSource: l.timeSource, file: l.file, level: l.level, text: l.text }; }) }; };
   }
 
+  // The toolkit's ARM Validate and Deploy run as the page receives it (state.arm), r minutes after the run began (base = ms of
+  // r 0). Sample data only (example names): 18 checks (the Arc machine of iic-azl-n02 is named after its device ID: a
+  // warning), Validate passes at r 2.6, Deploy starts at r 2.9 and fails at step 0.41 (the device-ID Arc name problem) at r 4.9.
+  function armDemoState(r, base) {
+    var M = 60000;
+    function at(m) { return new Date(base + m * M).toISOString(); }
+    function phaseBase(name, label) {
+      return { name: name, label: label, status: 'notstarted', kind: 'notstarted', text: 'Not started', started: null, completed: null, elapsedSeconds: null, deploymentName: '', submitted: null,
+        attached: false, skipped: false, resumed: null, carriedOver: false, runId: 'a1b2c3d4e5f6', checkCounts: { total: 0, failed: 0, warning: 0, skipped: 0, passed: 0 },
+        stepCounts: { total: 0, success: 0, running: 0, error: 0, skipped: 0, unknown: 0 }, current: null, failing: null, knownIssue: '', hint: null, hintSource: '',
+        preventiveHint: null, refused: null, message: '', nextAction: '', pollErrors: 0, pollError: '', tree: [] };
+    }
+    var v = phaseBase('validation', 'Validate'), d = phaseBase('deployment', 'Deploy');
+    var arm = { configured: true, hasData: r >= 0.3, status: 'notstarted', state: 'waiting', activePhase: '', awaitingApproval: false,
+      run: { runId: 'a1b2c3d4e5f6', mode: 'ValidateAndDeploy', cluster: 'iic-azl-c01', started: at(0.3), completed: null, exitCode: null, state: '', finalState: '', template: 'create-cluster',
+        parameterHash: 'afe7afd61584', schemaVersion: '5.6.0', lastEventAt: at(Math.min(r, 4.9)), events: 0, message: '', nextAction: '', failed: false, planned: false, offline: false, approval: null },
+      validation: v, deployment: d, hints: [], warnings: [], guide: 'https://azurelocal.cloud' };
+    if (r < 0.3) return arm;
+
+    // checks: arrive one every 0.03 minutes from r 0.3
+    function checkItem(c, i, phase) {
+      var warnNaming = c[0] === 'ArcMachineNaming' && c[1] === 'iic-azl-n02';
+      var result = warnNaming ? 'Warning' : 'Passed';
+      var label = c[0] + (c[1] !== '*' ? ' (' + c[1] + ')' : '');
+      var evidence = warnNaming ? 'Arc machine 00000000-0000-0000-0000-000000000002-1 is named after the device ID, not after the host name iic-azl-n02. On build 2690 the Deploy stops at step 0.41.' :
+        c[0] === 'OsBuildConsistent' ? 'Every node runs OS build 10.0.26100.32230.' : c[0] + ' is fine.';
+      return { id: 'check:' + c[0] + '|' + c[1], name: label, description: evidence, status: 'success', rawStatus: result, start: null, end: null, durationSeconds: null, errors: [], children: [],
+        arm: { kind: 'check', result: result, node: c[1], check: c[0], nextAction: warnNaming ? 'Register the node with Azure Arc under its host name before the Deploy (known issue arc-device-id-name).' : '', hint: '' } };
+    }
+    var shown = ARM_DEMO_CHECKS.filter(function (c, i) { return r >= 0.3 + i * 0.03; });
+    var kids = shown.map(checkItem).sort(function (a, b) { return (a.arm.result === 'Warning' ? 0 : 1) - (b.arm.result === 'Warning' ? 0 : 1); });
+    var warns = kids.filter(function (k) { return k.arm.result === 'Warning'; }).length;
+    function checksGroup(phase, label) {
+      return { id: phase + '.checks', name: 'Checks before ' + label, description: (kids.length - warns) + ' passed' + (warns ? ', ' + warns + ' with a warning' : ''), status: 'success', rawStatus: '',
+        start: null, end: null, durationSeconds: null, errors: [], children: kids, arm: { kind: 'group', group: 'checks', hint: '' } };
+    }
+    var counts = { total: kids.length, failed: 0, warning: warns, skipped: 0, passed: kids.length - warns };
+    v.checkCounts = counts;
+    if (kids.length) v.tree.push(checksGroup('validation', 'Validate'));
+    v.status = 'checking'; v.kind = 'running'; v.text = 'Checking before Validate';
+    if (warns) v.preventiveHint = { id: 'arc-device-id-name', title: 'The Arc machines are named after the device ID', text: 'Simplified provisioning names the Arc machine <device-id>-1; on build 2690 the Deploy stops at step 0.41.', phase: 'Deploy', nodes: ['iic-azl-n02'] };
+    arm.state = 'checking'; arm.status = 'running'; arm.activePhase = 'validation';
+
+    // validation steps
+    function steps(list, t0, per, depthOf) {
+      return list.map(function (x, i) {
+        var s = t0 + i * per, e = s + per * 0.9;
+        if (r < s) return null;
+        var running = r < e;
+        return { id: x[0], name: x[1], description: '', status: running ? 'running' : 'success', rawStatus: running ? 'InProgress' : 'Success', start: at(s), end: running ? null : at(e),
+          durationSeconds: Math.round(((running ? r : e) - s) * 60), errors: [], children: [], arm: { kind: 'step', step: x[0], depth: depthOf ? depthOf(x) : 0, failing: false, hint: '' } };
+      }).filter(Boolean);
+    }
+    if (r >= 1.0) {
+      var vs = steps(ARM_DEMO_VSTEPS, 1.0, 0.2);
+      var vdone = r >= 2.6;
+      v.status = vdone ? 'passed' : 'running'; v.kind = vdone ? 'success' : 'running'; v.text = vdone ? 'Validation passed' : 'Validating';
+      v.started = at(1.0); v.completed = vdone ? at(2.6) : null; v.elapsedSeconds = Math.round(((vdone ? 2.6 : r) - 1.0) * 60); v.deploymentName = 'azl-validate-afe7afd61584'; v.submitted = at(1.0);
+      v.stepCounts = { total: vs.length, success: vs.filter(function (x) { return x.status === 'success'; }).length, running: vs.filter(function (x) { return x.status === 'running'; }).length, error: 0, skipped: 0, unknown: 0 };
+      v.current = vs.filter(function (x) { return x.status === 'running'; }).map(function (x) { return { step: x.id, name: x.name }; })[0] || null;
+      v.tree.push({ id: 'validation.steps', name: 'Validation results', description: vs.length + ' reported, failures first', status: vdone ? 'success' : 'running', rawStatus: '', start: null, end: null, durationSeconds: null, errors: [], children: vs, arm: { kind: 'group', group: 'steps', hint: '' } });
+      v.message = vdone ? 'Validation succeeded.' : '';
+      arm.state = vdone ? 'validated' : 'validating'; arm.status = vdone ? 'success' : 'running';
+      v.azure = vs;
+    }
+
+    // deployment
+    if (r >= 2.8) {
+      var dk = kids.slice();
+      d.checkCounts = counts;
+      var dchecks = { id: 'deployment.checks', name: 'Checks before Deploy', description: (kids.length - warns) + ' passed' + (warns ? ', ' + warns + ' with a warning' : ''), status: 'success', rawStatus: '', start: null, end: null, durationSeconds: null,
+        errors: [], children: dk, arm: { kind: 'group', group: 'checks', hint: '' } };
+      d.tree.push(dchecks);
+      d.status = 'running'; d.kind = 'running'; d.text = 'Deploying'; arm.state = 'deploying'; arm.status = 'running'; arm.activePhase = 'deployment';
+      arm.run.approval = { mode: 'none', requested: true, granted: true };
+      if (warns) d.preventiveHint = v.preventiveHint;
+    }
+    if (r >= 2.9) {
+      var t0 = 2.9, specs = [['0.30', 'Configure networking', 0.4], ['0.31', 'Install the roles', 0.4], ['0.38', 'Create the cluster', 0.4], ['0.40', 'Configure Storage Spaces Direct', 0.4]];
+      var dsteps = [], t = t0;
+      specs.forEach(function (x) {
+        var s = t, e = t + x[2]; t = e;
+        if (r < s) return;
+        var running = r < e;
+        dsteps.push({ id: x[0], name: x[1], description: '', status: running ? 'running' : 'success', rawStatus: running ? 'InProgress' : 'Success', start: at(s), end: running ? null : at(e), durationSeconds: Math.round(((running ? r : e) - s) * 60), errors: [], children: [], arm: { kind: 'step', step: x[0], depth: 0, failing: false, hint: '' } });
+      });
+      var failed = r >= 4.9;
+      if (r >= t) {
+        var kid1 = { id: '0.41.1', name: 'Download the Arc resource bridge image', description: '', status: 'success', rawStatus: 'Success', start: at(t), end: at(t + 0.15), durationSeconds: 9, errors: [], children: [], arm: { kind: 'step', step: '0.41.1', depth: 1, failing: false, hint: '' } };
+        var hintText = 'The Arc machines are named after the device ID: Simplified provisioning names each Arc machine <device-id>-1, and on build 2690 the Arc infrastructure step looks it up by the host name (ParentResourceNotFound). Resubmitting does not fix it.';
+        var kid2 = { id: '0.41.2', name: 'DeployVmoArcExtension', description: '', status: failed ? 'error' : 'running', rawStatus: failed ? 'Error' : 'InProgress', start: at(t + 0.15), end: failed ? at(4.9) : null, durationSeconds: Math.round(((failed ? 4.9 : r) - t - 0.15) * 60),
+          errors: failed ? ['ParentResourceNotFound: The Resource Microsoft.HybridCompute/machines/iic-azl-n02 was not found'] : [], children: [], arm: { kind: 'step', step: '0.41.2', depth: 1, failing: failed, hint: failed ? hintText : '' } };
+        dsteps.push({ id: '0.41', name: 'Deploy Arc infrastructure components', description: '', status: failed ? 'error' : 'running', rawStatus: failed ? 'Error' : 'InProgress', start: at(t), end: failed ? at(4.9) : null,
+          durationSeconds: Math.round(((failed ? 4.9 : r) - t) * 60), errors: failed ? ['ParentResourceNotFound: parent resource machines/iic-azl-n02 was not found'] : [], children: [kid1].concat(r >= t + 0.15 ? [kid2] : []), arm: { kind: 'step', step: '0.41', depth: 0, failing: false, hint: '' } });
+        if (failed) {
+          d.status = 'failed'; d.kind = 'error'; d.text = 'Deployment failed at step 0.41.2 DeployVmoArcExtension'; arm.state = 'failed'; arm.status = 'error';
+          d.knownIssue = 'arc-device-id-name'; d.hintSource = 'event'; d.failing = { step: '0.41.2', name: 'DeployVmoArcExtension', message: 'Deployment failed at step 0.41.2 \'DeployVmoArcExtension\': ParentResourceNotFound: machines/iic-azl-n02 was not found' };
+          d.hint = { id: 'arc-device-id-name', title: 'The Arc machines are named after the device ID', text: hintText, phase: 'Deploy' };
+          d.message = d.failing.message; d.nextAction = 'Known issue arc-device-id-name: Do not run Validate again for this instance (license sync).';
+          arm.hints = [{ id: 'arc-device-id-name', title: d.hint.title, text: hintText, phase: 'deployment', preventive: false, step: '0.41.2' }];
+          arm.run.completed = at(4.9); arm.run.exitCode = 1; arm.run.state = 'DeploymentFailed'; arm.run.nextAction = d.nextAction;
+          d.completed = at(4.9);
+        }
+      }
+      var cur = dsteps.filter(function (x) { return x.status === 'running'; }).map(function (x) { return { step: x.id, name: x.name }; });
+      d.started = at(t0); d.submitted = at(t0); d.deploymentName = 'azl-deploy-afe7afd61584'; d.elapsedSeconds = Math.round(((failed ? 4.9 : r) - t0) * 60);
+      d.stepCounts = { total: 0, success: 0, running: 0, error: 0, skipped: 0, unknown: 0 };
+      (function count(list) { list.forEach(function (x) { d.stepCounts.total++; d.stepCounts[x.status === 'error' ? 'error' : x.status === 'running' ? 'running' : 'success']++; count(x.children); }); })(dsteps);
+      d.current = cur.length ? cur[cur.length - 1] : null;
+      d.tree.push({ id: 'deployment.steps', name: 'Deployment steps', description: d.stepCounts.total + ' reported, in order', status: failed ? 'error' : 'running', rawStatus: '', start: null, end: null, durationSeconds: null, errors: [], children: dsteps, arm: { kind: 'group', group: 'steps', hint: '' } });
+      d.azure = dsteps;
+    }
+    arm.run.events = 12 + kids.length + (v.stepCounts.total * 2) + (d.stepCounts.total * 2);
+    return arm;
+  }
+
+  // The event lines of the ARM demo up to r, as the log pane shows them.
+  function armDemoLines(r, base) {
+    var out = [];
+    function at(m) { return new Date(base + m * 60000).toISOString(); }
+    function add(m, node, state, step, level, text) { if (m <= r) out.push({ time: at(m), level: level, text: at(m) + ' [arm] ' + node + ' ' + state + (step ? ' (' + step + ')' : '') + ': ' + text }); }
+    add(0.3, '*', 'RunStarted', '', 'info', 'ARM deployment run: mode ValidateAndDeploy, 3 node(s).');
+    add(0.31, '*', 'ParametersGenerated', '', 'info', '54 parameters for template create-cluster; hash afe7afd61584.');
+    ARM_DEMO_CHECKS.forEach(function (c, i) {
+      var warn = c[0] === 'ArcMachineNaming' && c[1] === 'iic-azl-n02';
+      add(0.3 + i * 0.03, c[1], 'PreconditionChecked', c[0], warn ? 'warning' : 'info', warn ? 'Arc machine 00000000-0000-0000-0000-000000000002-1 is named after the device ID, not after the host name iic-azl-n02. (warning)' : c[0] + ' is fine.');
+    });
+    add(1.0, '*', 'ValidationSubmitted', '', 'info', 'Submitted Validate as deployment azl-validate-afe7afd61584.');
+    ARM_DEMO_VSTEPS.forEach(function (x, i) { add(1.0 + i * 0.2, '*', 'ValidationStep', x[0], 'info', x[1] + ': InProgress'); add(1.0 + i * 0.2 + 0.18, '*', 'ValidationStep', x[0], 'info', x[1] + ': Success'); });
+    add(2.6, '*', 'ValidationPassed', '', 'info', 'Validation succeeded.');
+    add(2.7, '*', 'ApprovalGranted', '', 'info', 'Approved.');
+    add(2.9, '*', 'DeploymentSubmitted', '', 'info', 'Submitted Deploy as deployment azl-deploy-afe7afd61584.');
+    [['0.30', 'Configure networking', 2.9], ['0.31', 'Install the roles', 3.3], ['0.38', 'Create the cluster', 3.7], ['0.40', 'Configure Storage Spaces Direct', 4.1]].forEach(function (x) {
+      add(x[2], '*', 'DeploymentStep', x[0], 'info', x[1] + ': InProgress'); add(x[2] + 0.38, '*', 'DeploymentStep', x[0], 'info', x[1] + ': Success');
+    });
+    add(4.5, '*', 'DeploymentStep', '0.41', 'info', 'Deploy Arc infrastructure components: InProgress');
+    add(4.9, '*', 'DeploymentStep', '0.41', 'error', 'Deploy Arc infrastructure components: Error - ParentResourceNotFound: parent resource machines/iic-azl-n02 was not found (error)');
+    add(4.9, '*', 'DeploymentFailed', '0.41.2', 'error', 'Deployment failed at step 0.41.2 \'DeployVmoArcExtension\': ParentResourceNotFound: machines/iic-azl-n02 was not found -> next: Known issue arc-device-id-name: Do not run Validate again for this instance (license sync). (error)');
+    add(4.9, '*', 'RunCompleted', '', 'error', 'Run finished in state DeploymentFailed, exit code 1. (error)');
+    return out;
+  }
+
+  // ?demo=1&route=arm: the toolkit's ARM Validate and Deploy run for three machines (example names): checks, Validate, Deploy and
+  // the step 0.41 failure (the device-ID Arc name problem). The run moves on while the page is open. Sample data only; no API calls.
+  function startArmDemo(iso, M) {
+    var NAMES = ['iic-azl-n01', 'iic-azl-n02', 'iic-azl-n03'], now = Date.now(), r = 0.2, base = now - r * M;
+    function provMachine(name, i) {
+      return { name: name, route: 'simplified', lifecycle: 'Provisioned', lifecycleMessage: 'Machine has been successfully provisioned.', status: 'success', percent: 100, reportedPercent: 100,
+        arcMachineName: '00000000-0000-0000-0000-00000000000' + (i + 1) + '-1', arcSource: 'edgeMachine.job', arcStatus: 'Connected', extensions: [], start: iso(150 * M), end: iso(40 * M), errors: [],
+        ztp: { complete: true, device: { status: 'success' }, network: { status: 'success' }, restore: { status: 'success' } }, tree: [] };
+    }
+    var provNodes = NAMES.map(provMachine);
+    var state = {
+      cluster: 'iic-azl-c01', mode: null, provisioningState: null, phase: 'provisioning', activePhase: 'provisioning',
+      provisioning: { route: 'simplified', routeSource: 'config', phase: 'provisioning', status: 'success', readyForValidate: false, ztpComplete: true, nextStep: null, nodes: provNodes },
+      osConfiguration: oscDemoState(6.9, now - 20 * M, 3),
+      arm: armDemoState(r, base),
+      extensions: { shown: false, status: 'notstarted', nodes: [] },
+      validation: { status: 'notstarted', tree: [], counts: {} }, deployment: { status: 'notstarted', tree: [], counts: {} },
+      nodes: provNodes.map(function (n) { return { name: n.name, arcStatus: n.arcStatus, arcMachineName: n.arcMachineName, arcSource: n.arcSource, lastStatusChange: iso(30 * M) }; }),
+      current: { phase: 'provisioning', stepPath: [], stepName: null }, warnings: [], polledAt: iso(4000)
+    };
+    // Azure's own trees follow the same steps once they exist (Azure reports them as it runs them).
+    function azureOf(list) {
+      return list.map(function (x) { return { id: x.id, name: x.name, description: '', status: x.status, rawStatus: x.rawStatus, start: x.start, end: x.end, durationSeconds: x.durationSeconds, errors: x.errors, children: azureOf(x.children) }; });
+    }
+    function sync() {
+      var a = armDemoState(r, base);
+      state.arm = a;
+      var vt = a.validation.azure || [], dt = a.deployment.azure || [];
+      state.validation = { status: vt.length ? (a.validation.status === 'passed' ? 'Success' : 'InProgress') : 'notstarted', tree: azureOf(vt), counts: {} };
+      state.deployment = { status: dt.length ? (a.deployment.status === 'failed' ? 'Failed' : 'InProgress') : 'notstarted', tree: azureOf(dt), counts: {} };
+      state.phase = dt.length ? (a.deployment.status === 'failed' ? 'failed' : 'deployment') : vt.length ? 'validation' : 'provisioning';
+      state.activePhase = dt.length ? 'deployment' : vt.length ? 'validation' : 'provisioning';
+      state.mode = dt.length ? 'Deploy' : vt.length ? 'Validate' : null;
+      state.current = { phase: state.activePhase, stepPath: [], stepName: null };
+      state.polledAt = new Date().toISOString();
+    }
+    sync();
+    applyConfig({ cluster: 'iic-azl-c01', resourceGroup: 'rg-iic-azl-c01', identityModel: 'ActiveDirectory', pollSeconds: 20, provisioningRoute: 'simplified',
+      nodes: NAMES.map(function (n, i) { return { name: n, seed: i === 0 }; }), logPaths: ['C:\\CloudDeployment\\Logs'] });
+    app.guidance = demoGuidance();
+    applyState(state);
+    applyTailer({ state: 'connected', reason: '', node: NAMES[0], credential: 'supplied' });
+    applyFiles([{ path: 'C:\\CloudDeployment\\Logs\\setup.log' }]);
+    var seq = 0, shown = 0;
+    function feed() {
+      var lines = armDemoLines(r, base);
+      var fresh = lines.slice(shown);
+      shown = lines.length;
+      if (fresh.length) applyLogBatch(fresh.map(function (l) { return { seq: ++seq, time: l.time, received: l.time, timeSource: 'line', file: 'arm-events', level: l.level, text: l.text }; }), { source: 'live' });
+    }
+    feed();
+    setInterval(function () {
+      if (r < 5.4) r = Math.round((r + 0.15) * 100) / 100;
+      sync();
+      applyState(state);
+      feed();
+    }, 15000);
+    app.demoExport = function () { return { config: app.config, timeline: [state], logs: app.store.lines.map(function (l) { return { seq: l.seq, time: l.time, received: l.received, timeSource: l.timeSource, file: l.file, level: l.level, text: l.text }; }) }; };
+  }
+
   // Steps for a demo machine: names (or [name, description] pairs) one after the other from startAgo; cur is the index of
   // the current step (-1: all finished) and curStatus its status.
   function demoSteps(step, prefix, names, startAgo, per, cur, curStatus, errors) {
@@ -4366,6 +4788,7 @@
   function startRouteDemo(route, iso, step, M) {
     if (route === 'simplified') { startZtpDemo(iso, step, M); return; }
     if (route === 'osconfig') { startOsConfigDemo(iso, M); return; }
+    if (route === 'arm') { startArmDemo(iso, M); return; }
     function steps(prefix, names, startAgo, per, cur, curStatus, errors) { return demoSteps(step, prefix, names, startAgo, per, cur, curStatus, errors); }
     // OEM image route: the three groups Arc registration shows per machine (OS image update, Bootstrap, Azure registration).
     var UPD = ['Scan', 'Download', 'Install'];

@@ -533,7 +533,7 @@ function ConvertTo-AzlSonarArmCheckItem {
     return [ordered]@{
         id = "check:$($Check.Name)|$($Check.Node)"; name = $label; description = $text; status = $status; rawStatus = [string]$Check.Result
         start = $null; end = $null; durationSeconds = $null
-        errors = @(if ($Check.Result -eq 'Failed' -and $text) { $text })
+        errors = @()
         children = @()
         arm = [ordered]@{ kind = 'check'; result = [string]$Check.Result; node = [string]$Check.Node; check = [string]$Check.Name; nextAction = (Protect-AzlSonarText -Text ([string]$Check.NextAction)); hint = '' }
     }

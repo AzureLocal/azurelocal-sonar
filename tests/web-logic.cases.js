@@ -882,7 +882,7 @@ test('stepRule: OEM route groups, validation, extensions, deployment and update'
 });
 
 test('mode sections: each mode shows only its own steps; Health has none', function () {
-  eq(m.MODE_SECTIONS, { prov: ['provisioning'], osconfig: ['osconfiguration'], validate: ['validation', 'extensions'], deploy: ['deployment'], update: ['update'], health: [] });
+  eq(m.MODE_SECTIONS, { prov: ['provisioning'], osconfig: ['osconfiguration'], validate: ['armvalidation', 'validation', 'extensions'], deploy: ['armdeployment', 'deployment'], update: ['update'], health: [] });
 });
 
 test('regression: clicking an Azure step (Register machine, Install OS) must not leave the logs empty', function () {
@@ -1482,6 +1482,218 @@ test('OS configuration summary and steps: hostile machine names, evidence and re
     eq(li.querySelectorAll('.osc-stage').length > 0, true, 'a step shows its stage chip');
     eq(li.querySelectorAll('.countdown').length > 0, true, 'the guarded change shows its countdown');
     staticIcons(dom, 'osconfig');
+  });
+});
+
+// ---------------------------------------------------------------- ARM Validate and Deploy (state.arm from the toolkit's event feed)
+
+var ARM_BASE = Date.parse('2026-11-07T20:00:00Z');
+function armAt(r) { return m.armDemoState(r, ARM_BASE); }
+function armState(arm, extra) {
+  var s = { phase: 'provisioning', activePhase: 'provisioning', provisioning: { route: 'simplified', ztpComplete: true, nodes: [] }, validation: { status: 'notstarted', tree: [] }, deployment: { status: 'notstarted', tree: [] }, arm: arm };
+  if (extra) Object.keys(extra).forEach(function (k) { s[k] = extra[k]; });
+  return s;
+}
+function armTiles(s) { var o = {}; m.modeStates(s).forEach(function (t) { o[t.id] = t; }); return o; }
+// A blocked validation: two checks failed, nothing submitted (Azure has no steps).
+function armBlocked() {
+  var a = armAt(0.9);
+  var fails = [{ id: 'check:Permissions|*', name: 'Permissions', description: 'The identity may not write role assignments.', status: 'error', rawStatus: 'Failed', start: null, end: null, durationSeconds: null, errors: [], children: [],
+      arm: { kind: 'check', result: 'Failed', node: '*', check: 'Permissions', nextAction: 'Give the identity User Access Administrator on the resource group.', hint: '' } }];
+  a.validation.status = 'blocked'; a.validation.kind = 'error'; a.validation.text = 'Blocked: 2 checks failed, nothing was submitted';
+  a.validation.checkCounts = { total: 18, failed: 2, warning: 1, skipped: 0, passed: 15 };
+  a.validation.message = '2 precondition(s) failed: Permissions, NamesAvailable.'; a.validation.nextAction = 'Give the identity User Access Administrator on the resource group.';
+  a.validation.tree[0].children = fails.concat(a.validation.tree[0].children); a.validation.tree[0].status = 'error';
+  a.state = 'failed'; a.status = 'error';
+  return a;
+}
+
+test('ARM tiles: nothing from the feed keeps the Validate and Deployment tiles as Azure says', function () {
+  var none = armTiles(armState({ configured: true, hasData: false, validation: { status: 'notstarted' }, deployment: { status: 'notstarted' } }));
+  eq([none.validate.status, none.validate.line, none.deploy.status], ['idle', '', 'idle']);
+  var without = armTiles({ phase: 'provisioning', activePhase: 'provisioning', provisioning: { route: 'simplified', nodes: [] } });
+  eq([without.validate.status, without.deploy.status], ['idle', 'idle']);
+});
+
+test('ARM tiles: checks that failed before the submit turn Validate red with the count, while Azure has no steps', function () {
+  var t = armTiles(armState(armBlocked()));
+  eq([t.validate.status, t.validate.line], ['err', '2 checks failed']);
+  eq(/Give the identity User Access Administrator/.test(t.validate.tip), true, 'the tip carries the next action');
+  eq(t.deploy.status, 'idle');
+});
+
+test('ARM tiles: checking, validating with the running step and the elapsed time, passed', function () {
+  eq(armTiles(armState(armAt(0.5))).validate.status, 'run');
+  eq(armTiles(armState(armAt(0.5))).validate.line, 'Checking');
+  var running = armTiles(armState(armAt(1.5))).validate;
+  eq([running.status, /^Step 0\.\d · /.test(running.line)], ['run', true]);
+  var passed = armTiles(armState(armAt(2.7))).validate;
+  eq([passed.status, passed.line], ['ok', 'Passed']);
+});
+
+test('ARM tiles: Deployment runs per step, then fails at the named step; Azure steps win once Azure has them', function () {
+  var dep = armTiles(armState(armAt(4.0))).deploy;
+  eq(dep.status, 'run');
+  eq(/^Step 0\.\d+ · /.test(dep.line), true, dep.line);
+  var failed = armTiles(armState(armAt(5.2))).deploy;
+  eq([failed.status, failed.line], ['err', 'Failed at 0.41.2']);
+  // Azure already reports a running deployment: its own tile logic runs, the feed does not override it
+  var az = armTiles(armState(armAt(4.0), { phase: 'deployment', activePhase: 'deployment', deployment: { status: 'InProgress', tree: [{ id: '1', name: 'A', status: 'success' }, { id: '2', name: 'B', status: 'running' }] } })).deploy;
+  eq([az.status, az.line], ['run', 'Step 2 of 2']);
+});
+
+test('ARM tiles: a Plan that found nothing wrong is grey, refused and timed out are red', function () {
+  var plan = armAt(0.9); plan.validation.status = 'planned'; plan.validation.kind = 'notstarted'; plan.validation.text = 'Plan ready: 18 checks, none failed';
+  var p = armTiles(armState(plan)).validate;
+  eq([p.status, p.line], ['idle', 'Plan ready']);
+  var ref = armAt(4.5); ref.deployment.status = 'refused'; ref.deployment.kind = 'error'; ref.deployment.text = 'Deploy was not started: The last deployment failed. Fix the cause and run again with -Resume.';
+  var r1 = armTiles(armState(ref)).deploy;
+  eq([r1.status, r1.line], ['err', 'Not started']);
+  var to = armAt(3.5); to.deployment.status = 'timedout'; to.deployment.kind = 'error'; to.deployment.text = 'Deployment timed out; Azure is still working';
+  eq(armTiles(armState(to)).deploy.line, 'Timed out');
+});
+
+test('ARM mode: the page moves to Validate or Deployment when the toolkit run is ahead of Azure, and never backwards', function () {
+  eq(m.activeModeId(armState(armBlocked())), 'validate');
+  eq(m.activeModeId(armState(armAt(5.2))), 'deploy');
+  eq(m.activeModeId(armState(armAt(0.1))), 'prov', 'no event yet: the mode Azure says');
+  var planOnly = armAt(0.9); planOnly.validation.status = 'planned';
+  eq(m.activeModeId(armState(planOnly)), 'prov', 'a Plan does not move the page');
+  var behind = armState(armBlocked(), { phase: 'deployment', activePhase: 'deployment', deployment: { status: 'InProgress', tree: [{ id: '1', name: 'A', status: 'running' }] } });
+  eq(m.activeModeId(behind), 'deploy', 'Azure deployment is further on than the blocked validation');
+  eq(m.activeModeId(armState(armAt(5.2), { phase: 'done', activePhase: 'deployment' })), 'health', 'a finished cluster stays on Health');
+});
+
+test('ARM summary: before Azure has steps, the headline, times and facts come from the feed; failures read first', function () {
+  var s = armState(armBlocked());
+  var sum = m.summaryFor(s, 'validate', { nodes: [] });
+  eq(sum.headline, '2 precondition(s) failed: Permissions, NamesAvailable.');
+  var facts = {}; sum.facts.forEach(function (f) { facts[f.k] = f; });
+  eq(facts.Checks.v, '15 passed, 2 failed, 1 with a warning');
+  eq(facts.Checks.warn, true);
+  eq(/Give the identity/.test(facts.Next.v), true);
+  eq(isNaN(sum.startedAt), true, 'a blocked phase has no start');
+});
+
+test('ARM summary: deployment failed at step 0.41 names the known failure and the failing step', function () {
+  var s = armState(armAt(5.2));
+  var sum = m.summaryFor(s, 'deploy', { nodes: [] });
+  eq(/^Deployment failed at step 0\.41\.2 DeployVmoArcExtension: /.test(sum.headline), true, sum.headline);
+  var facts = {}; sum.facts.forEach(function (f) { facts[f.k] = f; });
+  eq(facts['Known failure'].v, 'The Arc machines are named after the device ID');
+  eq(facts['Known failure'].warn, true);
+  eq(/\d/.test(facts.Elapsed.v), true);
+  eq(facts.Steps.warn, true);
+  // with Azure's own failed tree present the headline is Azure's, plus the known failure
+  var withAzure = armState(armAt(5.2), { phase: 'failed', activePhase: 'deployment', deployment: { status: 'Failed', tree: [{ id: '0.41', name: 'Deploy Arc infrastructure components', status: 'error', errors: ['ParentResourceNotFound'] }] } });
+  var sum2 = m.summaryFor(withAzure, 'deploy', { nodes: [] });
+  eq(/Known failure: The Arc machines are named after the device ID$/.test(sum2.headline), true, sum2.headline);
+});
+
+test('ARM facts: the heads-up for a device-ID Arc name before Deploy, the approval wait and a resumed run', function () {
+  var a = armAt(2.0);
+  var f = m.armFacts(a, 'validation'), by = {}; f.forEach(function (x) { by[x.k] = x; });
+  eq(/Deploy would stop at step 0\.41/.test(by['Heads-up'].v), true);
+  eq(/iic-azl-n02/.test(by['Heads-up'].v), true);
+  var waiting = armAt(2.7); waiting.awaitingApproval = true; waiting.state = 'awaitingapproval';
+  eq(m.armFacts(waiting, 'validation').some(function (x) { return x.k === 'Approval' && x.warn; }), true);
+  var resumed = armAt(4.0); resumed.deployment.resumed = { previous: 'Failed', at: '2026-11-07T20:00:00Z', text: 'x' };
+  eq(m.armFacts(resumed, 'deployment').some(function (x) { return x.k === 'Resumed' && /failed/.test(x.v); }), true);
+  eq(m.armFacts(null, 'validation'), []);
+  eq(m.armFacts(armAt(0.1), 'validation'), []);
+});
+
+test('ARM top bar: the toolkit run supplies the status only while Azure has no steps for the phase', function () {
+  var o = m.armOverall(armState(armBlocked()));
+  eq([o.key, /^Validate: Blocked: 2 checks failed/.test(o.label)], ['error', true]);
+  eq(m.armOverall(armState(armAt(0.1))), null);
+  var azure = armState(armBlocked(), { phase: 'validation', activePhase: 'validation', validation: { status: 'InProgress', tree: [{ id: '1', name: 'A', status: 'running' }] } });
+  eq(m.armOverall(azure), null);
+});
+
+test('ARM notes: a known failure and a heads-up show under the header; poll errors too', function () {
+  var failed = m.liveNotes(armState(armAt(5.2)));
+  eq(failed.some(function (n) { return n.kind === 'arm' && /^Known failure: The Arc machines are named after the device ID/.test(n.text); }), true);
+  var a = armAt(2.0); a.hints = [{ id: 'arc-device-id-name', title: 'The Arc machines are named after the device ID', text: 'x', phase: 'validation', preventive: true }]; a.warnings = ['Deploy: Reading the deployment status failed (2 in a row)'];
+  var notes = m.liveNotes(armState(a)).filter(function (n) { return n.kind === 'arm'; });
+  eq(/^Before Deploy: /.test(notes[0].text), true);
+  eq(/^ARM run: Deploy: Reading/.test(notes[1].text), true);
+});
+
+test('ARM steps: the toolkit sections are their own side, never a node log window', function () {
+  eq(m.MODE_SECTIONS.validate, ['armvalidation', 'validation', 'extensions']);
+  eq(m.MODE_SECTIONS.deploy, ['armdeployment', 'deployment']);
+  eq(m.stepRule('armvalidation', [{ id: 'validation.checks' }, { id: 'check:X|*' }]), { side: 'arm', node: '', stage: '', window: false });
+  eq(m.stepRule('armdeployment', [{ id: 'deployment.steps' }]).side, 'arm');
+});
+
+test('ARM tree: failures first in the checks, the steps in order, the failing step carries the hint', function () {
+  var a = armAt(5.2);
+  var checks = m.armTreeOf(armState(a), 'deployment')[0];
+  eq(checks.name, 'Checks before Deploy');
+  eq(checks.children[0].arm.result, 'Warning', 'the warning comes before the passed checks');
+  var steps = m.armTreeOf(armState(a), 'deployment')[1];
+  eq(steps.children.map(function (c) { return c.id; }), ['0.30', '0.31', '0.38', '0.40', '0.41']);
+  var last = steps.children[4];
+  eq([last.status, last.children.map(function (c) { return c.id; })], ['error', ['0.41.1', '0.41.2']]);
+  eq(last.children[1].arm.failing, true);
+  eq(/named after the device ID/.test(last.children[1].arm.hint), true);
+  eq(last.children[1].errors.length, 1);
+  eq(m.armTreeOf(armState(a), 'validation')[1].children.length, 8);
+  eq(m.armTreeOf(null, 'deployment'), []);
+});
+
+test('ARM log lines: the run is not a machine; a check of a node is scoped to that node', function () {
+  eq(m.lineScope({ file: 'arm-events', text: '2026-11-07T20:00:01.000Z [arm] * DeploymentStep (0.41): x' }), { node: '', stage: '' });
+  eq(m.lineScope({ file: 'arm-events', text: '2026-11-07T20:00:01.000Z [arm] iic-azl-n02 PreconditionChecked (ArcMachineNaming): x (warning)' }), { node: 'iic-azl-n02', stage: '' });
+  var lines = m.armDemoLines(5.2, ARM_BASE);
+  eq(lines.every(function (l) { return /\[arm\] \S+ [A-Za-z]+/.test(l.text); }), true);
+  eq(lines.some(function (l) { return /DeploymentFailed \(0\.41\.2\)/.test(l.text) && l.level === 'error'; }), true);
+  eq(m.armDemoLines(0.1, ARM_BASE), []);
+});
+
+test('ARM demo: the run goes from waiting through checks, Validate and Deploy to the step 0.41 failure', function () {
+  var w = armAt(0.1);
+  eq([w.hasData, w.state, w.validation.status], [false, 'waiting', 'notstarted']);
+  eq([armAt(0.6).state, armAt(0.6).validation.status], ['checking', 'checking']);
+  eq([armAt(1.5).state, armAt(1.5).validation.status], ['validating', 'running']);
+  eq([armAt(2.7).state, armAt(2.7).validation.status], ['validated', 'passed']);
+  eq([armAt(4.0).state, armAt(4.0).deployment.status, armAt(4.0).activePhase], ['deploying', 'running', 'deployment']);
+  var f = armAt(5.0);
+  eq([f.state, f.status, f.deployment.status, f.deployment.failing.step, f.deployment.knownIssue, f.run.exitCode], ['failed', 'error', 'failed', '0.41.2', 'arc-device-id-name', 1]);
+  eq(f.validation.elapsedSeconds, 96);
+  eq(f.deployment.elapsedSeconds > 0, true);
+});
+
+test('ARM rendering: hostile check text, step names, errors and hints render as text, never as markup', function () {
+  var a = armAt(5.2), h = HOSTILE;
+  a.deployment.tree[0].children[0].description = h[0]; a.deployment.tree[0].children[0].arm.nextAction = h[1];
+  var step = a.deployment.tree[1].children[4];
+  step.name = h[0]; step.errors = [h[1]]; step.children[1].arm.hint = h[2];
+  a.deployment.failing.message = h[3]; a.deployment.text = h[1];
+  withDom(function (dom, hk) {
+    var state = armState(a, { phase: 'failed', activePhase: 'deployment' });
+    hk.app.state = state; hk.app.config = { cluster: 'c', nodes: [] };
+    hk.renderSummary();
+    assertInert(dom.byId.summary, 'arm summary');
+    var tree = m.armTreeOf(state, 'deployment');
+    tree.forEach(function (n, i) {
+      n.__key = 'armdeployment/' + i; hk.app.stepIndex.set(n.__key, { node: n, section: 'armdeployment', parentKey: 'armdeployment' });
+      n.children.forEach(function (c, j) {
+        c.__key = n.__key + '/' + j; hk.app.stepIndex.set(c.__key, { node: c, section: 'armdeployment', parentKey: n.__key });
+        c.children.forEach(function (d2, k) { d2.__key = c.__key + '/' + k; hk.app.stepIndex.set(d2.__key, { node: d2, section: 'armdeployment', parentKey: c.__key }); });
+      });
+    });
+    var checks = hk.buildItem(tree[0], 1, null, 'armdeployment', [tree[0]]);
+    assertInert(checks, 'arm checks');
+    eq(textOf(checks).indexOf(h[0]) >= 0, true, 'the evidence shows as text');
+    eq(textOf(checks).indexOf('Next: ' + h[1]) >= 0, true, 'the next action shows as text');
+    var steps = hk.buildItem(tree[1], 1, null, 'armdeployment', [tree[1]]);
+    assertInert(steps, 'arm steps');
+    eq(textOf(steps).indexOf(h[1]) >= 0, true, 'the error shows as text');
+    eq(steps.querySelectorAll('.arm-hint').length > 0, true, 'the known failure hint is under the failing step');
+    eq(steps.querySelectorAll('.idx').length > 0, true, 'a step shows its portal number');
+    staticIcons(dom, 'arm');
   });
 });
 
