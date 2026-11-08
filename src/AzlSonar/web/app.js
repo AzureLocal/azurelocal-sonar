@@ -59,16 +59,17 @@
     follow: true,
     newWhilePaused: 0,
     rendered: 0,
-    treeSig: { discovery: null, provisioning: null, osconfiguration: null, armvalidation: null, validation: null, extensions: null, armdeployment: null, deployment: null, update: null },
+    treeSig: { discovery: null, provisioning: null, osconfiguration: null, armvalidation: null, validation: null, extensions: null, armdeployment: null, deployment: null, update: null, verification: null },
     expanded: new Map(),        // key -> bool (user choice)
-    sectionCollapsed: { discovery: false, provisioning: false, osconfiguration: false, armvalidation: false, validation: false, extensions: false, armdeployment: false, deployment: false, update: false },
+    sectionCollapsed: { discovery: false, provisioning: false, osconfiguration: false, armvalidation: false, validation: false, extensions: false, armdeployment: false, deployment: false, update: false, verification: false },
     provAutoCollapsed: false,   // the provisioning section was collapsed once validation started
     provTree: [],               // one synthetic tree item per machine (provisioningTreeOf)
     oscTree: [],                // OS configuration: one tree item per machine with its steps (osConfigTreeOf)
     discTree: [],               // Discovery: one tree item per machine with what was read (discoveryTreeOf)
+    vfTree: [],                 // Verification: one tree item per category with its checks (vfTreeOf)
     extTree: [],                // OEM image route, from Validate on: one item per machine with its extensions
     stepIndex: new Map(),       // key -> { node, section, parentKey }
-    focusKey: { discovery: null, provisioning: null, osconfiguration: null, armvalidation: null, validation: null, extensions: null, armdeployment: null, deployment: null, update: null },
+    focusKey: { discovery: null, provisioning: null, osconfiguration: null, armvalidation: null, validation: null, extensions: null, armdeployment: null, deployment: null, update: null, verification: null },
     selectedKey: null,
     currentKey: null,
     lastAutoKey: null,
@@ -211,6 +212,8 @@
     running: '<svg class="si si-running" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="2"/><path class="spin" d="M8 1.8a6.2 6.2 0 0 1 6.2 6.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="8" cy="8" r="2" fill="currentColor"/></svg>',
     skipped: '<svg class="si si-skipped" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m5.8 5.6 2.6 2.4-2.6 2.4m3-4.8 2.6 2.4-2.6 2.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     notstarted: '<svg class="si si-notstarted" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2.4 2.2"/></svg>',
+    warning: '<svg class="si si-warning" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 1.8 15 14H1L8 1.8Z" fill="currentColor"/><path d="M8 6.2v3.6M8 11.6v.4" stroke="var(--surface)" stroke-width="1.6" stroke-linecap="round"/></svg>',
+    vfskip: '<svg class="si si-vfskip" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M4.6 8h6.8" stroke="var(--surface)" stroke-width="2" stroke-linecap="round"/></svg>',
     unknown: '<svg class="si si-unknown" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6.3 6.3a1.8 1.8 0 1 1 2.5 1.6c-.5.3-.8.6-.8 1.2v.3M8 11.4v.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
     caret: '<svg class="caret" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m6 3.5 4.5 4.5L6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     close: '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m4 4 8 8m0-8-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>'
@@ -378,6 +381,8 @@
   var OSC_LINE = /^(?:\S+\s+)?\[osconfig\]\s+(\S+)\s+([A-Za-z]+)(?:\s+\(([A-Za-z]+)\))?/;
   // The ARM run's event lines: "<time> [arm] <node|*> <State> (<step>): ..." (file arm-events).
   var ARM_LINE = /^(?:\S+\s+)?\[arm\]\s+(\S+)\s+([A-Za-z]+)/;
+  // The pre-cluster verification gate's lines: "<time> [verify] <node|*> <Type> <Status> (<checkId>): ..." (file verification-events).
+  var VF_LINE = /^(?:\S+\s+)?\[verify\]\s+(\S+)\s+([A-Za-z]+)/;
   function lineScope(l) {
     if (l.scope) return l.scope;
     if (l.file === 'os-config-events' || /^(?:\S+\s+)?\[osconfig\]\s/.test(str(l.text))) {
@@ -392,6 +397,11 @@
       // The toolkit's ARM run: '*' is the run itself (no machine), a node name is a check of that machine.
       var a = ARM_LINE.exec(str(l.text));
       if (a) { l.scope = { node: a[1] === '*' ? '' : a[1], stage: '' }; return l.scope; }
+    }
+    if (l.file === 'verification-events' || /^(?:\S+\s+)?\[verify\]\s/.test(str(l.text))) {
+      // The verification gate: '*' is the run itself (no machine), a node name is a check of that machine.
+      var vl = VF_LINE.exec(str(l.text));
+      if (vl) { l.scope = { node: vl[1] === '*' ? '' : vl[1], stage: '' }; return l.scope; }
     }
     var m = l.file === 'ztp-events' || /^(?:\S+\s+)?\[ztp\]\s/.test(str(l.text)) ? ZTP_LINE.exec(str(l.text)) : null;
     l.scope = m ? { node: m[1], stage: ztpStageOfState(m[2]) } : { node: '', stage: '' };
@@ -1020,14 +1030,14 @@
   // update). Azure's raw states are turned into plain words here; the raw value goes into a tooltip. A finished
   // deployment is the Deployment mode in its Done state; the machine cards keep each machine's Azure Arc status.
 
-  var MODE_IDS = ['discovery', 'prov', 'osconfig', 'validate', 'deploy', 'update', 'addnode', 'repair'];
+  var MODE_IDS = ['discovery', 'prov', 'osconfig', 'verify', 'validate', 'deploy', 'update', 'addnode', 'repair'];
   var MODE_OF_PHASE = {
     provisioning: 'prov', 'arc-registration': 'prov', validation: 'validate', deployment: 'deploy', update: 'update',
     done: 'deploy', 'post-deployment': 'deploy', 'add-node': 'addnode', repair: 'repair'
   };
-  var MODE_TITLE = { discovery: 'Discovery', osconfig: 'OS configuration', validate: 'Validate', deploy: 'Deployment', update: 'Update', addnode: 'Add node', repair: 'Repair' };
+  var MODE_TITLE = { discovery: 'Discovery', osconfig: 'OS configuration', verify: 'Verification', validate: 'Validate', deploy: 'Deployment', update: 'Update', addnode: 'Add node', repair: 'Repair' };
   // Start-AzlSonar.ps1 -Monitor (the monitor key of the config): the one tile a standalone monitor shows.
-  var MONITOR_TILE = { discovery: 'discovery', provisioning: 'prov', osconfiguration: 'osconfig', validate: 'validate', deployment: 'deploy', update: 'update', addnode: 'addnode', repair: 'repair' };
+  var MONITOR_TILE = { discovery: 'discovery', provisioning: 'prov', osconfiguration: 'osconfig', verification: 'verify', validate: 'validate', deployment: 'deploy', update: 'update', addnode: 'addnode', repair: 'repair' };
   // The tile a standalone monitor was started for, or '' (Auto: every tile of the flow).
   function monitorOf(state) {
     var k = isObj(state) ? str(state.monitor).toLowerCase().replace(/[^a-z]/g, '') : '';
@@ -1066,13 +1076,20 @@
       var provStarted = provisioningTreeOf(state).some(function (n) { return normStatus(n.status) !== 'notstarted'; });
       // Discovery comes first: while it is the only stage with anything to show, it is the one to watch.
       if (disc && disc.configured === true && !provStarted && !(osc && oscHasData(osc))) return 'discovery';
-      if (manualInstall(state)) return 'osconfig';
-      if (osc && (oscHasData(osc) || (osc.configured === true && ztpComplete(state)))) return 'osconfig';
+      if (manualInstall(state)) return vfTakeover(state, 'osconfig');
+      if (osc && (oscHasData(osc) || (osc.configured === true && ztpComplete(state)))) return vfTakeover(state, 'osconfig');
     }
     // The toolkit's ARM run can be ahead of what Azure reports (checks that failed before anything was submitted).
     var armMode = armActiveMode(state);
     if (armMode && MODE_IDS.indexOf(armMode) > MODE_IDS.indexOf(mode) && p !== 'done') return armMode;
     return mode;
+  }
+
+  // The pre-cluster verification gate runs after OS configuration and before Validate: once it has data and OS configuration
+  // is no longer working, it is the mode to watch (Provisioning and Discovery are never taken over, so an old file cannot hide a new run).
+  function vfTakeover(state, mode) {
+    var vf = isObj(state) && isObj(state.verification) ? state.verification : null, osc = oscOf(state);
+    return mode === 'osconfig' && vf && vf.hasData === true && !(osc && osc.status === 'running') ? 'verify' : mode;
   }
 
   // Steps done, the step that runs now (1-based) and its name, over the main steps of a tree.
@@ -1106,6 +1123,7 @@
     addnode: 'Available after the cluster is deployed; Sonar follows the Arc machines and the node log',
     repair: 'Available after the cluster is deployed; Sonar follows the Arc machines and the node log',
     osconfig: 'Starts after ZTP is complete; follows the toolkit’s OS configuration event file (osConfigEventsPath)',
+    verify: 'Starts after OS configuration has converged: the toolkit’s pre-cluster verification gate checks the environment before Validate; Sonar follows its event file (verificationEventsPath)',
     validate: { simplified: 'Starts after OS configuration has converged on every machine', 'oem-image': 'Starts when every machine is registered', '': 'Starts after the machines are ready' },
     deploy: 'Starts after validation passes',
     update: 'Available after the cluster is deployed; starts when Azure reports an update'
@@ -1172,6 +1190,11 @@
       otip = osc && osc.configured === true ? (order > MODE_IDS.indexOf('osconfig') || phase === 'done' ? 'No OS configuration data in this run.' : modeWhen('osconfig', route, manual)) : 'Set osConfigEventsPath to follow the toolkit’s OS configuration run.';
     }
     tile('osconfig', ost, oline, false, otip);
+
+    // Verification: the pre-cluster gate between OS configuration and Validate. Grey with a tip when there is nothing to show.
+    var vft = vfTile(s), vtip = vft.tip;
+    if (vft.status === 'idle' && !vtip) vtip = order > MODE_IDS.indexOf('verify') || phase === 'done' ? 'No verification data in this run.' : modeWhen('verify', route, manual);
+    tile('verify', vft.status, vft.line, false, vtip);
 
     [['validate', s.validation, MODE_IDS.indexOf('validate')], ['deploy', s.deployment, MODE_IDS.indexOf('deploy')]].forEach(function (x) {
       var sec = isObj(x[1]) ? x[1] : null, st = sec ? sectionStatus(sec) : 'notstarted', pr = stepProgress(sec && sec.tree);
@@ -1267,6 +1290,121 @@
     return 'Waiting on Azure';
   }
 
+  // ------------------------------------------------------------------ Verification (pure; also run by tests under Node)
+  //
+  // The pre-cluster verification gate runs after OS configuration and before the ARM Validate and Deploy run. The back end
+  // follows its event file and builds state.verification (Get-AzlSonarVerificationState): the latest run only, the verdict
+  // (pass, fail, running, expired), the counts by status and the checks grouped by category with the failed ones first. The
+  // page shows a verdict banner, the counts and the checks. A Skipped check is shown apart from Not applicable and is called
+  // out as blocking: the gate could not check it, so it cannot pass. Every text is shown as text; the source becomes a link
+  // only when it is an https URL on a known documentation host.
+
+  var VF_STATUS_ORDER = ['Failed', 'Skipped', 'Running', 'Warning', 'Fixed', 'Passed', 'NotApplicable'];
+  var VF_STATUS_KIND = { Failed: 'err', Skipped: 'skip', Running: 'run', Warning: 'warn', Fixed: 'ok', Passed: 'ok', NotApplicable: 'idle' };
+  var VF_STATUS_TEXT = { Failed: 'Failed', Skipped: 'Skipped', Running: 'Running', Warning: 'Warning', Fixed: 'Fixed', Passed: 'Passed', NotApplicable: 'Not applicable' };
+  var VF_VERDICT = { pass: { text: 'Pass', kind: 'ok' }, fail: { text: 'Fail', kind: 'err' }, running: { text: 'Running', kind: 'run' }, expired: { text: 'Expired', kind: 'err' }, notstarted: { text: 'Waiting', kind: 'idle' } };
+  var VF_TREE_STATUS = { Failed: 'error', Skipped: 'skipped', Running: 'running', Warning: 'success', Fixed: 'success', Passed: 'success', NotApplicable: 'notstarted' };
+
+  function vfOf(state) { return isObj(state) && isObj(state.verification) ? state.verification : null; }
+  function vfHasData(vf) { return isObj(vf) && vf.hasData === true; }
+  // pass, fail, running, expired or notstarted.
+  function vfStatus(vf) { var k = isObj(vf) ? str(vf.status).toLowerCase() : ''; return VF_VERDICT[k] ? k : 'notstarted'; }
+  function vfCount(vf, name) { var c = isObj(vf) && isObj(vf.counts) ? vf.counts : {}; return Number(c[name]) || 0; }
+  function vfPlural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+  function vfTreeStatus(status) { return VF_TREE_STATUS[status] || 'unknown'; }
+  // The ICON key of a check: its own for Warning and Skipped, else the key of its tree status.
+  function vfIconKey(status) { return status === 'Warning' ? 'warning' : status === 'Skipped' ? 'vfskip' : vfTreeStatus(status); }
+
+  // The chip of the summary box: Pass, Fail, Running or Expired.
+  function vfChip(vf) { var v = VF_VERDICT[vfStatus(vf)]; return { kind: v.kind, text: v.text }; }
+
+  // One sentence for the summary box.
+  function vfHeadline(vf) {
+    if (!vfHasData(vf)) return '';
+    var st = vfStatus(vf), total = Number(vf.total) || 0, blockers = Number(vf.blockers) || 0, skipped = Number(vf.skippedBlocking) || 0, run = isObj(vf.run) ? vf.run : {};
+    var warn = vfCount(vf, 'Warning'), expires = parseTime(run.expiresUtc);
+    var first = arr(vf.attention).filter(isObj)[0];
+    switch (st) {
+      case 'pass': return 'Verification passed: ' + vfPlural(total, 'check') + (warn ? ', ' + vfPlural(warn, 'warning') : '') + (!isNaN(expires) ? '. Valid until ' + fmtDateTime(expires) : '') + '. Next: Validate';
+      case 'expired': return 'The verification pass expired' + (!isNaN(expires) ? ' at ' + fmtDateTime(expires) : '') + '. Run the gate again before Validate';
+      case 'running': return 'The gate is running: ' + vfPlural(total, 'check') + ' so far' + (vfCount(vf, 'Failed') ? ', ' + vfCount(vf, 'Failed') + ' failed' : '');
+      case 'fail':
+        return 'Verification failed: ' + (blockers ? vfPlural(blockers, 'check') + ' block' + (blockers === 1 ? 's' : '') + ' the cluster deployment' : vfPlural(vfCount(vf, 'Failed'), 'check') + ' failed') +
+          (skipped ? ' (' + skipped + ' skipped: a skipped check blocks the gate)' : '') + (first ? '. First: ' + str(first.title) + (str(first.node) ? ' on ' + str(first.node) : '') : '');
+    }
+    return '';
+  }
+
+  // The tile of the flow: { status, line, tip }.
+  function vfTile(state) {
+    var vf = vfOf(state);
+    if (!vf || vf.configured !== true) return { status: 'idle', line: '', tip: 'Set verificationEventsPath to follow the toolkit’s pre-cluster verification gate.' };
+    if (!vfHasData(vf)) return { status: 'idle', line: '', tip: '' };
+    var st = vfStatus(vf), total = Number(vf.total) || 0, blockers = Number(vf.blockers) || 0, skipped = Number(vf.skippedBlocking) || 0, tip = vfHeadline(vf);
+    if (st === 'pass') return { status: 'ok', line: 'Pass · ' + vfPlural(total, 'check'), tip: tip };
+    if (st === 'expired') return { status: 'err', line: 'Pass expired', tip: tip };
+    if (st === 'running') return { status: 'run', line: 'Running · ' + total + ' so far', tip: tip };
+    if (st === 'fail') return { status: 'err', line: 'Fail · ' + (blockers ? blockers + ' blocking' : vfCount(vf, 'Failed') + ' failed') + (skipped ? ' (' + skipped + ' skipped)' : ''), tip: tip };
+    return { status: 'idle', line: '', tip: tip };
+  }
+
+  // Facts under the headline: the counts by status (failed first), the run and what to do next. [{ k, v, warn }].
+  function vfFacts(vf) {
+    var out = [];
+    if (!vfHasData(vf)) return out;
+    var st = vfStatus(vf), run = isObj(vf.run) ? vf.run : {}, skipped = Number(vf.skippedBlocking) || 0;
+    out.push({ k: 'Verdict', v: VF_VERDICT[st].text + (str(vf.verdict) && str(vf.verdict) !== VF_VERDICT[st].text ? ' (the gate wrote ' + str(vf.verdict) + ')' : ''), warn: st === 'fail' || st === 'expired' });
+    VF_STATUS_ORDER.forEach(function (name) {
+      var n = vfCount(vf, name);
+      if (!n) return;
+      out.push({ k: VF_STATUS_TEXT[name], v: String(n) + (name === 'Skipped' ? ' (each one blocks the gate)' : ''), warn: name === 'Failed' || name === 'Skipped' });
+    });
+    if (skipped) out.push({ k: 'Blocking', v: vfPlural(Number(vf.blockers) || 0, 'check') + ', ' + skipped + ' of them skipped', warn: true });
+    if (isObj(vf.reportedCounts) && vf.countsMismatch === true) out.push({ k: 'Gate counts', v: 'differ from the checks Sonar read', warn: true });
+    if (str(run.runId)) out.push({ k: 'Run', v: str(run.runId) });
+    var expires = parseTime(run.expiresUtc);
+    if (!isNaN(expires)) out.push({ k: st === 'expired' ? 'Expired' : 'Valid until', v: fmtDateTime(expires), warn: st === 'expired' });
+    if (st === 'fail') out.push({ k: 'Next', v: 'Fix the blocking checks below (each shows its remedy) and run the gate again' });
+    else if (st === 'expired') out.push({ k: 'Next', v: 'Run the gate again; a pass is valid for a limited time' });
+    return out;
+  }
+
+  // The verdict banner(s): [{ node, title, kind, rows[{k,v}], until }] (the shape of the guarded network change panels).
+  function vfPanels(vf) {
+    if (!vfHasData(vf)) return [];
+    var st = vfStatus(vf), v = VF_VERDICT[st], rows = [];
+    var attention = arr(vf.attention).filter(isObj);
+    if (st === 'fail' || st === 'expired' || st === 'running') {
+      attention.slice(0, 6).forEach(function (c) {
+        rows.push({ k: c.status === 'Skipped' ? 'Skipped, blocks' : (VF_STATUS_TEXT[c.status] || str(c.status)), v: str(c.title) + (str(c.node) ? ' (' + str(c.node) + ')' : '') + (str(c.message) ? ': ' + firstLine(c.message, 160) : '') });
+      });
+      if (attention.length > 6) rows.push({ k: 'More', v: (attention.length - 6) + ' more blocking checks below' });
+    }
+    arr(vf.warnings).slice(0, 3).forEach(function (w) { rows.push({ k: 'Note', v: firstLine(w, 220) }); });
+    if (st === 'pass' && !rows.length) rows.push({ k: 'Result', v: 'Nothing blocks the cluster deployment' });
+    return [{ node: '', title: 'Verdict: ' + v.text, kind: v.kind, rows: rows, until: '' }];
+  }
+
+  // The checks as a tree: one item per category, one child per check (failed first, as the back end sorted them).
+  function vfTreeOf(state) {
+    var vf = vfOf(state);
+    if (!vfHasData(vf)) return [];
+    return arr(vf.categories).filter(isObj).map(function (cat) {
+      var checks = arr(cat.checks).filter(isObj), counts = isObj(cat.counts) ? cat.counts : {};
+      var line = VF_STATUS_ORDER.filter(function (k) { return Number(counts[k]) > 0; }).map(function (k) { return counts[k] + ' ' + VF_STATUS_TEXT[k].toLowerCase(); }).join(', ');
+      return {
+        id: 'cat:' + str(cat.id), name: str(cat.name) || str(cat.id), description: line, status: vfTreeStatus(str(cat.status)), start: null, end: null, errors: [],
+        vf: { kind: 'category', status: str(cat.status), blocks: cat.blocks === true, line: line },
+        children: checks.map(function (c) {
+          return {
+            id: 'check:' + str(c.id) + '|' + str(c.node), name: str(c.title) || str(c.id), description: '', status: vfTreeStatus(str(c.status)), start: null, end: null, errors: [], children: [],
+            vf: { kind: 'check', id: str(c.id), status: str(c.status), node: str(c.node), message: str(c.message), remedy: str(c.remedy), source: str(c.source), sourceUrl: str(c.sourceUrl), blocking: c.blocking === true, blocks: c.blocks === true }
+          };
+        })
+      };
+    });
+  }
+
   // The machines Sonar knows: the config's nodes merged with the state's nodes (Arc status, Arc machine name).
   function machineList(state, config) {
     var byName = new Map();
@@ -1350,6 +1488,19 @@
       return out;
     }
 
+    if (me.id === 'verify') {
+      var vf = vfOf(s) || {}, vrun = isObj(vf.run) ? vf.run : {};
+      var vst = parseTime(vrun.started), vend = parseTime(vrun.completed);
+      if (!isNaN(vst)) out.startedAt = vst;
+      if (!isNaN(vend) && me.status !== 'run') out.endedAt = vend;
+      if (vfHasData(vf)) out.chip = vfChip(vf);
+      out.headline = vfHasData(vf) ? vfHeadline(vf) : me.tip;
+      out.facts = vfFacts(vf);
+      out.panels = vfPanels(vf);
+      out.cards = [];
+      return out;
+    }
+
     var sec = me.id === 'validate' ? s.validation : me.id === 'deploy' ? s.deployment : me.id === 'update' ? s.update : null;
     var secTree = isObj(sec) ? arr(sec.tree) : [];
     var pr = stepProgress(secTree), word = { validate: 'Validation', deploy: 'Deployment', update: 'Update', addnode: 'Add node', repair: 'Repair' }[me.id];
@@ -1417,7 +1568,7 @@
   // the step's time window, or, for a ZTP stage, to the ZTP event lines tagged with that stage. A machine row selects
   // the machine, like its card.
 
-  var MODE_SECTIONS = { discovery: ['discovery'], prov: ['provisioning'], osconfig: ['osconfiguration'], validate: ['armvalidation', 'validation', 'extensions'], deploy: ['armdeployment', 'deployment'], update: ['update'], addnode: [], repair: [] };
+  var MODE_SECTIONS = { discovery: ['discovery'], prov: ['provisioning'], osconfig: ['osconfiguration'], verify: ['verification'], validate: ['armvalidation', 'validation', 'extensions'], deploy: ['armdeployment', 'deployment'], update: ['update'], addnode: [], repair: [] };
 
   // chain: the items from the top of the section down to the clicked step ({ id, name, ... }).
   // Returns { side: 'machine' | 'azure' | 'node', node, stage, window }.
@@ -1438,6 +1589,8 @@
       var ostep = isObj(list[1].osc) ? str(list[1].osc.step) : '';
       return { side: 'node', node: str(top.name), stage: ostep ? 'osc.' + ostep.toLowerCase() : '', window: false };
     }
+    // The checks of the pre-cluster verification gate: reported by the gate, not by a node (no log window) and not read from Azure.
+    if (section === 'verification') return { side: 'verify', node: '', stage: '', window: false };
     // The toolkit's own checks and steps: reported by the ARM run, not by a node (no log window) and not read from Azure.
     if (section === 'armvalidation' || section === 'armdeployment') return { side: 'arm', node: '', stage: '', window: false };
     if (section === 'discovery') {
@@ -1479,6 +1632,7 @@
     if (modeId === 'prov' && status === 'na') return 'Not used: the OS was installed by hand. There is nothing to provision; OS configuration starts when the machines answer.';
     if (modeId === 'prov' && !hasMachines) return 'No machines reported yet.';
     if (modeId === 'osconfig' && status === 'idle') return 'The steps appear here when the OS configuration run starts. Run Invoke-AzureLocalOsConfiguration.ps1 from the toolkit and point osConfigEventsPath at its os-configuration-events.jsonl.' + (when ? ' ' + when + '.' : '');
+    if (modeId === 'verify') return status === 'idle' ? 'The checks appear here when the pre-cluster verification gate runs. Run the gate from the toolkit and point verificationEventsPath at its precluster-verification-events.jsonl.' + (when ? ' ' + when + '.' : '') : 'No checks reported yet.';
     if (status === 'idle') return 'The steps appear here when this mode begins.' + (when ? ' ' + when + '.' : '');
     return 'No steps reported yet.';
   }
@@ -1594,6 +1748,8 @@
     oscn.forEach(function (n) {
       arr(n.warnings).slice(0, 2).forEach(function (w) { out.push({ kind: 'osconfig', text: 'OS configuration, ' + str(n.name) + ': ' + firstLine(w, 220) }); });
     });
+    var vfA = vfOf(s);
+    if (vfHasData(vfA)) arr(vfA.warnings).slice(0, 2).forEach(function (w) { out.push({ kind: 'verify', text: 'Verification: ' + firstLine(w, 220) }); });
     var armA = armOf(s);
     if (armHasData(armA)) {
       arr(armA.hints).filter(isObj).forEach(function (h) {
@@ -2291,7 +2447,8 @@
       oscCard: oscCard, oscHeadline: oscHeadline, oscFacts: oscFacts, oscCountdown: oscCountdown, fmtCountdown: fmtCountdown,
       oscDemoState: oscDemoState, oscDemoLines: oscDemoLines,
       armOf: armOf, armHasData: armHasData, armPhaseOf: armPhaseOf, armPhaseHasData: armPhaseHasData, armTreeOf: armTreeOf, armActiveMode: armActiveMode,
-      armTile: armTile, armHeadline: armHeadline, armFacts: armFacts, armOverall: armOverall, armDemoState: armDemoState, armDemoLines: armDemoLines
+      armTile: armTile, armHeadline: armHeadline, armFacts: armFacts, armOverall: armOverall, armDemoState: armDemoState, armDemoLines: armDemoLines,
+      vfOf: vfOf, vfHasData: vfHasData, vfStatus: vfStatus, vfChip: vfChip, vfHeadline: vfHeadline, vfTile: vfTile, vfFacts: vfFacts, vfPanels: vfPanels, vfTreeOf: vfTreeOf, vfIconKey: vfIconKey, VF_STATUS_ORDER: VF_STATUS_ORDER, MODE_IDS: MODE_IDS
     };
     return;
   }
@@ -2820,6 +2977,7 @@
     app.oscTree = osConfigTreeOf(s);
     app.discTree = discoveryTreeOf(s);
     app.extTree = extensionsTreeOf(s);
+    app.vfTree = vfTreeOf(s);
     var collapse = provisioningCollapse(s.activePhase || (normPhase(s.phase) === 'failed' ? '' : s.phase), app.provAutoCollapsed);
     if (collapse === 'collapse') { app.sectionCollapsed.provisioning = true; app.provAutoCollapsed = true; }
     else if (collapse === 'expand') { app.sectionCollapsed.provisioning = false; app.provAutoCollapsed = false; }
@@ -2827,6 +2985,7 @@
     indexSection('discovery');
     indexSection('provisioning');
     indexSection('osconfiguration');
+    indexSection('verification');
     indexSection('armvalidation');
     indexSection('validation');
     indexSection('extensions');
@@ -2883,7 +3042,7 @@
         walk(n.children, k);
       });
     }
-    walk(armTree ? armTree : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'discovery' ? app.discTree : section === 'extensions' ? app.extTree : (isObj(sec) ? sec.tree : null), section);
+    walk(armTree ? armTree : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'discovery' ? app.discTree : section === 'verification' ? app.vfTree : section === 'extensions' ? app.extTree : (isObj(sec) ? sec.tree : null), section);
   }
 
   function findCurrentKey() {
@@ -2921,6 +3080,7 @@
       if (!best && isObj(s[sec])) walk(s[sec].tree, 0);
     });
     if (!best && activeModeId(s) === 'osconfig') walk(app.oscTree, 0);
+    if (!best && activeModeId(s) === 'verify') walk(app.vfTree, 0);
     if (!best && (s.activePhase === 'provisioning' || s.activePhase === 'arc-registration')) walk(app.provTree, 0);
     if (best) return best.__key;
     // 3. by name
@@ -2955,6 +3115,7 @@
   function isExpanded(n) {
     var k = n.__key;
     if (app.expanded.has(k)) return app.expanded.get(k);
+    if (isObj(n.vf)) return n.vf.kind === 'category' && ['Failed', 'Skipped', 'Running', 'Warning'].indexOf(str(n.vf.status)) >= 0;
     return subtreeHas(n, ['running', 'error']);
   }
 
@@ -2996,7 +3157,7 @@
     wanted.forEach(function (section) {
       var armWhich = section === 'armvalidation' ? 'validation' : section === 'armdeployment' ? 'deployment' : '';
       var sec = armWhich ? (armPhaseOf(s, armWhich) || {}) : section === 'provisioning' ? (isObj(s.provisioning) ? s.provisioning : {}) : section === 'osconfiguration' ? (isObj(s.osConfiguration) ? s.osConfiguration : {}) : (isObj(s[section]) ? s[section] : {});
-      var tree = armWhich ? armTreeOf(s, armWhich) : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'discovery' ? app.discTree : section === 'extensions' ? app.extTree : arr(sec.tree);
+      var tree = armWhich ? armTreeOf(s, armWhich) : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'discovery' ? app.discTree : section === 'verification' ? app.vfTree : section === 'extensions' ? app.extTree : arr(sec.tree);
       var only = section === 'provisioning' || section === 'osconfiguration' || section === 'discovery' ? str(app.filter.node).toLowerCase() : '';
       if (only) tree = tree.filter(function (n) { return str(n.name).toLowerCase() === only; });
       var wrap = host.querySelector('.tree-section[data-section="' + section + '"]');
@@ -3046,7 +3207,7 @@
   function buildSection(section, tree) {
     var wrap = el('div', { class: 'tree-section', 'data-section': section });
     var title = section === 'provisioning' || section === 'osconfiguration' || section === 'discovery' ? 'Machines' : section === 'extensions' ? 'Extensions (installed during Validate)' :
-      section === 'armvalidation' ? 'Toolkit run: checks and validation results' : section === 'armdeployment' ? 'Toolkit run: checks and deployment progress' :
+      section === 'verification' ? 'Pre-cluster verification: checks by category' : section === 'armvalidation' ? 'Toolkit run: checks and validation results' : section === 'armdeployment' ? 'Toolkit run: checks and deployment progress' :
       section === 'validation' ? 'Validation' : section === 'update' ? 'Update (unverified against a live run)' : 'Deployment';
     if (section === 'extensions' || section === 'armvalidation' || section === 'armdeployment') wrap.appendChild(el('h3', { class: 'sub-h', text: title }));
     // When the toolkit's run is shown above, say that the next list is what Azure itself reports.
@@ -3087,6 +3248,7 @@
     if (hasKids) li.setAttribute('aria-expanded', String(open));
 
     var row = el('div', { class: 'row' + (rule.side === 'machine' ? ' row-machine' : ''), 'data-status': st, 'data-current': String(app.currentKey === k) });
+    if (isObj(n.vf)) row.setAttribute('data-vf', str(n.vf.status));
     if (hasKids) {
       var cb = el('button', { type: 'button', class: 'caret-btn', tabindex: '-1', 'aria-hidden': 'true' });
       cb.innerHTML = ICON.caret;
@@ -3096,12 +3258,13 @@
       row.appendChild(el('span', { class: 'caret-spacer', 'aria-hidden': 'true' }));
     }
     var ic = el('span', { 'aria-hidden': 'true', title: STATUS_LABEL[st] || st });
-    ic.innerHTML = icon(st);
+    var iconKey = isObj(n.vf) ? vfIconKey(str(n.vf.status)) : st;
+    ic.innerHTML = icon(iconKey);
     row.appendChild(ic);
 
     var nameEl = el('span', { class: 'step-name' });
     if (isObj(n.arm) && n.arm.kind === 'step') nameEl.appendChild(el('span', { class: 'idx', text: str(n.arm.step) }));
-    else if (!isObj(n.arm) && rule.side !== 'machine' && section !== 'provisioning' && section !== 'osconfiguration' && section !== 'discovery' && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
+    else if (!isObj(n.arm) && !isObj(n.vf) && rule.side !== 'machine' && section !== 'provisioning' && section !== 'osconfiguration' && section !== 'discovery' && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
     nameEl.appendChild(el('span', { class: 'sn', text: name }));
     if (rule.side === 'azure') nameEl.appendChild(el('span', { class: 'az', title: 'This step runs in Azure: Sonar reads its status from Azure, there are no node log lines for it.', text: 'Azure' }));
     if (isObj(n.osc) && n.osc.arc === true) nameEl.appendChild(el('span', { class: 'az', title: 'This step runs as an Azure Arc Run Command: Azure starts it on the node and Sonar can read the run command from Azure.', text: 'Azure' }));
@@ -3138,6 +3301,7 @@
     if (isObj(n.prov)) li.appendChild(buildProvMeta(n, st));
     if (isObj(n.osc) && n.osc.machine === true) li.appendChild(buildOscMeta(n));
     if (isObj(n.arm)) li.appendChild(buildArmMeta(n));
+    if (isObj(n.vf)) li.appendChild(buildVfMeta(n));
     if (isObj(n.disc) && n.disc.machine === true) li.appendChild(buildDiscMeta(n));
 
     if (selected && rule.side === 'azure') li.appendChild(buildAzureDetail(n, st, name));
@@ -3171,6 +3335,28 @@
     if (!parts.length) return document.createDocumentFragment();
     var meta = el('div', { class: 'prov-meta arm-meta' });
     parts.forEach(function (p) { meta.appendChild(p); });
+    return meta;
+  }
+
+  // Under a check of the verification gate: its result, whether it blocks the gate, the machine, what was found, the remedy and
+  // the source (a link only for an https URL on a known documentation host). All of it is text from the feed, rendered as text.
+  function buildVfMeta(n) {
+    var v = n.vf;
+    if (v.kind !== 'check') return document.createDocumentFragment();
+    var meta = el('div', { class: 'prov-meta vf-meta' }), kind = VF_STATUS_KIND[v.status] || 'idle';
+    var skipped = v.status === 'Skipped';
+    meta.appendChild(chipEl(kind, skipped ? 'Skipped: blocks the gate' : (VF_STATUS_TEXT[v.status] || v.status || 'Unknown'),
+      skipped ? 'The gate could not check this, so it cannot pass: a skipped check blocks the cluster deployment until it is checked.' : 'The result of this check.'));
+    if (v.blocks && !skipped) meta.appendChild(chipEl('err', 'Blocks the gate', 'The cluster deployment does not start until this check passes.'));
+    if (v.node) meta.appendChild(el('span', { class: 'arm-node', title: 'The machine this check ran on', text: v.node }));
+    if (v.message) meta.appendChild(el('span', { class: 'prov-msg vf-msg', text: v.message }));
+    if (v.remedy && ['Passed', 'Fixed', 'NotApplicable'].indexOf(v.status) < 0) meta.appendChild(el('span', { class: 'prov-msg vf-remedy', text: 'Fix: ' + v.remedy }));
+    if (v.source) {
+      var href = safeLink(v.sourceUrl || v.source), src = el('span', { class: 'prov-msg vf-source' }, ['Source: ']);
+      if (href) src.appendChild(el('a', { href: href, target: '_blank', rel: 'noopener noreferrer', text: href.replace(/^https:\/\//i, '').replace(/\/$/, '') }));
+      else src.appendChild(document.createTextNode(v.source));
+      meta.appendChild(src);
+    }
     return meta;
   }
 
@@ -3365,6 +3551,7 @@
     var rule = stepRuleOf(k), name = str(info.node.name);
     if (rule.side === 'machine') { selectNode(rule.node); return; }
     if (rule.side === 'file') { announce(name + ' is read from the discovery files; there is no node log for it.'); return; }
+    if (rule.side === 'verify') { if (arr(info.node.children).length) toggleKey(k); else announce(name + ' is reported by the verification gate; its details are shown under it. The logs keep their filter.'); return; }
     if (app.selectedKey === k) { clearStepFilter(); return; }
     app.selectedKey = k;
     app.focusKey[info.section] = k;
@@ -3417,7 +3604,7 @@
 
   // ------------------------------------------------------------------ mode bar
 
-  var MODE_OF_SECTION = { discovery: 'discovery', provisioning: 'prov', osconfiguration: 'osconfig', armvalidation: 'validate', validation: 'validate', extensions: 'validate', armdeployment: 'deploy', deployment: 'deploy', update: 'update' };
+  var MODE_OF_SECTION = { discovery: 'discovery', provisioning: 'prov', osconfiguration: 'osconfig', verification: 'verify', armvalidation: 'validate', validation: 'validate', extensions: 'validate', armdeployment: 'deploy', deployment: 'deploy', update: 'update' };
 
   // The mode shown: the one the user clicked while the run is still in the same mode, else the active one.
   function currentModeId() {
@@ -3587,7 +3774,7 @@
   // The phase that matches a mode (the tab the window opens on), and the phase that is happening now.
   function phaseOfMode(modeId) {
     var route = provRouteOf(app.state);
-    return { discovery: 'provisioning', prov: route === 'oem-image' ? 'arc-registration' : 'provisioning', osconfig: 'provisioning', validate: 'validation', deploy: 'deployment', update: 'update', addnode: 'add-node', repair: 'repair' }[modeId] || 'provisioning';
+    return { discovery: 'provisioning', prov: route === 'oem-image' ? 'arc-registration' : 'provisioning', osconfig: 'provisioning', verify: 'validation', validate: 'validation', deploy: 'deployment', update: 'update', addnode: 'add-node', repair: 'repair' }[modeId] || 'provisioning';
   }
   function currentGuidancePhase() {
     var s = app.state, act = s ? str(s.activePhase).toLowerCase() : '';
@@ -4008,6 +4195,13 @@
         [srcGroup([ae.lastEventAt ? ageEl('last ', ae.lastEventAt) : (ae.events ? null : 'none yet'), ae.fileFound ? 'file ' + ae.file : 'file ' + ae.file + ' not found yet (no toolkit run has started)'])]);
     } else {
       row(g4, 'ARM run events', replay ? '' : 'no event file set', [srcGroup([replay ? '' : 'Validate and Deployment show only what Azure reports'])]);
+    }
+    var ve = isObj(s.verificationEvents) ? s.verificationEvents : {};
+    if (ve.configured) {
+      row(g4, 'Verification events', ve.events + ' event' + (ve.events === 1 ? '' : 's'),
+        [srcGroup([ve.lastEventAt ? ageEl('last ', ve.lastEventAt) : (ve.events ? null : 'none yet'), ve.fileFound ? 'file ' + ve.file : 'file ' + ve.file + ' not found yet (the gate has not run)'])]);
+    } else {
+      row(g4, 'Verification events', replay ? '' : 'no event file set', [srcGroup([replay ? '' : 'the Verification mode shows nothing'])]);
     }
     var nl = isObj(s.nodeLogs) ? s.nodeLogs : {};
     // A replay shows the recorded tailer, not the idle one of the replay server.

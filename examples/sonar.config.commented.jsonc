@@ -59,9 +59,13 @@
   // (default <temp>/azl-arm-<cluster>). Relative paths are relative to this file. Without it the Validate and Deployment modes show
   // only what Azure reports and there are no [arm] log lines.
   "armEventsPath": "D:\\Data\\azl-arm\\example\\arm-deployment-events.jsonl",
+  // Optional. The event file (or the folder that holds it) of the toolkit's pre-cluster verification gate: precluster-verification-events.jsonl in its
+  // report directory (default <environment data>/arm-report/verification/live). Relative paths are relative to this file. Without it the Verification
+  // mode shows nothing and there are no [verify] log lines.
+  "verificationEventsPath": "D:\\Data\\azl-ztp\\example\\evidence\\arm-report\\verification\\live\\precluster-verification-events.jsonl",
   // Optional. The folder the toolkit's Invoke-HardwareDiscovery.ps1 wrote with -OutputPath (<ServiceTag>.json per node and discovery-summary.json),
   // or one of those files. The Discovery stage (before ZTP) shows what it found. Relative paths are relative to this file.
-  // Optional. Which stage to watch: Auto (default, the whole flow) or one of Discovery, Provisioning, OsConfiguration, Validate,
+  // Optional. Which stage to watch: Auto (default, the whole flow) or one of Discovery, Provisioning, OsConfiguration, Verification, Validate,
   // Deployment, Update, AddNode, Repair. A single monitor shows only its tile and reads only what it needs. -Monitor overrides it.
   "monitor": "Auto",
   "discoveryPath": "D:\\Data\\azl-ztp\\example\\evidence\\discovery",

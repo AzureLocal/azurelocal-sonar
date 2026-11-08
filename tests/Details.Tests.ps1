@@ -79,11 +79,12 @@ Describe 'New-AzlSonarDetailFact' {
         ConvertTo-SonarConfigJson $json | Set-Content -LiteralPath $path
         $bare = Read-AzlSonarConfig -Path $path
         $f = InModuleScope AzlSonar -Parameters @{ C = $bare } { param($C) New-AzlSonarDetailFact -Config $C }
-        @($f.notSet).setting | Should -Be @('location', 'ztpEvents', 'osConfigEvents', 'armEvents', 'discovery')
+        @($f.notSet).setting | Should -Be @('location', 'ztpEvents', 'osConfigEvents', 'armEvents', 'verificationEvents', 'discovery')
         (@($f.notSet) | Where-Object setting -eq 'location').key | Should -Be 'location'
         (@($f.notSet) | Where-Object setting -eq 'ztpEvents').key | Should -Be 'ztpEvents.path'
         (@($f.notSet) | Where-Object setting -eq 'osConfigEvents').key | Should -Be 'osConfigEventsPath'
         (@($f.notSet) | Where-Object setting -eq 'armEvents').key | Should -Be 'armEventsPath'
+        (@($f.notSet) | Where-Object setting -eq 'verificationEvents').key | Should -Be 'verificationEventsPath'
 
         $infra = Read-AzlSonarConfig -InfrastructureFile (Join-Path $script:SonarRepoRoot 'tests/fixtures/infrastructure.3node.yml') 3>$null
         $g = InModuleScope AzlSonar -Parameters @{ C = $infra } { param($C) New-AzlSonarDetailFact -Config $C }

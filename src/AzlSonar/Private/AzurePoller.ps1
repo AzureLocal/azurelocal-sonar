@@ -1113,7 +1113,11 @@ function Get-AzlSonarInitialState {
         [object]$Config,
 
         [AllowNull()]
-        [System.Collections.IDictionary]$DiscoveryCache
+        [System.Collections.IDictionary]$DiscoveryCache,
+
+        # Shared.VerificationEvents (Add-AzlSonarVerificationEvent): the pre-cluster verification gate's latest run.
+        [AllowNull()]
+        [System.Collections.IDictionary]$VerificationEvents
     )
 
     $nodes = foreach ($node in $Config.nodes) {
@@ -1136,6 +1140,7 @@ function Get-AzlSonarInitialState {
         discovery         = Get-AzlSonarDiscoveryState -Config $Config -Cache $DiscoveryCache
         osConfiguration   = Get-AzlSonarOsConfigurationState -Store $null -Config $Config -ExpectedRoute $(if ($route) { $route } else { '' })
         arm               = Get-AzlSonarArmState -Store $null -Config $Config
+        verification      = Get-AzlSonarVerificationState -Store $VerificationEvents -Config $Config
         extensions        = [ordered]@{ shown = $false; status = 'notstarted'; nodes = @() }
         validation        = [ordered]@{ status = 'notstarted'; tree = @(); counts = $emptyCounts }
         deployment        = [ordered]@{ status = 'notstarted'; tree = @(); counts = (Measure-AzlSonarStepTree -Tree @()) }
@@ -1219,6 +1224,9 @@ function Get-AzlSonarDeploymentState {
         # ARM Validate and Deploy events (Shared.ArmEvents, Add-AzlSonarArmEvent). Used when the config follows an ARM event file.
         [AllowNull()]
         [System.Collections.IDictionary]$ArmEvents,
+        # Pre-cluster verification gate events (Shared.VerificationEvents, Add-AzlSonarVerificationEvent). Used when the config follows the gate's event file.
+        [AllowNull()]
+        [System.Collections.IDictionary]$VerificationEvents,
         # Shared.DiscoveryCache: the hardware discovery files already parsed (Get-AzlSonarDiscoveryState).
         [AllowNull()]
         [System.Collections.IDictionary]$DiscoveryCache,
@@ -1328,6 +1336,7 @@ function Get-AzlSonarDeploymentState {
     } else { @{} }
     $osConfiguration = Get-AzlSonarOsConfigurationState -Store $OsConfigEvents -Config $Config -ExpectedRoute $route -ZtpNode $ztpNodeNames -RunCommand $runCommands -LogAccount $LogAccount -LocalUserName $LocalUserName
     $arm = Get-AzlSonarArmState -Store $ArmEvents -Config $Config -Now $Now
+    $verification = Get-AzlSonarVerificationState -Store $VerificationEvents -Config $Config -Now $Now
     $nextStep = if ($ztpComplete) { [ordered]@{ name = 'OS configuration'; guide = $script:AzlSonarOsConfigurationGuide } } else { $null }
     $readyForValidate = $route -eq 'oem-image' -and $provisioningStatus -eq 'success' -and -not $clusterStarted
 
@@ -1430,6 +1439,7 @@ function Get-AzlSonarDeploymentState {
         discovery         = Get-AzlSonarDiscoveryState -Config $Config -Cache $DiscoveryCache
         osConfiguration   = $osConfiguration
         arm               = $arm
+        verification      = $verification
         extensions        = $extensionsSection
         validation        = [ordered]@{ status = $validationStatus; tree = $validationTree; counts = (Measure-AzlSonarStepTree -Tree $validationTree) }
         deployment        = [ordered]@{ status = $deploymentStatus; tree = $deploymentTree; counts = (Measure-AzlSonarStepTree -Tree $deploymentTree) }
@@ -1511,12 +1521,13 @@ function Invoke-AzlSonarPollerLoop {
             $ztpStages = if ($Shared.Contains('ZtpStages')) { $Shared['ZtpStages'] } else { $null }
             $osEvents = if ($Shared.Contains('OsConfigEvents')) { $Shared['OsConfigEvents'] } else { $null }
             $armEvents = if ($Shared.Contains('ArmEvents')) { $Shared['ArmEvents'] } else { $null }
+            $verificationEvents = if ($Shared.Contains('VerificationEvents')) { $Shared['VerificationEvents'] } else { $null }
             $logAccount = if ($Shared.Contains('LogAccount')) { $Shared['LogAccount'] } else { $null }
             $localName = if ($Shared.Contains('LocalUserName')) { [string]$Shared['LocalUserName'] } else { '' }
             $discoveryCache = if ($Shared.Contains('DiscoveryCache')) { $Shared['DiscoveryCache'] } else { $null }
             # The Discovery monitor reads the discovery files only: no Azure call, no sign-in, no node.
-            $state = if (-not (Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))).azure) { Get-AzlSonarInitialState -Config $Config -DiscoveryCache $discoveryCache } else {
-            Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -ArmEvents $armEvents -DiscoveryCache $discoveryCache -LogAccount $logAccount -LocalUserName $localName }
+            $state = if (-not (Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))).azure) { Get-AzlSonarInitialState -Config $Config -DiscoveryCache $discoveryCache -VerificationEvents $verificationEvents } else {
+            Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -ArmEvents $armEvents -VerificationEvents $verificationEvents -DiscoveryCache $discoveryCache -LogAccount $logAccount -LocalUserName $localName }
             Publish-AzlSonarState -Shared $Shared -State $state
         }
         catch {

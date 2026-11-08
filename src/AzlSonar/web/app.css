@@ -807,3 +807,16 @@ body.modal-open { overflow: hidden; }
 .countdown { font-variant-numeric: tabular-nums; font-weight: 650; color: var(--warn); }
 .osc-meta .osc-ver { color: var(--text-2); }
 .osc-meta .osc-warn { color: var(--warn); }
+
+/* ---------- Verification (the pre-cluster verification gate) ---------- */
+
+/* Skipped is its own colour, apart from Not applicable (grey): a skipped check blocks the gate. */
+.chip-skip { background: var(--warn-soft); color: var(--warn); box-shadow: inset 0 0 0 1.5px var(--warn); }
+.si-warning, .si-vfskip { color: var(--warn); }
+.row[data-vf="Skipped"] .step-name .sn { color: var(--warn); font-weight: 700; }
+.row[data-vf="Failed"] .step-name .sn { color: var(--err); font-weight: 600; }
+.row[data-vf="NotApplicable"] .step-name .sn { color: var(--muted); }
+.vf-meta .vf-msg { flex-basis: 100%; }
+.vf-meta .vf-remedy { color: var(--text); font-weight: 600; }
+.vf-meta .vf-source { color: var(--muted); }
+.vf-meta .vf-source a { color: var(--accent); overflow-wrap: anywhere; }

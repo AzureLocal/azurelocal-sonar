@@ -22,13 +22,14 @@ The Validate, Deployment, Update, Add node and Repair modes start with a **clust
 
 ## Run one stage on its own (-Monitor)
 
-By default Sonar follows the whole flow (`-Monitor Auto`): Discovery, Provisioning, OS configuration, Validate, Deployment and Update. To watch one stage, name it. Only that tile and section show (the others are hidden, not greyed), only the sources that stage needs are read, **Log access** lists only its phases, and the page title names it.
+By default Sonar follows the whole flow (`-Monitor Auto`): Discovery, Provisioning, OS configuration, Verification, Validate, Deployment and Update. To watch one stage, name it. Only that tile and section show (the others are hidden, not greyed), only the sources that stage needs are read, **Log access** lists only its phases, and the page title names it.
 
 | Launch line | Shows | Reads |
 | --- | --- | --- |
 | `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor Discovery` | Discovery | The discovery files only. No Azure sign-in. |
 | `... -Monitor Provisioning` | Provisioning (ZTP) or (OS image) | Azure, the ZTP event file, the OEM image probes. |
 | `... -Monitor OsConfiguration` | OS configuration | The OS configuration event file and, for Arc Run Commands, Azure. No node logs. |
+| `... -Monitor Verification` | Verification | The pre-cluster verification gate's event file only. No Azure sign-in, no node. See [Verification](./verification.md). |
 | `... -Monitor Validate` | Validate | The validation resources in Azure and the seed node's log. |
 | `... -Monitor Deployment` | Deployment | The deployment resources in Azure and the seed node's log. |
 | `... -Monitor Update` | Update | The update resources in Azure and the seed node's log. |

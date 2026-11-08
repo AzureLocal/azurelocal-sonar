@@ -10,7 +10,7 @@ Pick what you want to do. Each purpose has its own section in [Running Sonar](./
 | Follow a deployment: step tree, live logs from the seed node | [Watch a deployment](./run.md#watch-a-deployment) |
 | Understand one ZTP stage: Boot, Bootstrap, Vouchers and the claim, Install OS, Device, Network, Restore, Handoff | [Running Sonar, stage by stage](./stages.md) |
 | Know which account and folders read the logs in each phase, and how Sonar reaches the node | [Log access](./log-access.md) |
-| Follow an update, an add node or a repair, or look at a deployed cluster | [Follow an update](./run.md#follow-an-update), [Add node or repair](./run.md#follow-add-node-or-repair), [a deployed cluster](./run.md#look-at-a-deployed-cluster), [one stage on its own](./run.md#run-one-stage-on-its-own-monitor) |
+| Follow an update, an add node or a repair, or look at a deployed cluster | [Follow an update](./run.md#follow-an-update), [Add node or repair](./run.md#follow-add-node-or-repair), [a deployed cluster](./run.md#look-at-a-deployed-cluster), [one stage on its own](./run.md#run-one-stage-on-its-own--monitor) |
 | Learn the page with no deployment (demo data or a replay) | [Demo and replay](./run.md#learn-the-page-without-a-deployment-demo-and-replay) |
 | Look at an existing cluster without touching it, and keep a record | [Read-only audit and recording](./run.md#read-only-audit-and-recording-of-an-existing-cluster) |
 | Run it from a pipeline or an unattended session | [Pipeline or unattended](./run.md#run-from-a-pipeline-or-an-unattended-session) |

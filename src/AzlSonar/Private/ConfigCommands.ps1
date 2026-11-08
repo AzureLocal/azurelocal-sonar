@@ -199,6 +199,7 @@ $script:AzlSonarSettableKeys = [ordered]@{
     'ztpEvents.path'            = @{ Kind = 'text' }
     'osConfigEventsPath'        = @{ Kind = 'text' }
     'armEventsPath'             = @{ Kind = 'text' }
+    'verificationEventsPath'    = @{ Kind = 'text' }
     'discoveryPath'             = @{ Kind = 'text' }
     'credential.source'         = @{ Kind = 'text'; Words = @('prompt', 'parameter', 'keyvault') }
     'credential.vault'          = @{ Kind = 'text' }

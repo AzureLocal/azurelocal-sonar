@@ -697,10 +697,10 @@ function zNode(name, lifecycle, status, arc, extra) {
 var THREE = [zNode('iic-azl-n01', 'Provisioned', 'success', 'Connected'), zNode('iic-azl-n02', 'Provisioned', 'success', 'Connected'),
   zNode('iic-azl-n03', 'InstallingOs', 'running', 'Disconnected', { lifecycleMessage: 'Installing OS in progress.' })];
 
-test('modeStates: the six tiles for a ZTP run with one machine still installing; Discovery comes first, OS configuration sits between Provisioning and Validate', function () {
+test('modeStates: the seven tiles for a ZTP run with one machine still installing; Discovery comes first, OS configuration and Verification sit between Provisioning and Validate', function () {
   var tiles = m.modeStates(ztpState(THREE));
-  eq(tiles.map(function (t) { return t.id; }), ['discovery', 'prov', 'osconfig', 'validate', 'deploy', 'update']);
-  eq(tiles.map(function (t) { return t.status; }), ['idle', 'run', 'idle', 'idle', 'idle', 'idle']);
+  eq(tiles.map(function (t) { return t.id; }), ['discovery', 'prov', 'osconfig', 'verify', 'validate', 'deploy', 'update']);
+  eq(tiles.map(function (t) { return t.status; }), ['idle', 'run', 'idle', 'idle', 'idle', 'idle', 'idle']);
   eq(tileOf(tiles, 'osconfig').name, 'OS configuration');
   eq(tileOf(tiles, 'discovery').name, 'Discovery');
   eq(tileOf(tiles, 'prov').name, 'Provisioning (ZTP)');
@@ -727,17 +727,17 @@ test('modeStates: Provisioning is named after the route; the OEM image route say
   eq(tileOf(m.modeStates(s), 'validate').tip, 'Starts when every machine is registered');
 });
 
-test('modeStates: there are always six tiles; Provisioning is grey with a reason when the run has no machines and is past it (a plain deployment)', function () {
+test('modeStates: there are always seven tiles; Provisioning is grey with a reason when the run has no machines and is past it (a plain deployment)', function () {
   var s = { phase: 'deployment', activePhase: 'deployment', validation: { status: 'Success', tree: [{ id: '1', name: 'v', status: 'success', children: [] }] },
     deployment: { status: 'InProgress', tree: [{ id: '2', name: 'Deploy', status: 'running', children: [
       { id: '2.1', name: 'a', status: 'success', children: [] }, { id: '2.2', name: 'b', status: 'running', children: [] }, { id: '2.3', name: 'c', status: 'notstarted', children: [] }] }] } };
   var tiles = m.modeStates(s);
-  eq(tiles.length, 6);
+  eq(tiles.length, 7);
   eq(tiles.some(function (t) { return t.hidden; }), false);
   eq(tileOf(tiles, 'prov').status, 'idle');
   eq(tileOf(tiles, 'prov').line, '');
   eq(/No machine data/.test(tileOf(tiles, 'prov').tip), true);
-  eq(tiles.map(function (t) { return t.status; }), ['idle', 'idle', 'idle', 'ok', 'run', 'idle']);
+  eq(tiles.map(function (t) { return t.status; }), ['idle', 'idle', 'idle', 'idle', 'ok', 'run', 'idle']);
   eq(tileOf(tiles, 'osconfig').tip, 'Set osConfigEventsPath to follow the toolkit’s OS configuration run.', 'no OS configuration data: the tile says how to get it');
   eq(tileOf(tiles, 'validate').line, 'Passed');
   eq(tileOf(tiles, 'deploy').line, 'Step 2 of 3');
@@ -886,7 +886,7 @@ test('stepRule: OEM route groups, validation, extensions, deployment and update'
 });
 
 test('mode sections: each mode shows only its own steps; Add node and Repair have none of their own', function () {
-  eq(m.MODE_SECTIONS, { discovery: ['discovery'], prov: ['provisioning'], osconfig: ['osconfiguration'], validate: ['armvalidation', 'validation', 'extensions'], deploy: ['armdeployment', 'deployment'], update: ['update'], addnode: [], repair: [] });
+  eq(m.MODE_SECTIONS, { discovery: ['discovery'], prov: ['provisioning'], osconfig: ['osconfiguration'], verify: ['verification'], validate: ['armvalidation', 'validation', 'extensions'], deploy: ['armdeployment', 'deployment'], update: ['update'], addnode: [], repair: [] });
 });
 
 test('regression: clicking an Azure step (Register machine, Install OS) must not leave the logs empty', function () {
@@ -1220,7 +1220,7 @@ function oscRunState(osc, extra) {
 
 test('OS configuration tile: between Provisioning and Validate, equal width (the bar sets --n to the tile count)', function () {
   var tiles = m.modeStates(oscRunState(oscAt(2)));
-  eq(tiles.map(function (t) { return t.id; }), ['discovery', 'prov', 'osconfig', 'validate', 'deploy', 'update']);
+  eq(tiles.map(function (t) { return t.id; }), ['discovery', 'prov', 'osconfig', 'verify', 'validate', 'deploy', 'update']);
   eq(m.MODE_SECTIONS.osconfig, ['osconfiguration']);
   eq(m.modeName('osconfig', 'simplified'), 'OS configuration');
   eq(tiles.some(function (t) { return t.hidden; }), false);
@@ -1823,7 +1823,7 @@ test('manual install (scenario.os_install not simplified): Provisioning reads No
 
 test('standalone monitors: only that tile shows (the others are hidden, not greyed) and the page opens on it', function () {
   var base = { phase: 'provisioning', activePhase: 'provisioning', provisioning: provNone(), osConfiguration: { configured: true, nodes: [], run: {} } };
-  var each = [['Discovery', 'discovery'], ['Provisioning', 'prov'], ['OsConfiguration', 'osconfig'], ['Validate', 'validate'], ['Deployment', 'deploy'], ['Update', 'update'], ['AddNode', 'addnode'], ['Repair', 'repair']];
+  var each = [['Discovery', 'discovery'], ['Provisioning', 'prov'], ['OsConfiguration', 'osconfig'], ['Verification', 'verify'], ['Validate', 'validate'], ['Deployment', 'deploy'], ['Update', 'update'], ['AddNode', 'addnode'], ['Repair', 'repair']];
   each.forEach(function (c) {
     var s = JSON.parse(JSON.stringify(base)); s.monitor = c[0];
     var shown = m.modeStates(s).filter(function (t) { return !t.hidden; });
@@ -1833,15 +1833,15 @@ test('standalone monitors: only that tile shows (the others are hidden, not grey
   });
   var auto = JSON.parse(JSON.stringify(base)); auto.monitor = 'Auto';
   eq(m.monitorOf(auto), '');
-  eq(m.modeStates(auto).filter(function (t) { return t.hidden; }).length, 0, 'Auto: today’s six tiles');
-  eq(m.modeStates(auto).length, 6);
-  eq(m.modeStates(base).length, 6, 'no monitor key: unchanged');
+  eq(m.modeStates(auto).filter(function (t) { return t.hidden; }).length, 0, 'Auto: every tile of the flow');
+  eq(m.modeStates(auto).length, 7);
+  eq(m.modeStates(base).length, 7, 'no monitor key: unchanged');
 });
 
 test('Add node and Repair are tiles of their own, shown only when the run is one of them', function () {
   var add = { phase: 'add-node', activePhase: 'add-node', track: 'add-node', nodes: [{ name: 'n1', arcStatus: 'Connected' }] };
   var tiles = m.modeStates(add);
-  eq(tiles.map(function (t) { return t.id; }), ['discovery', 'prov', 'osconfig', 'validate', 'deploy', 'update', 'addnode']);
+  eq(tiles.map(function (t) { return t.id; }), ['discovery', 'prov', 'osconfig', 'verify', 'validate', 'deploy', 'update', 'addnode']);
   eq(tileOf(tiles, 'addnode').status, 'run'); eq(tileOf(tiles, 'addnode').name, 'Add node');
   eq(m.activeModeId(add), 'addnode');
   var sm = m.summaryFor(add, 'addnode', { nodes: [{ name: 'n1' }] });
@@ -2190,6 +2190,152 @@ test('cluster card: demo data, the cluster route, and the state of each moment o
   var sample = m.demoDeploymentSample(Date.parse('2026-11-07T20:00:00Z'));
   eq(sample.state.clusterResource.exists, true, 'the default demo carries the cluster resource');
   eq(m.summaryFor(sample.state, 'deploy', sample.config).cluster.title, 'Cluster clus01');
+});
+
+// ---------------------------------------------------------------- Verification (the pre-cluster verification gate)
+
+function vfCheck(id, category, status, extra) {
+  var c = { id: id, title: id.replace(/^.*\./, ''), category: category, status: status, node: '', message: '', remedy: '', source: '', sourceUrl: '', blocking: true, blocks: status === 'Failed' || status === 'Skipped' };
+  if (extra) Object.keys(extra).forEach(function (k) { c[k] = extra[k]; });
+  return c;
+}
+function vfState(status, extra) {
+  var failedC = vfCheck('azure.providers', 'azure', 'Failed', { message: 'Microsoft.HybridContainerService is NotRegistered.', remedy: 'Register-AzResourceProvider -ProviderNamespace Microsoft.HybridContainerService', source: 'https://learn.microsoft.com/azure/azure-local/deploy/deployment-prerequisites', sourceUrl: 'https://learn.microsoft.com/azure/azure-local/deploy/deployment-prerequisites' });
+  var skippedC = vfCheck('identity.ad-prepared', 'identity', 'Skipped', { message: 'The domain controller could not be reached.', remedy: 'Run the gate from a machine that can reach the domain.' });
+  var passedC = vfCheck('nodes.reachable', 'nodes', 'Passed', { node: 'iic-azl-n01', message: 'Answered.' });
+  var warnC = vfCheck('network.jumbo', 'network', 'Warning', { node: 'iic-azl-n02', message: 'MTU 1514.', remedy: 'Set 9014.', blocking: false, blocks: false });
+  var naC = vfCheck('readiness.hardware', 'readiness', 'NotApplicable', { blocks: false, blocking: false });
+  var v = { configured: true, hasData: true, status: status, state: status, verdict: status === 'pass' ? 'Pass' : (status === 'fail' ? 'Fail' : ''),
+    run: { runId: 'vf-1', started: '2026-11-08T12:00:00.000Z', completed: status === 'running' ? null : '2026-11-08T12:01:00.000Z', expiresUtc: '2026-11-08T16:00:00.0000000Z', events: 7, stale: 0, schema: 1 },
+    counts: { Passed: 1, Failed: 1, Warning: 1, Skipped: 1, NotApplicable: 1, Fixed: 0, Running: 0 }, total: 5, blockers: 2, skippedBlocking: 1, countsMismatch: false, reportedCounts: null, warnings: [],
+    categories: [
+      { id: 'azure', name: 'Azure', status: 'Failed', blocks: true, counts: { Failed: 1 }, checks: [failedC] },
+      { id: 'identity', name: 'Identity', status: 'Skipped', blocks: true, counts: { Skipped: 1 }, checks: [skippedC] },
+      { id: 'nodes', name: 'Nodes', status: 'Passed', blocks: false, counts: { Passed: 1 }, checks: [passedC] },
+      { id: 'network', name: 'Network', status: 'Warning', blocks: false, counts: { Warning: 1 }, checks: [warnC] },
+      { id: 'readiness', name: 'Readiness', status: 'NotApplicable', blocks: false, counts: { NotApplicable: 1 }, checks: [naC] }],
+    attention: [failedC, skippedC] };
+  if (extra) Object.keys(extra).forEach(function (k) { v[k] = extra[k]; });
+  return { phase: 'provisioning', activePhase: 'provisioning', provisioning: { route: 'simplified', ztpComplete: true, nodes: [] },
+    osConfiguration: { configured: true, status: 'success', state: 'converged', ready: true, nodesTotal: 3, nodesConverged: 3, nodes: [{ name: 'iic-azl-n01', status: 'success' }], run: { started: '2026-11-08T11:00:00.000Z' } }, verification: v };
+}
+
+test('Verification tile: between OS configuration and Validate; grey with the way to set it when nothing is followed', function () {
+  eq(m.MODE_IDS.slice(2, 5), ['osconfig', 'verify', 'validate']);
+  eq(m.modeName('verify', 'simplified'), 'Verification');
+  eq(m.MODE_SECTIONS.verify, ['verification']);
+  var off = tileOf(m.modeStates({ phase: 'provisioning', activePhase: 'provisioning', provisioning: { route: 'simplified', nodes: [] } }), 'verify');
+  eq(off.status, 'idle'); eq(off.line, ''); eq(/verificationEventsPath/.test(off.tip), true);
+  var wait = tileOf(m.modeStates({ phase: 'provisioning', activePhase: 'provisioning', provisioning: { route: 'simplified', nodes: [] }, verification: { configured: true, hasData: false, status: 'notstarted' } }), 'verify');
+  eq(wait.status, 'idle'); eq(/pre-cluster verification gate/.test(wait.tip), true);
+});
+
+test('Verification tile: Pass, Fail (blocking and skipped counts), Running and Expired', function () {
+  eq(m.vfTile(vfState('pass')).status, 'ok'); eq(m.vfTile(vfState('pass')).line, 'Pass · 5 checks');
+  var fail = m.vfTile(vfState('fail'));
+  eq([fail.status, fail.line], ['err', 'Fail · 2 blocking (1 skipped)']);
+  eq(m.vfTile(vfState('running')).status, 'run'); eq(m.vfTile(vfState('running')).line, 'Running · 5 so far');
+  var exp = m.vfTile(vfState('expired'));
+  eq([exp.status, exp.line], ['err', 'Pass expired']);
+  eq(tileOf(m.modeStates(vfState('fail')), 'verify').status, 'err');
+});
+
+test('Verification mode: becomes the active mode after OS configuration, never before Provisioning is over or while OS configuration works', function () {
+  eq(m.activeModeId(vfState('fail')), 'verify');
+  eq(m.activeModeId(vfState('pass')), 'verify');
+  var working = vfState('fail'); working.osConfiguration.status = 'running'; working.osConfiguration.ready = false;
+  eq(m.activeModeId(working), 'osconfig');
+  var still = vfState('pass'); still.provisioning = { route: 'simplified', ztpComplete: false, nodes: [{ name: 'n1', status: 'running', prov: { lifecycle: 'InstallingOs' } }] }; still.osConfiguration = { configured: true, status: 'notstarted', nodes: [], run: {} };
+  eq(m.activeModeId(still), 'prov', 'an old verification file does not hide a provisioning run');
+  var validating = vfState('pass'); validating.phase = 'validation'; validating.activePhase = 'validation';
+  eq(m.activeModeId(validating), 'validate', 'Azure validation is further on');
+});
+
+test('Verification summary: verdict chip and banner, counts by status (failed first), skipped called out as blocking', function () {
+  var s = vfState('fail');
+  var sm = m.summaryFor(s, 'verify', { nodes: [] });
+  eq(sm.title, 'Verification'); eq(sm.chip, { kind: 'err', text: 'Fail' });
+  eq(/Verification failed: 2 checks block the cluster deployment \(1 skipped: a skipped check blocks the gate\)/.test(sm.headline), true);
+  var keys = sm.facts.map(function (f) { return f.k; });
+  eq(keys.slice(0, 6), ['Verdict', 'Failed', 'Skipped', 'Warning', 'Passed', 'Not applicable']);
+  var skippedFact = sm.facts.filter(function (f) { return f.k === 'Skipped'; })[0];
+  eq(skippedFact.v, '1 (each one blocks the gate)'); eq(skippedFact.warn, true);
+  eq(sm.facts.some(function (f) { return f.k === 'Blocking' && /1 of them skipped/.test(f.v); }), true);
+  eq(sm.panels.length, 1); eq(sm.panels[0].title, 'Verdict: Fail'); eq(sm.panels[0].kind, 'err');
+  eq(sm.panels[0].rows.map(function (r) { return r.k; }), ['Failed', 'Skipped, blocks']);
+  eq(sm.cards, []);
+});
+
+test('Verification summary: Pass, Running and Expired', function () {
+  var pass = m.summaryFor(vfState('pass', { blockers: 0, skippedBlocking: 0, attention: [] }), 'verify', {});
+  eq(pass.chip, { kind: 'ok', text: 'Pass' }); eq(/^Verification passed: 5 checks, 1 warning\. Valid until /.test(pass.headline), true);
+  eq(/Next: Validate$/.test(pass.headline), true); eq(pass.panels[0].kind, 'ok'); eq(pass.panels[0].rows[0].v, 'Nothing blocks the cluster deployment');
+  var run = m.summaryFor(vfState('running'), 'verify', {});
+  eq(run.chip, { kind: 'run', text: 'Running' }); eq(/^The gate is running: 5 checks so far/.test(run.headline), true);
+  var exp = m.summaryFor(vfState('expired', { verdict: 'Pass', blockers: 0, skippedBlocking: 0, attention: [] }), 'verify', {});
+  eq(exp.chip, { kind: 'err', text: 'Expired' }); eq(/^The verification pass expired at /.test(exp.headline), true);
+  eq(exp.facts.filter(function (f) { return f.k === 'Expired'; }).length, 1);
+});
+
+test('Verification tree: categories with their checks, failed first; Skipped is not Not applicable', function () {
+  var tree = m.vfTreeOf(vfState('fail'));
+  eq(tree.map(function (c) { return c.name; }), ['Azure', 'Identity', 'Nodes', 'Network', 'Readiness']);
+  eq(tree.map(function (c) { return c.status; }), ['error', 'skipped', 'success', 'success', 'notstarted']);
+  var checks = tree[0].children;
+  eq(checks.length, 1); eq(checks[0].vf.kind, 'check'); eq(checks[0].vf.remedy.indexOf('Register-AzResourceProvider'), 0);
+  eq(tree[1].children[0].vf.blocks, true); eq(tree[1].children[0].status, 'skipped');
+  eq(tree[4].children[0].status, 'notstarted'); eq(tree[4].children[0].vf.blocks, false);
+  eq([m.vfIconKey('Skipped'), m.vfIconKey('NotApplicable'), m.vfIconKey('Warning'), m.vfIconKey('Failed'), m.vfIconKey('Passed'), m.vfIconKey('Fixed'), m.vfIconKey('Running')], ['vfskip', 'notstarted', 'warning', 'error', 'success', 'success', 'running']);
+  eq(m.vfTreeOf({}), []); eq(m.vfTreeOf({ verification: { hasData: false } }), []);
+});
+
+test('Verification: a missing or partial verification object never throws', function () {
+  [null, {}, { verification: null }, { verification: {} }, { verification: { configured: true } }, { verification: { configured: true, hasData: true } },
+    { verification: { configured: true, hasData: true, status: 'bogus', categories: 'x', counts: [], attention: null, run: 5 } }].forEach(function (s, i) {
+    m.modeStates(s || {}); m.vfTile(s || {}); m.summaryFor(s || {}, 'verify', {}); m.vfTreeOf(s || {}); m.activeModeId(s || {});
+    eq(typeof m.vfHeadline(m.vfOf(s || {})), 'string', 'case ' + i);
+  });
+});
+
+test('Verification: a standalone monitor shows its own tile and opens on it', function () {
+  var s = { phase: 'provisioning', activePhase: 'provisioning', monitor: 'Verification', provisioning: { route: 'simplified', nodes: [] }, verification: vfState('fail').verification };
+  eq(m.modeStates(s).filter(function (t) { return !t.hidden; }).map(function (t) { return t.id; }), ['verify']);
+  eq(m.activeModeId(s), 'verify'); eq(m.monitorOf(s), 'verify');
+});
+
+test('Verification log lines: the [verify] lines are scoped to their machine', function () {
+  eq(m.lineScope({ file: 'verification-events', text: '2026-11-08T12:00:02.000Z [verify] * RunStarted' }), { node: '', stage: '' });
+  eq(m.lineScope({ file: 'verification-events', text: '2026-11-08T12:00:02.000Z [verify] iic-azl-n02 Check Failed (nodes.reachable): No answer' }), { node: 'iic-azl-n02', stage: '' });
+});
+
+test('Verification page: hostile text stays text; only a documentation https source is a link; Skipped says it blocks', function () {
+  withDom(function (dom, h) {
+    var s = vfState('fail');
+    s.verification.categories[0].checks[0] = vfCheck('azure.providers', 'azure', 'Failed', { title: HOSTILE[0], node: HOSTILE[1], message: HOSTILE[1], remedy: HOSTILE[3], source: HOSTILE[2], sourceUrl: 'javascript:alert(1)' });
+    s.verification.categories[1].checks.push(vfCheck('identity.other', 'identity', 'Skipped', { title: 'Linked', source: 'https://learn.microsoft.com/azure/azure-local/x', sourceUrl: 'https://learn.microsoft.com/azure/azure-local/x' }));
+    s.verification.categories[2].checks.push(vfCheck('nodes.evil', 'nodes', 'Warning', { title: 'Foreign', source: 'https://evil.example/x', sourceUrl: 'https://evil.example/x', blocks: false }));
+    h.app.config = { cluster: 'clus01', nodes: [{ name: 'iic-azl-n01', seed: true }] };
+    h.app.state = s;
+    var tree = m.vfTreeOf(s);
+    h.app.vfTree = tree;
+    var ul = h.el('ul', null, []);
+    var items = [];
+    tree.forEach(function (cat) { cat.children.forEach(function (c, i) { c.__key = 'k' + cat.id + i; items.push(c); }); });
+    h.renderSummary();
+    items.forEach(function (c) { var li = h.buildItem(c, 2, null, 'verification', [c]); ul.appendChild(li); });
+    assertInert(ul, 'verification checks');
+    assertInert(dom.byId.summary, 'verification summary');
+    staticIcons(dom, 'verification page');
+    var text = textOf(ul);
+    eq(text.indexOf(HOSTILE[0]) >= 0 && text.indexOf(HOSTILE[1]) >= 0, true, 'hostile text is shown as text');
+    eq(text.indexOf('Skipped: blocks the gate') >= 0, true, 'a skipped check says it blocks the gate');
+    eq(text.indexOf('Fix: ') >= 0, true, 'the remedy is shown');
+    var links = ul.querySelectorAll('a');
+    eq(links.length, 1, 'one link: the documentation source');
+    eq(links[0].attrs.href, 'https://learn.microsoft.com/azure/azure-local/x');
+    eq(text.indexOf('https://evil.example/x') >= 0, true, 'a foreign source is plain text');
+    eq(textOf(dom.byId.summary).indexOf('Verdict: Fail') >= 0, true, 'the banner is shown');
+  });
 });
 
 process.stdout.write(JSON.stringify(cases));

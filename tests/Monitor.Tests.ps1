@@ -1,18 +1,18 @@
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0.0' }
 Set-StrictMode -Version Latest
 
-# Standalone monitors: Start-AzlSonar.ps1 -Monitor Discovery|Provisioning|OsConfiguration|Validate|Deployment|Update|AddNode|Repair
+# Standalone monitors: Start-AzlSonar.ps1 -Monitor Discovery|Provisioning|OsConfiguration|Verification|Validate|Deployment|Update|AddNode|Repair
 # (and Auto, today's behaviour). No Azure, no node: the poll is mocked.
 
 BeforeAll {
     Set-StrictMode -Version Latest
     . (Join-Path -Path $PSScriptRoot -ChildPath 'TestHelpers.ps1')
     Import-SonarTestModule
-    $script:Names = 'Auto', 'Discovery', 'Provisioning', 'OsConfiguration', 'Validate', 'Deployment', 'Update', 'AddNode', 'Repair'
+    $script:Names = 'Auto', 'Discovery', 'Provisioning', 'OsConfiguration', 'Verification', 'Validate', 'Deployment', 'Update', 'AddNode', 'Repair'
 }
 
 Describe 'the monitor names' {
-    It 'are exactly the eight monitors and Auto, and there is no Health' {
+    It 'are exactly the nine monitors and Auto, and there is no Health' {
         InModuleScope AzlSonar { Get-AzlSonarMonitorNameList } | Should -Be $script:Names
         InModuleScope AzlSonar { Get-AzlSonarMonitorName -Value 'health' } | Should -Be ''
     }
@@ -32,13 +32,14 @@ Describe 'what each monitor reads' {
     It 'Auto is today: everything' {
         $p = InModuleScope AzlSonar { Get-AzlSonarMonitorPlan -Monitor 'Auto' }
         $p.standalone | Should -BeFalse
-        ($p.azure -and $p.ztpEvents -and $p.osConfigEvents -and $p.armEvents -and $p.cluster -and $p.nodeProbe -and $p.tailer -and $p.discovery) | Should -BeTrue
+        ($p.azure -and $p.ztpEvents -and $p.osConfigEvents -and $p.armEvents -and $p.verificationEvents -and $p.cluster -and $p.nodeProbe -and $p.tailer -and $p.discovery) | Should -BeTrue
         @($p.phases).Count | Should -Be 8
     }
     It '<Name> reads only what it needs' -ForEach @(
         @{ Name = 'Discovery'; Azure = $false; Ztp = $false; Os = $false; Tail = $false; Disc = $true; Phases = @() }
         @{ Name = 'Provisioning'; Azure = $true; Ztp = $true; Os = $false; Tail = $false; Disc = $false; Phases = @('provisioning', 'arc-registration') }
         @{ Name = 'OsConfiguration'; Azure = $true; Ztp = $false; Os = $true; Tail = $false; Disc = $false; Phases = @('provisioning') }
+        @{ Name = 'Verification'; Azure = $false; Ztp = $false; Os = $false; Tail = $false; Disc = $false; Phases = @() }
         @{ Name = 'Validate'; Azure = $true; Ztp = $false; Os = $false; Tail = $true; Disc = $false; Phases = @('validation') }
         @{ Name = 'Deployment'; Azure = $true; Ztp = $false; Os = $false; Tail = $true; Disc = $false; Phases = @('deployment', 'post-deployment') }
         @{ Name = 'Update'; Azure = $true; Ztp = $false; Os = $false; Tail = $true; Disc = $false; Phases = @('update') }
@@ -53,6 +54,7 @@ Describe 'what each monitor reads' {
         $p.tailer | Should -Be $Tail
         $p.discovery | Should -Be $Disc
         $p.armEvents | Should -Be ($Name -in 'Validate', 'Deployment')
+        $p.verificationEvents | Should -Be ($Name -eq 'Verification')
         $p.cluster | Should -Be ($Name -in 'Validate', 'Deployment', 'Update', 'AddNode', 'Repair')
         @($p.phases) | Should -Be $Phases
         $p.nodeProbe | Should -Be ($Name -eq 'Provisioning')
@@ -94,7 +96,7 @@ Describe 'the monitor key of the config' {
 }
 
 Describe 'Start-AzlSonar.ps1 -Monitor' {
-    It 'is a Live parameter with the nine values and no Health' {
+    It 'is a Live parameter with the ten values and no Health' {
         $cmd = Get-Command -Name (Join-Path $script:SonarRepoRoot 'Start-AzlSonar.ps1')
         $p = $cmd.Parameters['Monitor']
         $p | Should -Not -BeNullOrEmpty

@@ -143,6 +143,11 @@ function Test-AzlSonarConfig {
         $problems.Add('armEventsPath must be the path of the ARM deployment event file (JSON Lines written by the toolkit''s Invoke-AzureLocalArmDeployment.ps1), for example ./arm-deployment-events.jsonl.')
     }
 
+    $verificationEventsPath = Get-AzlSonarMember $Config 'verificationEventsPath'
+    if ($null -ne $verificationEventsPath -and ($verificationEventsPath -isnot [string] -or [string]::IsNullOrWhiteSpace($verificationEventsPath))) {
+        $problems.Add('verificationEventsPath must be the path of the pre-cluster verification event file (JSON Lines, precluster-verification-events.jsonl, written by the toolkit''s verification gate) or the folder that holds it, for example ./arm-report/verification/live/precluster-verification-events.jsonl.')
+    }
+
     # logAccounts: the accounts that read the node logs, by name; the passwords are never in the file (a keyvault:// reference only).
     $logAccounts = Get-AzlSonarMember $Config 'logAccounts'
     if ($null -ne $logAccounts) {
@@ -436,6 +441,11 @@ function Read-AzlSonarConfig {
     if ($armEventsPath -and -not [System.IO.Path]::IsPathRooted($armEventsPath) -and $baseDirectory) {
         $armEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $armEventsPath))
     }
+    # verificationEventsPath: the pre-cluster verification gate's event file (or the folder that holds it); relative to the config file's folder.
+    $verificationEventsPath = [string](Get-AzlSonarMember $raw 'verificationEventsPath' '')
+    if ($verificationEventsPath -and -not [System.IO.Path]::IsPathRooted($verificationEventsPath) -and $baseDirectory) {
+        $verificationEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $verificationEventsPath))
+    }
     # discoveryPath: the hardware discovery output (a folder or a file); relative to the config file's folder.
     $discoveryPath = [string](Get-AzlSonarMember $raw 'discoveryPath' '')
     if ($discoveryPath -and -not [System.IO.Path]::IsPathRooted($discoveryPath) -and $baseDirectory) {
@@ -477,6 +487,7 @@ function Read-AzlSonarConfig {
         ztpEventsPath  = $ztpEventsPath
         osConfigEventsPath = $osConfigEventsPath
         armEventsPath  = $armEventsPath
+        verificationEventsPath = $verificationEventsPath
         discoveryPath  = $discoveryPath
         logAccounts    = $logAccountsNormalised
         sourcePath     = $source

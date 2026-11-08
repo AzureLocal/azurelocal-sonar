@@ -59,6 +59,8 @@ function Initialize-AzlSonarSharedState {
             ZtpInfo       = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the ZTP event file: events read and the newest event time (/api/details)
             OsConfigEvents = [hashtable]::Synchronized(@{})   # per-node OS configuration events of the latest attempt, and the run entry '*' (Invoke-AzlSonarOsConfigEventLoop)
             ArmEvents     = [hashtable]::Synchronized(@{})   # ARM Validate and Deploy events: the run entry '*', the validation and deployment entries and their checks (Invoke-AzlSonarArmEventLoop)
+            VerificationEvents = [hashtable]::Synchronized(@{})   # pre-cluster verification gate events: the latest run entry '*' with its checks (Invoke-AzlSonarVerificationEventLoop)
+            VerificationInfo   = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the verification event file: events read and the newest event time (/api/details)
             ArmInfo       = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the ARM event file: events read and the newest event time (/api/details)
             LogAccount    = [hashtable]::Synchronized(@{})   # per node: immutable records of the account log access uses (never a password); '*breaker' and '*unavailable' hold the account-wide ones
             CredentialLock = [object]::new()   # one lock for the domain credential (read, mask, publish) and for the breaker and the per-node records
@@ -953,7 +955,7 @@ function Start-AzlSonarServer {
         # Which stage to watch: Auto (the whole flow, as always) or one monitor. A single monitor shows only its tile and
         # reads only the sources it needs.
         [Parameter(ParameterSetName = 'Live')]
-        [ValidateSet('Auto', 'Discovery', 'Provisioning', 'OsConfiguration', 'Validate', 'Deployment', 'Update', 'AddNode', 'Repair')]
+        [ValidateSet('Auto', 'Discovery', 'Provisioning', 'OsConfiguration', 'Verification', 'Validate', 'Deployment', 'Update', 'AddNode', 'Repair')]
         [string]$Monitor,
 
         [Parameter(ParameterSetName = 'Live')]
@@ -1060,6 +1062,10 @@ function Start-AzlSonarServer {
         if ($config.armEventsPath -and $plan.armEvents) {
             # The toolkit's ARM Validate and Deploy event file (JSON Lines): the ARM view of Validate and Deployment and its log lines.
             $workerSpecs.Add(@{ Name = 'ArmEvents'; Command = 'Invoke-AzlSonarArmEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
+        }
+        if ($config.verificationEventsPath -and $plan.verificationEvents) {
+            # The toolkit's pre-cluster verification gate event file (JSON Lines): the Verification view and its log lines.
+            $workerSpecs.Add(@{ Name = 'VerificationEvents'; Command = 'Invoke-AzlSonarVerificationEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
         }
         if ($InfrastructureFile) {
             # Logs a notice when the master file's node set changes (restart Sonar to track it).

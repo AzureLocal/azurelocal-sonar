@@ -42,7 +42,7 @@ function Get-AzlSonarConfigKeyName {
     [OutputType([string])]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('cluster', 'resourceGroup', 'subscription', 'location', 'route', 'identity', 'nodes', 'address', 'ztpEvents', 'osConfigEvents', 'armEvents', 'discovery', 'credential', 'pollSeconds')]
+        [ValidateSet('cluster', 'resourceGroup', 'subscription', 'location', 'route', 'identity', 'nodes', 'address', 'ztpEvents', 'osConfigEvents', 'armEvents', 'verificationEvents', 'discovery', 'credential', 'pollSeconds')]
         [string]$Setting,
 
         [AllowEmptyString()]
@@ -52,12 +52,12 @@ function Get-AzlSonarConfigKeyName {
     $infrastructure = @{
         cluster = 'cluster.name'; resourceGroup = 'azure.resource_group'; subscription = 'azure.subscription_id'; location = 'azure.location'
         route = 'scenario.os_install'; identity = 'scenario.identity'; nodes = 'nodes[].name'; address = 'nodes[].network_adapters[]'
-        ztpEvents = 'provisioning.simplified.evidence_path'; osConfigEvents = 'provisioning.simplified.evidence_path'; armEvents = 'cluster.name (the toolkit''s default report directory)'; discovery = 'provisioning.simplified.evidence_path (the discovery folder inside it)'; credential = 'credential.source (Sonar config only)'; pollSeconds = '-PollSeconds'
+        ztpEvents = 'provisioning.simplified.evidence_path'; osConfigEvents = 'provisioning.simplified.evidence_path'; armEvents = 'cluster.name (the toolkit''s default report directory)'; verificationEvents = 'provisioning.simplified.evidence_path (the arm-report folder inside it)'; discovery = 'provisioning.simplified.evidence_path (the discovery folder inside it)'; credential = 'credential.source (Sonar config only)'; pollSeconds = '-PollSeconds'
     }
     $configFile = @{
         cluster = 'clusterName'; resourceGroup = 'resourceGroup'; subscription = 'subscriptionId'; location = 'location'
         route = 'provisioningRoute'; identity = 'identityModel'; nodes = 'nodes[].name'; address = 'nodes[].address'
-        ztpEvents = 'ztpEvents.path'; osConfigEvents = 'osConfigEventsPath'; armEvents = 'armEventsPath'; discovery = 'discoveryPath'; credential = 'credential.source'; pollSeconds = 'pollSeconds'
+        ztpEvents = 'ztpEvents.path'; osConfigEvents = 'osConfigEventsPath'; armEvents = 'armEventsPath'; verificationEvents = 'verificationEventsPath'; discovery = 'discoveryPath'; credential = 'credential.source'; pollSeconds = 'pollSeconds'
     }
     if ($Kind -eq 'infrastructure') { return $infrastructure[$Setting] }
     return $configFile[$Setting]
@@ -101,6 +101,7 @@ function New-AzlSonarDetailFact {
     $ztpPath = [string](Get-AzlSonarMember $Config 'ztpEventsPath' '')
     $osConfigPath = [string](Get-AzlSonarMember $Config 'osConfigEventsPath' '')
     $armPath = [string](Get-AzlSonarMember $Config 'armEventsPath' '')
+    $verificationPath = [string](Get-AzlSonarMember $Config 'verificationEventsPath' '')
     $discoveryPath = [string](Get-AzlSonarMember $Config 'discoveryPath' '')
     $domainAccount = [string](Get-AzlSonarLogAccount -Config $Config -DomainJoined $true -AdminsConfigured $true).domainAccount
     $maxRejections = (Get-AzlSonarBreakerSetting -Config $Config).MaxRejections
@@ -120,6 +121,9 @@ function New-AzlSonarDetailFact {
     }
     if (-not $armPath) {
         $notSet.Add([ordered]@{ setting = 'armEvents'; label = 'ARM deployment event file'; key = (& $key 'armEvents'); effect = 'The Validate and Deployment modes show only what Azure reports; the toolkit''s checks, step list and known-failure hints are not shown.' })
+    }
+    if (-not $verificationPath) {
+        $notSet.Add([ordered]@{ setting = 'verificationEvents'; label = 'Pre-cluster verification event file'; key = (& $key 'verificationEvents'); effect = 'The Verification mode shows nothing: the verdict and the checks of the pre-cluster verification gate are not read.' })
     }
     if (-not $discoveryPath) {
         $notSet.Add([ordered]@{ setting = 'discovery'; label = 'Hardware discovery folder'; key = (& $key 'discovery'); effect = 'The Discovery stage shows nothing: the serial numbers, ports and BOSS cards of the machines are not read.' })
@@ -145,6 +149,8 @@ function New-AzlSonarDetailFact {
         osConfigEventsPath = $osConfigPath
         armEventsFile     = $(if ($armPath) { [System.IO.Path]::GetFileName($armPath) } else { '' })
         armEventsPath     = $armPath
+        verificationEventsFile = $(if ($verificationPath) { [System.IO.Path]::GetFileName((Resolve-AzlSonarVerificationEventFile -Path $verificationPath)) } else { '' })
+        verificationEventsPath = $verificationPath
         discoveryFile     = $(if ($discoveryPath) { [System.IO.Path]::GetFileName($discoveryPath.TrimEnd('\', '/')) } else { '' })
         discoveryPath     = $discoveryPath
         domainAccount     = $domainAccount
@@ -256,6 +262,10 @@ function Get-AzlSonarDetail {
     $armEvents = if ($null -ne $armInfo -and $null -ne $armInfo['Count']) { [long]$armInfo['Count'] } else { 0 }
     $armFileFound = $false
     if ($null -ne $facts -and $facts.armEventsPath) { $armFileFound = Test-Path -LiteralPath $facts.armEventsPath -PathType Leaf }
+    $verifyInfo = $shared['VerificationInfo']
+    $verifyEvents = if ($null -ne $verifyInfo -and $null -ne $verifyInfo['Count']) { [long]$verifyInfo['Count'] } else { 0 }
+    $verifyFileFound = $false
+    if ($null -ne $facts -and $facts.verificationEventsPath) { $verifyFileFound = Test-Path -LiteralPath (Resolve-AzlSonarVerificationEventFile -Path $facts.verificationEventsPath) -PathType Leaf }
     $lastLine = $null
     if (-not $replaying) {
         $window = Get-AzlSonarLogWindow -Shared $shared -Since ([Math]::Max([long]0, [long]$shared.LogSeq - 1))
@@ -304,6 +314,13 @@ function Get-AzlSonarDetail {
                 fileFound   = [bool]$armFileFound
                 events      = $armEvents
                 lastEventAt = $(if ($null -ne $armInfo -and $armInfo['LastEventAt']) { [string]$armInfo['LastEventAt'] } else { $null })
+            }
+            verificationEvents = [ordered]@{
+                configured  = [bool]($null -ne $facts -and $facts.verificationEventsFile)
+                file        = $(if ($null -ne $facts) { [string]$facts.verificationEventsFile } else { '' })
+                fileFound   = [bool]$verifyFileFound
+                events      = $verifyEvents
+                lastEventAt = $(if ($null -ne $verifyInfo -and $verifyInfo['LastEventAt']) { [string]$verifyInfo['LastEventAt'] } else { $null })
             }
             discovery = [ordered]@{
                 configured  = [bool]($null -ne $facts -and $facts.discoveryFile)
@@ -377,6 +394,7 @@ function New-AzlSonarReplayDetailFact {
         ztpEventsPath     = ''
         osConfigEventsPath = ''
         armEventsPath     = ''
+        verificationEventsPath = ''
         discoveryPath     = ''
         sourceKind        = 'config'
         sourcePath        = ''
