@@ -49,7 +49,7 @@ Then pick what you want to do:
 | Watch a deployment (steps, logs, WinRM or SSH) | [docs/run.md](docs/run.md#watch-a-deployment) |
 | Understand each ZTP stage (Boot, Bootstrap, Vouchers and claim, Install OS, Device, Network, Restore, Handoff) | [docs/stages.md](docs/stages.md) |
 | Which account and folders read the logs in each phase (the Log access window) | [docs/log-access.md](docs/log-access.md) |
-| Follow an update, add node or repair, or look at a deployed cluster (Health) | [docs/run.md](docs/run.md#follow-an-update) |
+| Follow an update, add node or repair, or look at a deployed cluster, or run one stage on its own (-Monitor) | [docs/run.md](docs/run.md#follow-an-update) |
 | Audit an existing cluster read-only | [docs/run.md](docs/run.md#read-only-audit-and-recording-of-an-existing-cluster) |
 | Run from a pipeline or unattended | [docs/run.md](docs/run.md#run-from-a-pipeline-or-an-unattended-session) |
 | Record and share a session, or restart mid-run | [docs/run.md](docs/run.md#record-and-share-a-session) |
@@ -142,6 +142,7 @@ There is nothing to install: no service, no database, no build step.
 | `-PollSeconds` | `20` | Seconds between Azure polls (5 to 3600). Overrides the file. |
 | `-Port` | `8642` | Local port. Pick another if 8642 is taken (Sonar says so). |
 | `-Credential` | (none) | The log account; overrides `credential.source`. |
+| `-Monitor` | `Auto` | Which stage to watch: `Auto` (the whole flow) or one of `Discovery`, `Provisioning`, `OsConfiguration`, `Validate`, `Deployment`, `Update`, `AddNode`, `Repair`. A single monitor shows only its tile and reads only the sources it needs. See [Run one stage on its own](docs/run.md#run-one-stage-on-its-own-monitor). |
 | `-NoBrowser` | off | Do not open the browser. The URL with the access token is still printed. |
 | `-NoAccessToken` | off | Turn the per-start access token off (also `accessToken: false` in the config). For a single-user machine only: any account on this machine can then read the page. |
 | `-Record` | (none) | Also append the run to this recording file (JSON Lines). See [Record and replay](#record-and-replay). A normal recording keeps identifiers (GUIDs, IP addresses, host and cluster names). |
@@ -239,6 +240,7 @@ Unknown fields are ignored. Sonar validates the file at start and lists every pr
 | `credential.usernameSecret` | for `keyvault` | | Secret that holds the user name. |
 | `credential.passwordSecret` | for `keyvault` | | Secret that holds the password. |
 | `credential.password`, `.secret`, `.secretValue` | never | | Rejected: secrets never go in the config file. |
+| `discoveryPath` | no | (none) | The folder the toolkit's `Invoke-HardwareDiscovery.ps1` wrote (`-OutputPath`: one `<ServiceTag>.json` per node and `discovery-summary.json`). Sonar reads it for the **Discovery** stage that comes before ZTP. Relative to the config file. See [Discovery](docs/stages.md#discovery). |
 | `osConfigEventsPath` | no | (none) | The event file of the toolkit's OS configuration run (`Invoke-AzureLocalOsConfiguration.ps1`; JSON Lines with `timestamp`, `node`, `stage`, `step`, `state`, `evidence`, `level`, `nextAction`, `method`, `transport`). Sonar follows it and builds the **OS configuration** mode from it. Relative to the config file. See [OS configuration](docs/stages.md#os-configuration). |
 | `recordPath` | no | (none) | Record every run to this file, as with `-Record` (which overrides it). Relative to the config file. See [Record and replay](#record-and-replay). |
 | `ztpEvents.path` | no | (none) | The event file of the [azurelocal-ztp](https://github.com/AzureLocal/azurelocal-ztp) provisioning scripts (JSON Lines: `timestamp`, `node`, `state`, `evidence`, `nextAction`, `level`, `stage`). Sonar follows it and shows each event in the log pane. Relative to the config file. See [Follow ZTP provisioning](#follow-ztp-provisioning). |
@@ -286,13 +288,14 @@ The header shows the current phase, worked out from what Azure reports, in this 
 
 | Phase | When | What Sonar shows |
 | --- | --- | --- |
+| **Discovery** (before ZTP) | `discoveryPath` is set (the folder of the toolkit's `Invoke-HardwareDiscovery.ps1`) and nothing else has started | The **Discovery** mode: a card per machine with its service tag, ports and MACs, the suggested management port and the BOSS card, and what to check before ZTP. Waiting, running, failed and done states. [Details](docs/stages.md#discovery). |
 | **Provisioning** (simplified route) | No validation or deployment steps yet | The **Provisioning** panel: one entry per machine with its lifecycle chip, Sonar's progress estimate (from the lifecycle and the finished job steps; the job's own `percentComplete` is in the tooltip, because it read 50 even after success in recorded responses), the Arc machine it resolved, and the tree of lifecycle stages and `ProvisionOs` steps with live timers and errors inline. Logs from `C:\Windows\System32\Bootstrap\Logs` once the OS is installed. |
 | **Arc registration** (OEM image route) | No validation or deployment steps yet | The same panel titled **Arc registration**: per machine, the *OS image update*, *Bootstrap* and *Azure registration* groups with the node's own step names, step counters, live timers and error text; *Ready for Validate* when every machine is registered. Logs from `C:\Windows\System32\Bootstrap\Logs`. |
 | **Validation** | `reportedProperties.validationStatus` has steps | The validation step tree: each step's status, start, end, duration and error text, the running step with a live timer, progress counts. |
 | **Deployment** | `reportedProperties.deploymentStatus` has steps | The nested deployment step tree (steps within steps), with the same detail, and the live logs from the seed node. |
 | **Done** | The deployment succeeded | The finished trees with durations; the logs stay on the node. |
 | **Update** (unverified against a live run) | Azure reports an update installing (`updateSummaries` state *UpdateInProgress*) on a deployed cluster | The update's step tree from `updateRuns` (steps, times, expected time when Azure gives it, errors), the update version and the summary (solution and SBE version, failed health checks). Built from the Microsoft Learn REST reference only. |
-| **Add node**, **Repair** (unverified against a live run) | `track` is `add-node` or `repair` in the config and the deployment is done | The guidance card (`Add-Server` / `Repair-Server`, monitoring with `Start-MonitoringActionplanInstanceToComplete`, `-Rerun`, storage rebalance), the Arc machines and the live node log. |
+| **Add node**, **Repair** (unverified against a live run; a tile of their own, no Health mode) | `track` is `add-node` or `repair` in the config (or `-Monitor AddNode` / `Repair`) and the deployment is done | The guidance card (`Add-Server` / `Repair-Server`, monitoring with `Start-MonitoringActionplanInstanceToComplete`, `-Rerun`, storage rebalance), the Arc machines and the live node log. |
 | **Failed** | The active phase reports an error (a failed machine counts during provisioning and Arc registration) | The failed step with its exception text expanded inline; select it to filter the logs to its time window. The phase chip names the phase that failed (`Failed: Provisioning`). |
 
 **When Azure lags behind the node.** The deployment step list can say *Deploy not started* while the seed node is already running (it did, on a live run). Sonar then labels it: the role and interface that the node log shows (for example `BareMetal:EnableWindowsFeaturesForDeployment`) is shown as the current step, marked *from node log*, and a note says where the information was read. After a failed attempt, until Azure rewrites the result, a newer running ARM deployment is shown as *re-run pending*. At the start of Deploy mode a note says which part runs: the limited Environment Checker, the full Environment Checker, then cloud deployment (Learn, 12.2609 latest). Both are inferred from the node log and the ARM deployment list and are unverified end to end.
