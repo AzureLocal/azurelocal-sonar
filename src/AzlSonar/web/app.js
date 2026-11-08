@@ -2180,7 +2180,7 @@
       modeStates: modeStates, activeModeId: activeModeId, modeName: modeName, summaryFor: summaryFor, stepProgress: stepProgress,
       lifecyclePlain: lifecyclePlain, arcInfo: arcInfo, machineWaits: machineWaits, machineList: machineList,
       discOf: discOf, discNodes: discNodes, discHasData: discHasData, discoveryTreeOf: discoveryTreeOf, discCard: discCard, discHeadline: discHeadline,
-      demoDiscovery: demoDiscovery, laMonitorPhases: laMonitorPhases, monitorOf: monitorOf, manualInstall: manualInstall, MODE_IDS: MODE_IDS, MODE_TITLE: MODE_TITLE,
+      levelSet: levelSet, levelPasses: levelPasses, toggleLevel: toggleLevel, levelCount: levelCount, demoDiscovery: demoDiscovery, laMonitorPhases: laMonitorPhases, monitorOf: monitorOf, manualInstall: manualInstall, MODE_IDS: MODE_IDS, MODE_TITLE: MODE_TITLE,
       oscGuardedPanels: oscGuardedPanels, oscAddressChip: oscAddressChip, oscTimelineLines: oscTimelineLines, oscFacts: oscFacts,
       oscOf: oscOf, oscNodes: oscNodes, oscHasData: oscHasData, osConfigTreeOf: osConfigTreeOf, oscMethodChip: oscMethodChip, oscVersionLines: oscVersionLines,
       oscCard: oscCard, oscHeadline: oscHeadline, oscFacts: oscFacts, oscCountdown: oscCountdown, fmtCountdown: fmtCountdown,
@@ -4017,10 +4017,27 @@
     var btns = $('level-filter').querySelectorAll('button');
     Array.prototype.forEach.call(btns, function (b) {
       var lv = b.getAttribute('data-level');
-      var n = lv === 'all' ? app.counts.all : lv === 'warning' ? app.counts.warning + app.counts.error : app.counts.error;
-      var base = lv === 'all' ? 'All' : lv === 'warning' ? 'Warnings+' : 'Errors';
+      var n = levelCount(app.counts, lv);
+      var base = { all: 'All', info: 'Info', warning: 'Warnings', error: 'Errors' }[lv] || lv;
       b.textContent = base + ' ' + n.toLocaleString();
-      b.setAttribute('aria-label', (lv === 'warning' ? 'Warnings and errors' : base) + ', ' + n + ' lines');
+      b.setAttribute('aria-label', base + ', ' + n + ' lines');
+    });
+    pressLevelButtons();
+  }
+
+  // Lines of one level in the counts { all, warning, error }: info is what is neither.
+  function levelCount(counts, level) {
+    if (level === 'all') return counts.all;
+    if (level === 'info') return Math.max(0, counts.all - counts.warning - counts.error);
+    return counts[level] || 0;
+  }
+
+  // Which level buttons are pressed: All when there is no level filter, else exactly the levels that are on.
+  function pressLevelButtons() {
+    var lf = $('level-filter'), on = levelSet(app.filter.level);
+    Array.prototype.forEach.call(lf.querySelectorAll('button'), function (x) {
+      var lv = x.getAttribute('data-level');
+      x.setAttribute('aria-pressed', String(lv === 'all' ? !on.length : on.indexOf(lv) >= 0));
     });
   }
 
@@ -4035,10 +4052,33 @@
     return lineInScope(l, app.filter, win, seedName());
   }
 
+  // The level filter: 'all' (no filter) or the levels shown, 'info', 'warning', 'error', or several joined with commas in that
+  // order ('warning,error'). A level shows only its own lines: Warnings never include errors and Errors never include warnings.
+  var LEVEL_ORDER = ['info', 'warning', 'error'];
+  function levelSet(level) {
+    var k = str(level).toLowerCase();
+    if (!k || k === 'all') return [];
+    return LEVEL_ORDER.filter(function (x) { return k.split(',').indexOf(x) >= 0; });
+  }
+  function levelPasses(level, lineLevel) {
+    var s = levelSet(level);
+    if (!s.length) return true;
+    var l = str(lineLevel).toLowerCase();
+    return s.indexOf(l === 'warning' || l === 'error' ? l : 'info') >= 0;
+  }
+  // The filter after a click on a level button: All clears the selection; a level is switched on or off; none, or all three,
+  // is All again.
+  function toggleLevel(level, clicked) {
+    if (clicked === 'all') return 'all';
+    var s = levelSet(level), i = s.indexOf(clicked);
+    if (i >= 0) s.splice(i, 1); else s.push(clicked);
+    s = LEVEL_ORDER.filter(function (x) { return s.indexOf(x) >= 0; });
+    return !s.length || s.length === LEVEL_ORDER.length ? 'all' : s.join(',');
+  }
+
   function lineMatches(l, win) {
     var f = app.filter;
-    if (f.level === 'error' && l.level !== 'error') return false;
-    if (f.level === 'warning' && l.level === 'info') return false;
+    if (!levelPasses(f.level, l.level)) return false;
     if (f.file && l.file !== f.file) return false;
     if (!lineInView(l, win)) return false;
     if (f.q) {
@@ -4309,8 +4349,8 @@
     lf.addEventListener('click', function (e) {
       var b = e.target.closest('button[data-level]');
       if (!b) return;
-      app.filter.level = b.getAttribute('data-level');
-      Array.prototype.forEach.call(lf.querySelectorAll('button'), function (x) { x.setAttribute('aria-pressed', String(x === b)); });
+      app.filter.level = toggleLevel(app.filter.level, b.getAttribute('data-level'));
+      pressLevelButtons();
       rerenderLogs();
     });
 

@@ -69,7 +69,7 @@ The steps of the selected mode, with a short description under every step name. 
 
 ![The empty-filter message](images/tour-empty-filter.png)
 
-The live log pane has the **All / Warnings+ / Errors** filter, the search box (press `/` to focus it; matches are highlighted), the file filter, the line, warning and error counts, one chip with a × for each filter that is on, a **new lines ↓** button while you are scrolled up, **Follow**, and the status line *Showing N of M lines*.
+The live log pane has the **All / Info / Warnings / Errors** filter (each button shows only its own lines: *Warnings* never includes errors; click several to combine them, *All* clears the choice), the search box (press `/` to focus it; matches are highlighted), the file filter, the line, warning and error counts, one chip with a × for each filter that is on, a **new lines ↓** button while you are scrolled up, **Follow**, and the status line *Showing N of M lines*.
 
 When a filter shows nothing, the pane says why. A step that has produced no lines yet says so (*This step has produced no lines on this node yet*) and offers **Show all lines for this node** and **Clear filter**.
 

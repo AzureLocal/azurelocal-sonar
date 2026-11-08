@@ -1976,4 +1976,58 @@ test('demo: the OS configuration run carries the contract fields (run id, addres
   eq(oscAt(2.0).guarded.length, guarded.length);
 });
 
+// ---------------------------------------------------------------- the log level filter shows only the levels chosen
+
+test('level filter: Warnings shows only warnings, Errors only errors, Info only info, All everything', function () {
+  var levels = ['info', 'warning', 'error'];
+  function shown(filter) { return levels.filter(function (l) { return m.levelPasses(filter, l); }); }
+  eq(shown('all'), ['info', 'warning', 'error']);
+  eq(shown(''), ['info', 'warning', 'error'], 'no filter is all');
+  eq(shown('warning'), ['warning'], 'Warnings must not show errors');
+  eq(shown('error'), ['error'], 'Errors must not show warnings');
+  eq(shown('info'), ['info']);
+  eq(m.levelPasses('warning', 'error'), false);
+  eq(m.levelPasses('error', 'warning'), false);
+  eq(m.levelPasses('warning', 'info'), false);
+});
+
+test('level filter: combined selections show exactly the levels that are on', function () {
+  function shown(filter) { return ['info', 'warning', 'error'].filter(function (l) { return m.levelPasses(filter, l); }); }
+  eq(shown('warning,error'), ['warning', 'error']);
+  eq(shown('info,warning'), ['info', 'warning']);
+  eq(shown('info,error'), ['info', 'error']);
+  eq(shown('info,warning,error'), ['info', 'warning', 'error']);
+  eq(m.levelSet('error,warning'), ['warning', 'error'], 'the order of the text does not matter');
+  eq(m.levelSet('all'), []); eq(m.levelSet(undefined), []); eq(m.levelSet('nonsense'), []);
+});
+
+test('level filter: lines with an odd level count as info, like the page does', function () {
+  eq(m.levelPasses('info', 'debug'), true);
+  eq(m.levelPasses('info', ''), true);
+  eq(m.levelPasses('warning', 'debug'), false);
+});
+
+test('level filter: clicking the buttons toggles a level, All clears, none or all three is All', function () {
+  eq(m.toggleLevel('all', 'warning'), 'warning');
+  eq(m.toggleLevel('warning', 'error'), 'warning,error');
+  eq(m.toggleLevel('warning,error', 'warning'), 'error');
+  eq(m.toggleLevel('error', 'error'), 'all', 'switching the last level off is All again');
+  eq(m.toggleLevel('warning,error', 'info'), 'all', 'all three on is All');
+  eq(m.toggleLevel('warning,error', 'all'), 'all');
+  eq(m.toggleLevel('info', 'warning'), 'info,warning');
+  eq(m.toggleLevel('all', 'info'), 'info');
+});
+
+test('level filter: the buttons show the count of their own level only', function () {
+  var c = { all: 10, warning: 3, error: 2 };
+  eq(m.levelCount(c, 'all'), 10); eq(m.levelCount(c, 'warning'), 3); eq(m.levelCount(c, 'error'), 2);
+  eq(m.levelCount(c, 'info'), 5, 'info is what is neither');
+  eq(m.levelCount({ all: 1, warning: 3, error: 3 }, 'info'), 0);
+  var html = fs.readFileSync(pathMod.join(pathMod.dirname(path), 'index.html'), 'utf8');
+  eq(/data-level="info"[^>]*>Info</.test(html), true);
+  eq(/data-level="warning"[^>]*>Warnings</.test(html), true, 'the button no longer says Warnings+');
+  eq(html.indexOf('Warnings+'), -1);
+  eq(/data-level="error"[^>]*>Errors</.test(html), true);
+});
+
 process.stdout.write(JSON.stringify(cases));
