@@ -326,8 +326,8 @@ Learn does not document the permissions on these folders; members of the node's 
 | Provisioning (OS installed) | The local admin set when provisioning, or the non-built-in local admin you created with the same credentials on every node | The local administrator (same on every node); if the nodes were joined to the domain before deployment (2604+), the deployment user added to local Administrators |
 | Arc registration (OEM image) | The built-in `Administrator` until the deployment local admin exists, then the deployment local admin | The built-in `Administrator` until the deployment admin exists, then the local administrator used for deployment (or the deployment user, if the nodes were joined to the domain beforehand) |
 | Validation | The deployment local admin (`localAdminUserName`), non-built-in | The local administrator |
-| Deployment | The deployment local admin | The local administrator; the LCM (deployment) user is added to local Administrators during deployment |
-| After deployment | The deployment local admin; `RecoveryAdmin` (password in Key Vault) | The LCM user; the local administrator |
+| Deployment | The deployment local admin | The local administrator, or the domain account you give Sonar once the nodes are joined and it is in local Administrators |
+| After deployment | The deployment local admin; `RecoveryAdmin` (password in Key Vault) | The local administrator, or the domain account you give Sonar |
 
 Do not use the built-in `Administrator` for validation or deployment: deployment renames it to `ASBuiltInAdmin`, so it stops working mid-run (Sonar warns at start). It is fine while the machines register with Arc. Azure side: Reader on the resource group is enough for everything Sonar does.
 

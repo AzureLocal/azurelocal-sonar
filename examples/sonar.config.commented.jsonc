@@ -57,7 +57,10 @@
   "osConfigEventsPath": "D:\\Data\\azl-ztp\\example\\evidence\\os-configuration-events.jsonl",
   // Optional. Which account reads a node's logs: "local" while it is a workgroup machine, "domain" once the OS configuration has reported
   // DomainJoined and DomainAdminsConfigured. Only names and a keyvault:// reference for the password; a password in the file is refused.
-  // "logAccounts": { "local": { "username": "azl-admin" }, "domain": { "netbios": "IIC", "username": "svc-join", "passwordRef": "keyvault://kv-example/svc-join-password" } },
+  // The reference is keyvault://<vault>/<secret>, optionally /<version> (32 hex characters) to pin the secret version; an invalid one is
+  // refused at load. maxRejections (1 to 5, default 2): rejections of the domain account before Sonar stops trying it until its password
+  // changes. Sonar never uses the LCM user.
+  // "logAccounts": { "local": { "username": "azl-admin" }, "domain": { "netbios": "IIC", "username": "svc-join", "passwordRef": "keyvault://kv-example/svc-join-password", "maxRejections": 2 } },
   // Optional. Append the run to this recording (JSON Lines). Start-AzlSonar.ps1 -Record overrides it.
   // "recordPath": "./recordings/clus01.jsonl",
   // Optional. Where the deployment logs are read on the seed node. The defaults are shown.

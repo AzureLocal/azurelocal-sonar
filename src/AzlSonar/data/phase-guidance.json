@@ -53,7 +53,7 @@
     {
       "phase": "arc-registration",
       "identityModel": "ActiveDirectory",
-      "account": "The built-in Administrator (the account the OEM image or the OS setup gives you) until the deployment admin exists; after that the local administrator used for deployment (the same on every node). If the nodes were joined to the domain before deployment (2604 or later), the deployment (LCM) user once it is in local Administrators. The built-in Administrator is renamed ASBuiltInAdmin when deployment starts.",
+      "account": "The built-in Administrator (the account the OEM image or the OS setup gives you) until the deployment admin exists; after that the local administrator used for deployment (the same on every node). If the nodes were joined to the domain before deployment (2604 or later), the domain account you give Sonar (identity.active_directory.domain_join_account) once it is in local Administrators. The built-in Administrator is renamed ASBuiltInAdmin when deployment starts.",
       "logPaths": [
         "C:\\Windows\\System32\\Bootstrap\\Logs",
         "C:\\ProgramData\\AzureConnectedMachineAgent\\Log"
@@ -88,7 +88,7 @@
     {
       "phase": "validation",
       "identityModel": "ActiveDirectory",
-      "account": "The local administrator (the same on every node). Learn does not say whether the deployment (LCM) user is a local admin during validation, unless the nodes were joined to the domain before deployment and it was added to Administrators.",
+      "account": "The local administrator (the same on every node), or, once the nodes are joined to the domain, the domain account you give Sonar (identity.active_directory.domain_join_account) when it is in local Administrators.",
       "logPaths": [
         "C:\\CloudContent\\MASLogs",
         "C:\\MASLogs",
@@ -188,7 +188,7 @@
     {
       "phase": "update",
       "identityModel": "ActiveDirectory",
-      "account": "The domain user that runs updates from a node: AzureStackLCMUser or an equivalent user (the LCM user from deployment), which is in local Administrators on the nodes. Reading the logs needs an account in local Administrators on the node.",
+      "account": "Reading the logs needs an account in local Administrators on the node: the local administrator, or the domain account you give Sonar (identity.active_directory.domain_join_account). Sonar never uses the deployment (LCM) user.",
       "logPaths": [
         "C:\\CloudDeployment\\Logs",
         "C:\\MASLogs",
