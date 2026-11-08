@@ -18,6 +18,13 @@
     Path to the cluster's Sonar config file (the older option; see examples/sonar.config.commented.jsonc).
 .PARAMETER PollSeconds
     Seconds between Azure polls (5 to 3600). Overrides pollSeconds in the config; the default is 20.
+.PARAMETER Monitor
+    Which stage to watch. Auto (the default) follows the whole flow: Discovery, Provisioning, OS configuration, Validate,
+    Deployment, Update. One of Discovery, Provisioning, OsConfiguration, Validate, Deployment, Update, AddNode or Repair runs
+    that monitor on its own: only its tile and section show, only the sources it needs are read (Discovery reads the discovery
+    files and needs no Azure sign-in; OsConfiguration does not read the node logs; Validate, Deployment, Update, AddNode and
+    Repair read their Azure resources and the seed node's log), the page title names it, and Log access lists only its phases.
+    Overrides monitor in the config.
 .PARAMETER Replay
     Path to a recording (.jsonl or .jsonl.gz) to play instead of watching a live deployment.
 .PARAMETER Port
@@ -48,6 +55,8 @@
 .EXAMPLE
     Connect-AzAccount
     ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml
+.EXAMPLE
+    ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor OsConfiguration
 .EXAMPLE
     ./Start-AzlSonar.ps1 -ConfigPath ./config/my-cluster.json
 .EXAMPLE
@@ -82,6 +91,10 @@ param(
     [switch]$NoBrowser,
 
     [switch]$NoAccessToken,
+
+    [Parameter(ParameterSetName = 'Live')]
+    [ValidateSet('Auto', 'Discovery', 'Provisioning', 'OsConfiguration', 'Validate', 'Deployment', 'Update', 'AddNode', 'Repair')]
+    [string]$Monitor,
 
     [Parameter(ParameterSetName = 'Live')]
     [pscredential]$Credential,
@@ -136,6 +149,7 @@ else {
     if ($ConfigPath) { $serverParameters.ConfigPath = $ConfigPath }
     if ($InfrastructureFile) { $serverParameters.InfrastructureFile = $InfrastructureFile }
     if ($PSBoundParameters.ContainsKey('PollSeconds')) { $serverParameters.PollSeconds = $PollSeconds }
+    if ($PSBoundParameters.ContainsKey('Monitor')) { $serverParameters.Monitor = $Monitor }
     if ($PSBoundParameters.ContainsKey('Credential')) { $serverParameters.Credential = $Credential }
     if ($PSBoundParameters.ContainsKey('Record')) { $serverParameters.Record = $Record }
     if ($Publishable) { $serverParameters.Publishable = $true }

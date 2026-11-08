@@ -64,6 +64,7 @@ function Initialize-AzlSonarSharedState {
             CredentialLock = [object]::new()   # one lock for the domain credential (read, mask, publish) and for the breaker and the per-node records
             LocalUserName = ''   # the local log account's user name (-Credential or the prompt), for the account shown per node
             OsConfigInfo  = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the OS configuration event file: events read and the newest event time (/api/details)
+            DiscoveryCache = [hashtable]::Synchronized(@{})   # hardware discovery files already read, by path (Get-AzlSonarDiscoveryState)
             ConfigInfo    = [hashtable]::Synchronized(@{ ReadAt = $null; CheckedAt = $null; ChangedAt = $null; Note = $null })   # when the config source was read, checked and last changed (/api/details)
         })
 }
@@ -949,6 +950,12 @@ function Start-AzlSonarServer {
         [ValidateRange(1, 65535)]
         [int]$Port = 8642,
 
+        # Which stage to watch: Auto (the whole flow, as always) or one monitor. A single monitor shows only its tile and
+        # reads only the sources it needs.
+        [Parameter(ParameterSetName = 'Live')]
+        [ValidateSet('Auto', 'Discovery', 'Provisioning', 'OsConfiguration', 'Validate', 'Deployment', 'Update', 'AddNode', 'Repair')]
+        [string]$Monitor,
+
         [Parameter(ParameterSetName = 'Live')]
         [AllowNull()]
         [pscredential]$Credential,
@@ -996,7 +1003,9 @@ function Start-AzlSonarServer {
         $readArguments = @{}
         if ($PSBoundParameters.ContainsKey('PollSeconds')) { $readArguments.PollSeconds = $PollSeconds }
         $config = if ($InfrastructureFile) { Read-AzlSonarConfig -InfrastructureFile $InfrastructureFile @readArguments } else { Read-AzlSonarConfig -Path $ConfigPath @readArguments }
-        Assert-AzlSonarAzContext
+        if ($PSBoundParameters.ContainsKey('Monitor')) { $config | Add-Member -NotePropertyName monitor -NotePropertyValue $Monitor -Force }
+        $plan = Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $config 'monitor' 'Auto'))
+        if ($plan.azure) { Assert-AzlSonarAzContext }
         $recordPath = if ($PSBoundParameters.ContainsKey('Record') -and $Record) { $Record } else { [string](Get-AzlSonarMember $config 'recordPath' '') }
         if ($Publishable -and -not $recordPath) { throw '-Publishable needs a recording: give -Record <file> or set recordPath in the config.' }
         if ($recordPath) { $recordPath = Resolve-AzlSonarRecordPath -Path $recordPath }
@@ -1039,16 +1048,16 @@ function Start-AzlSonarServer {
             $workerSpecs.Add(@{ Name = 'Recorder'; Command = 'Invoke-AzlSonarRecorderLoop'; Arguments = @{ Shared = $shared; Path = $recordPath; SessionJson = $sessionJson; Config = $config; Publishable = [bool]$Publishable; ExtraTerm = @($ExtraTerm) } })
         }
         $workerSpecs.Add(@{ Name = 'Poller'; Command = 'Invoke-AzlSonarPollerLoop'; Arguments = @{ Shared = $shared; Config = $config } })
-        $workerSpecs.Add(@{ Name = 'Tailer'; Command = 'Invoke-AzlSonarTailerLoop'; Arguments = @{ Shared = $shared; Config = $config; Credential = $logCredential } })
-        if ($config.ztpEventsPath) {
+        if ($plan.tailer) { $workerSpecs.Add(@{ Name = 'Tailer'; Command = 'Invoke-AzlSonarTailerLoop'; Arguments = @{ Shared = $shared; Config = $config; Credential = $logCredential } }) }
+        if ($config.ztpEventsPath -and $plan.ztpEvents) {
             # azurelocal-ztp event file (JSON Lines): provisioning states of the machines, shown in the log pane.
             $workerSpecs.Add(@{ Name = 'ZtpEvents'; Command = 'Invoke-AzlSonarZtpEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
         }
-        if ($config.osConfigEventsPath) {
+        if ($config.osConfigEventsPath -and $plan.osConfigEvents) {
             # The toolkit's OS configuration event file (JSON Lines): the OS configuration mode and its log lines.
             $workerSpecs.Add(@{ Name = 'OsConfigEvents'; Command = 'Invoke-AzlSonarOsConfigEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
         }
-        if ($config.armEventsPath) {
+        if ($config.armEventsPath -and $plan.armEvents) {
             # The toolkit's ARM Validate and Deploy event file (JSON Lines): the ARM view of Validate and Deployment and its log lines.
             $workerSpecs.Add(@{ Name = 'ArmEvents'; Command = 'Invoke-AzlSonarArmEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
         }
@@ -1056,7 +1065,7 @@ function Start-AzlSonarServer {
             # Logs a notice when the master file's node set changes (restart Sonar to track it).
             $workerSpecs.Add(@{ Name = 'InfrastructureWatch'; Command = 'Invoke-AzlSonarInfrastructureWatchLoop'; Arguments = @{ Shared = $shared; Config = $config; Path = $config.sourcePath } })
         }
-        if ($config.provisioningRoute -ne 'simplified') {
+        if ($config.provisioningRoute -ne 'simplified' -and $plan.nodeProbe) {
             # Reads Get-ArcBootstrapStatus / Get-ArcZeroDaySolutionUpdateStatus on each node, only while Arc registration (OEM image route) runs.
             $workerSpecs.Add(@{ Name = 'NodeProbe'; Command = 'Invoke-AzlSonarNodeProbeLoop'; Arguments = @{ Shared = $shared; Config = $config; Credential = $logCredential } })
         }

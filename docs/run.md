@@ -6,6 +6,35 @@ In every command, `-InfrastructureFile ./infrastructure.yml` (the master file, t
 
 The ZTP run has a page of its own for each stage (Boot, Bootstrap, Vouchers and the claim, Install OS, Device, Network, Restore, Handoff): [Running Sonar, stage by stage](./stages.md); the Log access window (which account and folders for each phase) is explained in [Log access](./log-access.md). Access for each purpose is summarised in its section. The full picture, which roles and network paths a run needs, is in the toolkit's [access and connectivity](https://github.com/AzureLocal/azurelocal-toolkit/blob/main/docs/access-and-connectivity.md) page.
 
+## Watch the hardware discovery (before ZTP)
+
+**When:** you ran, or are about to run, the toolkit's `Invoke-HardwareDiscovery.ps1` (the first stage of the flow, before ZTP). Sonar reads the files it writes; it never talks to an iDRAC.
+
+```powershell
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor Discovery
+```
+
+**What Sonar shows:** the **Discovery** mode, a card per machine with its service tag, the ports with their MACs, the suggested management port and the BOSS card, and what to check before ZTP. [Details](./stages.md#discovery).
+
+**Access:** read access to the discovery folder (`discoveryPath`). `-Monitor Discovery` needs no Azure sign-in and reads no node.
+
+## Run one stage on its own (-Monitor)
+
+By default Sonar follows the whole flow (`-Monitor Auto`): Discovery, Provisioning, OS configuration, Validate, Deployment and Update. To watch one stage, name it. Only that tile and section show (the others are hidden, not greyed), only the sources that stage needs are read, **Log access** lists only its phases, and the page title names it.
+
+| Launch line | Shows | Reads |
+| --- | --- | --- |
+| `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor Discovery` | Discovery | The discovery files only. No Azure sign-in. |
+| `... -Monitor Provisioning` | Provisioning (ZTP) or (OS image) | Azure, the ZTP event file, the OEM image probes. |
+| `... -Monitor OsConfiguration` | OS configuration | The OS configuration event file and, for Arc Run Commands, Azure. No node logs. |
+| `... -Monitor Validate` | Validate | The validation resources in Azure and the seed node's log. |
+| `... -Monitor Deployment` | Deployment | The deployment resources in Azure and the seed node's log. |
+| `... -Monitor Update` | Update | The update resources in Azure and the seed node's log. |
+| `... -Monitor AddNode` | Add node | The Arc machines and the seed node's log. |
+| `... -Monitor Repair` | Repair | The Arc machines and the seed node's log. |
+
+The same choice is the `monitor` key of a config file (`Set-AzlSonarConfig -Path ./config/clus01.json -Key monitor -Value OsConfiguration`); `-Monitor` overrides it. A config `track` of `health` is accepted and treated as `auto` (there is no Health mode).
+
 ## Watch a ZTP run
 
 **When:** [azurelocal-ztp](https://github.com/AzureLocal/azurelocal-ztp) provisions bare machines with Microsoft's simplified machine provisioning. `scenario.os_install` is `simplified`.
@@ -106,7 +135,7 @@ With the default `track: auto` (and `updateTrack: auto`) Sonar reads the update 
 
 **Access:** Reader on the resource group; for the node logs an account in the seed node's local Administrators.
 
-## Look at a deployed cluster (Health)
+## Look at a deployed cluster
 
 **When:** the cluster is deployed and you want to see its state without touching it.
 
@@ -114,7 +143,7 @@ With the default `track: auto` (and `updateTrack: auto`) Sonar reads the update 
 ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml
 ```
 
-**What Sonar shows:** the **Health** mode: each machine's Azure Arc status (*N of M connected*). Sonar runs no health checks and shows no steps here; the Steps box says so. The status chip says *Done* for a finished deployment.
+**What Sonar shows:** the **Deployment** mode in its *Done* state, with a card per machine that keeps its Azure Arc status (*N of M machines are connected to Azure Arc* in the headline). There is no separate Health mode: Sonar runs no health checks, and every machine card shows its Arc status in every mode.
 
 **Access:** Reader on the resource group.
 
@@ -127,7 +156,7 @@ Set-AzlSonarConfig -Path ./config/clus01.json -Key track -Value add-node      # 
 ./Start-AzlSonar.ps1 -ConfigPath ./config/clus01.json -Credential (Get-Credential)
 ```
 
-**What Sonar shows:** the **Health** mode with the Arc status of each machine, the live logs from the seed node, and the *Add node* or *Repair* tab of [Log access](./log-access.md) with the account, folders and the commands to check progress. **Access:** Reader on the resource group; the account the tab names in the seed node's local Administrators.
+**What Sonar shows:** the **Add node** or **Repair** mode (a tile of its own, shown when the run is one of them) with the Arc status on each machine card, the live logs from the seed node, and the *Add node* or *Repair* tab of [Log access](./log-access.md) with the account, folders and the commands to check progress. **Access:** Reader on the resource group; the account the tab names in the seed node's local Administrators.
 
 ## Learn the page without a deployment (demo and replay)
 

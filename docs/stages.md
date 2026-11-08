@@ -105,6 +105,25 @@ The screens below use the page's own demo data (`?demo=1&route=simplified`); see
 
 **What to do:** nothing in Sonar. ZTP's job is over. Start OS configuration (OEM drivers, `C:\SBE`, DHCP off, DNS and time, the deployment admin), then Validate. Sonar stays at **ZTP complete** until the OS configuration run starts and writes its events (the **OS configuration** mode takes over), then Validate.
 
+## Discovery
+
+The first stage of the flow, **before ZTP**: the toolkit's `Invoke-HardwareDiscovery.ps1` reads every node's Dell iDRAC (Redfish, read only) and writes, in its `-OutputPath` folder, one `<ServiceTag>.json` per node and `discovery-summary.json` (written after the last node). Sonar follows that folder (`discoveryPath`; with the master file it is the `discovery` folder inside `provisioning.simplified.evidence_path`). It reads the files, never an iDRAC, and parses a file again only when it changes.
+
+Per machine the page shows the **service tag** (the serial number ZTP maps the ownership voucher by), the model and BIOS version, the iDRAC MAC, every network port with its MAC and link state, the **suggested management port** (and whether it is confirmed or only a guess), and the **BOSS card** (drives, and whether a virtual disk exists; a card without one gets it from the toolkit's Phase 02 Task 01 before the OS install). Anything to check before ZTP is listed under the machine.
+
+| State | Meaning |
+| --- | --- |
+| *Waiting* (grey) | `discoveryPath` is set and the folder is not there yet, or it is there with no discovery file. |
+| *Running* | Some machines are read and `discovery-summary.json`, which the toolkit writes last, is not there yet. |
+| *Failed* | A file cannot be read (it is named), or the summary is there and a machine has no record (the run reported it as failed). |
+| *Done* | Every machine has a record and the summary is there. Machines with something to check say *Check*. |
+
+Without `discoveryPath` the Discovery tile is grey and its hover text says how to get its data. While Discovery is the only stage with anything to show, the page opens on it; once ZTP (or OS configuration) starts the page follows that. For a **manual install** the next step is OS configuration, not ZTP (below).
+
+### A manual install (no ZTP)
+
+When the master file says `scenario.os_install` is not `simplified` (the OS is installed from an ISO, by hand), Sonar does not monitor the install. The **Provisioning** tile reads *Not used: manual install* in a neutral state (no progress, no *Waiting*), the steps box says so, all ZTP wording is hidden for the run, and the page opens on **OS configuration** (on Discovery first when discovery data exists). Each machine row of OS configuration still shows its method (ZTP or ISO), transport and address source as extra detail. With `scenario.os_install: simplified` everything is as before.
+
 ## OS configuration
 
 ![The OS configuration mode: a ZTP machine that converged after a retry, an ISO machine whose drivers step failed, and a ZTP machine still applying](images/tour-osconfig.png)
@@ -117,6 +136,17 @@ The screens below use the page's own demo data (`?demo=1&route=simplified`); see
 Connect-AzAccount -Tenant <tenant-id>
 ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml
 ```
+
+### The event feed Sonar reads
+
+One JSON object per line (`timestamp`, `node`, `stage`, `step`, `state`, `evidence`, `level`, `nextAction`, `method`, `transport`, and from the toolkit's hardened feed `runId` and `seq`). `osConfigEventsPath` can be one file, a **folder** (every `*.jsonl` in it, oldest first: the toolkit's one file per run) or a **pattern** such as `os-configuration-events*.jsonl`.
+
+- **Runs.** The newest run id is the current run and the page shows it under the headline. A new run id starts over (the machines of the earlier run go); a late line of an earlier run is ignored and counted (*Older run, ignored*). Lines are ordered by `seq`, a repeated `seq` is dropped, and a late `NodeStarted` does not throw away the events already held. A file with no `runId` is one legacy run, read as before.
+- **Every state is shown.** Run: `RunStarted`, `PlanCompleted`, `WipeListPublished`, `WipeListApproved`, `WipeListRejected`, `RunCompleted`. Node: `NodeStarted`, `MethodResolved`, `TransportResolved` (the address and where it came from), `NodeRetry`, `NodeRestarting`, `NodeReconnecting`, `NodeReconnected`, `NodeWaiting` (the heartbeat: what the host waits for, the phase and the seconds), `NodeConverged`, `NodeFailed`, `NodeBlocked`. Step: `StepPlanned`, `StepSkipped`, `StepApplying`, `StepApplied`, `StepFailed`, `StepVerified`. Domain join: `DomainJoinPlanned`, `DomainJoinApplying`, `DomainJoined`, `DomainAdminsConfigured`, `DomainJoinFailed`. Guarded network change: `NetworkChangeStaged`, `NetworkChangeVerifying`, `NetworkChangeAwaitingConfirm`, `NetworkChangeCommitted`, `NetworkChangeRepaired`, `NetworkChangeRolledBack`, `NetworkChangeRefused`. Remoting: `RemotingProfileResolved`, `RemotingFirewallChange`, `RemotingListenerChange`, `RemotingBootstrap*`, `TrustedHostsChanged`, `TrustedHostsRestored`; also `StaleRunCommandDeleted`. Each has a label, a status and a message (its evidence). A state this Sonar does not know is **shown, never dropped**: in the machine's newest events marked as not known, under *States not known to Sonar* and in the log pane. Fields Sonar does not know are ignored.
+- **Guarded network change panel.** Under the cards: the change id, the old and new address, the phase, the deadline with a countdown while the node waits for the confirmation, the rollback or refusal reason and the node's verdict.
+- **Node address.** Each card shows the address the run reaches the machine on and how it was found: *override*, *ZTP handoff*, *Azure Arc machine*, *infrastructure file* or *neighbor table by MAC* (from the `TransportResolved` event's `addressSource`, or `found by <source>` in its text; a source Sonar does not know is shown as written, none as *source not reported*).
+
+Unverified against a live run: the field names above come from the toolkit's source (`AzlOsConfigurationEvents.psm1`, `AzlGuardedChange.psm1`, `AzlDomainJoin.psm1`, `AzlRemotingSession.psm1`) and its design document, not from a recorded run; `runId`, `seq` and `addressSource` are the hardening work in progress.
 
 With the master file the file is `<provisioning.simplified.evidence_path>/os-configuration-events.jsonl`, next to `ztp-events.jsonl`. If the toolkit run was given `-EventLogPath`, or you use a config file, set [`osConfigEventsPath`](./config.md) (`Set-AzlSonarConfig -Key osConfigEventsPath -Value <file>`). Sonar tails the file every 2 seconds, read-only. Without it the **OS configuration** tile stays grey and says how to get the data.
 
@@ -169,10 +199,10 @@ A machine is **converged** when the toolkit reports `NodeConverged` for it. The 
 | Next step | In Sonar | How to run it |
 | --- | --- | --- |
 | **OS configuration** | The **OS configuration** mode: a card per machine, its steps, the method and versions, the guarded network change and the domain join. | The toolkit's `Invoke-AzureLocalOsConfiguration.ps1`, with Sonar pointed at its event file (`osConfigEventsPath`). [Details](#os-configuration). |
-| **Validate** | The **Validate** mode: the toolkit's checks and validation results ([ARM run](./arm-run.md)), Azure's validation steps (`deploymentSettings`), the running step with a live timer, errors expanded. Node logs from the seed node. | `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Credential (Get-Credential)` with the deployment local admin. [Details](./run.md#watch-os-configuration). |
+| **Validate** | The **Validate** mode: the toolkit's checks and validation results ([ARM run](./arm-run.md)), Azure's validation steps (`deploymentSettings`), the running step with a live timer, errors expanded. Node logs from the seed node. | `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Credential (Get-Credential)` with the deployment local admin. [Details](./run.md#watch-validate). |
 | **Deployment** | The **Deployment** mode: the toolkit's progress per cluster step with the known-failure hint ([ARM run](./arm-run.md)), the nested step tree, the live logs, the account and folders in **Log access**. | The same command. [Details](./run.md#watch-a-deployment). |
 | **Update** | The **Update** mode: the update run's steps. | `track: update`, or `auto` when Azure reports an update. [Details](./run.md#follow-an-update). |
-| **Health** | The **Health** mode: each machine's Arc status. Sonar runs no health checks. | Any run on a deployed cluster. [Details](./run.md#look-at-a-deployed-cluster-health). |
+| **Deployed cluster** | The **Deployment** mode in its *Done* state, with a card per machine that keeps its Arc status. There is no Health mode. | Any run on a deployed cluster. [Details](./run.md#look-at-a-deployed-cluster). |
 
 A machine that fails in any stage turns red, the status chip reads **Failed**, and the page stays on the mode that failed so you can read the text.
 

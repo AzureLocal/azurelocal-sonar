@@ -30,7 +30,7 @@ features:
 ## Run it and configure it
 
 - [Start here](/start-here): pick your purpose; the three ways to configure Sonar (the master `infrastructure.yml`, guided prompts, a file by hand).
-- [Running Sonar, by purpose](/run) and [stage by stage](/stages): the commands, what the page shows, what done and failed look like and the access needed, for each ZTP stage, Validate, Deployment, Update, Health, add node and repair, and replay.
+- [Running Sonar, by purpose](/run) and [stage by stage](/stages): the commands, what the page shows, what done and failed look like and the access needed, for Discovery, each ZTP stage, OS configuration, Validate, Deployment, Update, add node and repair, a single stage on its own (`-Monitor`), and replay.
 - [Log access](/log-access): the account and folders for every phase, and how Sonar reaches the node.
 - [Configuration](/config): every key, the master-file mapping, and how to update the file (`Set-AzlSonarConfig`).
 

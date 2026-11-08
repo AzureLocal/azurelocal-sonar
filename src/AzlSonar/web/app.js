@@ -26,13 +26,15 @@
   // ?demo=1&route=simplified|oem shows the machine-readiness phase of that route instead of a running deployment;
   // route=osconfig shows an OS configuration run (one ZTP and one ISO machine side by side); route=arm the toolkit's ARM
   // Validate and Deploy run (checks, validation, deployment, and the step 0.41 failure).
+  // (Provisioning reads Not used); route=discovery the Discovery stage alone.
   // ?demo=1&replay=1 plays the demo deployment as a built-in recording (the replay transport bar without a file).
   var DEMO_REPLAY = DEMO && /(?:^|[?&])replay=(?:1|true|yes)(?:&|$)/i.test(location.search);
   var REPLAY_SPEEDS = [1, 30, 60, 240];
   var DEMO_ROUTE = (function () {
     if (typeof location === 'undefined') return '';
-    var m = /(?:^|[?&])route=(simplified|oem|oem-image|osconfig|arm)(?:&|$)/i.exec(location.search);
-    return m ? (m[1].toLowerCase() === 'simplified' ? 'simplified' : m[1].toLowerCase() === 'osconfig' ? 'osconfig' : m[1].toLowerCase() === 'arm' ? 'arm' : 'oem-image') : '';
+    var m = /(?:^|[?&])route=(simplified|oem|oem-image|osconfig|arm|iso|discovery)(?:&|$)/i.exec(location.search);
+    var k = m ? m[1].toLowerCase() : '';
+    return k === 'simplified' || k === 'osconfig' || k === 'arm' || k === 'iso' || k === 'discovery' ? k : (m ? 'oem-image' : '');
   })();
 
   // ------------------------------------------------------------------ state
@@ -57,15 +59,16 @@
     follow: true,
     newWhilePaused: 0,
     rendered: 0,
-    treeSig: { provisioning: null, osconfiguration: null, armvalidation: null, validation: null, extensions: null, armdeployment: null, deployment: null, update: null },
+    treeSig: { discovery: null, provisioning: null, osconfiguration: null, armvalidation: null, validation: null, extensions: null, armdeployment: null, deployment: null, update: null },
     expanded: new Map(),        // key -> bool (user choice)
-    sectionCollapsed: { provisioning: false, osconfiguration: false, armvalidation: false, validation: false, extensions: false, armdeployment: false, deployment: false, update: false },
+    sectionCollapsed: { discovery: false, provisioning: false, osconfiguration: false, armvalidation: false, validation: false, extensions: false, armdeployment: false, deployment: false, update: false },
     provAutoCollapsed: false,   // the provisioning section was collapsed once validation started
     provTree: [],               // one synthetic tree item per machine (provisioningTreeOf)
     oscTree: [],                // OS configuration: one tree item per machine with its steps (osConfigTreeOf)
+    discTree: [],               // Discovery: one tree item per machine with what was read (discoveryTreeOf)
     extTree: [],                // OEM image route, from Validate on: one item per machine with its extensions
     stepIndex: new Map(),       // key -> { node, section, parentKey }
-    focusKey: { provisioning: null, osconfiguration: null, armvalidation: null, validation: null, extensions: null, armdeployment: null, deployment: null, update: null },
+    focusKey: { discovery: null, provisioning: null, osconfiguration: null, armvalidation: null, validation: null, extensions: null, armdeployment: null, deployment: null, update: null },
     selectedKey: null,
     currentKey: null,
     lastAutoKey: null,
@@ -597,7 +600,8 @@
           evidence: isObj(n.evidence) ? n.evidence : {}, state: str(n.state), stateText: str(n.stateText), retries: Number(n.retries) || 0, restarts: Number(n.restarts) || 0,
           guarded: str(n.guarded), guardedDetail: isObj(n.guardedDetail) ? n.guardedDetail : null, runCommands: arr(n.runCommands).filter(isObj),
           changes: Number(n.changes) || 0, blocked: Number(n.blocked) || 0, currentStep: str(n.currentStep),
-          domainJoined: n.domainJoined === true, logAccount: isObj(n.logAccount) ? n.logAccount : null }
+          domainJoined: n.domainJoined === true, logAccount: isObj(n.logAccount) ? n.logAccount : null,
+          address: oscAddressChip(n), timeline: oscTimelineLines(n, 3) }
       };
     });
   }
@@ -658,6 +662,10 @@
     var chips = [{ text: chip.text, kind: chip.kind, title: chip.title }];
     if (tr) chips.push({ text: tr, kind: 'idle', title: 'How this machine is reached.' });
     if (isObj(n.logAccount) && str(n.logAccount.reason)) lines.push('Logs: ' + str(n.logAccount.reason));
+    var ac = oscAddressChip(n);
+    if (ac) chips.push({ text: ac.text, kind: 'idle', title: ac.title });
+    if (isObj(n.waiting)) lines.push('Waiting for ' + str(n.waiting.what) + ' (' + (Number(n.waiting.elapsedSeconds) || 0) + ' s' + (str(n.waiting.phase) ? ', phase ' + str(n.waiting.phase) : '') + ')');
+    arr(n.unknownStates).slice(0, 2).forEach(function (u) { lines.push('Event not known to this Sonar: ' + str(u)); });
     return {
       name: str(n.name), seed: false, state: OSC_STATE_LABEL[state] || state, kind: OSC_STATE_KIND[state] || 'idle', status: normStatus(n.status),
       tip: str(n.stateText), arc: null, chips: chips, lines: lines.concat(arr(n.warnings).slice(0, 2).map(function (w) { return 'Warning: ' + firstLine(w, 140); })),
@@ -679,15 +687,117 @@
     return head + (retry ? ', ' + retry + ' retrying' : '') + (osc.state === 'planning' ? ' (reading the machines)' : osc.state === 'applying' ? ' (applying)' : '');
   }
 
+  // The guarded network change panel(s): one per machine that has one. Model: [{ node, title, kind, rows[{k,v}], until, reason }].
+  var OSC_GUARDED_PHASE_KIND = { Staged: 'run', Verifying: 'run', AwaitingConfirm: 'warn', Repaired: 'warn', Committed: 'ok', RolledBack: 'err', Refused: 'err' };
+  function oscGuardedPanels(osc) {
+    return arr(isObj(osc) ? osc.guarded : []).filter(isObj).map(function (g) {
+      var phase = str(g.phase) || str(g.state), rows = [];
+      rows.push({ k: 'Change id', v: str(g.changeId) || 'not reported' });
+      if (str(g.oldAddress) || str(g.newAddress)) rows.push({ k: 'Address', v: (str(g.oldAddress) || '?') + ' \u2192 ' + (str(g.newAddress) || '?') });
+      rows.push({ k: 'Phase', v: (OSC_GUARDED_LABEL[phase] || phase) + (g.reconnecting === true ? ' (the host is reconnecting)' : '') + (str(g.rung) ? ', repair rung ' + str(g.rung) : '') });
+      if (str(g.confirmBy)) rows.push({ k: 'Deadline', v: fmtDateTime(parseTime(g.confirmBy)) + (Number(g.confirmMinutes) ? ' (' + Number(g.confirmMinutes) + ' min window)' : '') });
+      if (str(g.reason)) rows.push({ k: phase === 'Refused' ? 'Refused because' : 'Rollback reason', v: str(g.reason) });
+      if (str(g.verdict)) rows.push({ k: 'Node verdict', v: str(g.verdict) });
+      return { node: str(g.node), title: 'Guarded network change: ' + str(g.node), kind: OSC_GUARDED_PHASE_KIND[phase] || 'idle', rows: rows, until: g.active === true && phase === 'AwaitingConfirm' ? str(g.confirmBy) : '' };
+    });
+  }
+
+  // Where a machine's management address came from: { text, title } or null.
+  function oscAddressChip(n) {
+    var a = isObj(n.address) ? n.address : null;
+    if (!a || !str(a.value)) return null;
+    return { text: str(a.value) + ' (' + (str(a.source) ? str(a.sourceLabel) : 'source not reported') + ')' + (a.forced === true ? ', transport forced' : ''),
+      title: 'The address the run reaches this machine on and how it was found: override, ZTP handoff, Azure Arc machine, infrastructure file or the neighbor table (MAC lookup).' + (a.reconnected === true ? ' The machine answered on this address after a restart or an address change.' : '') };
+  }
+
+  // The newest events of a machine (label, status and message), unknown states included; [{ text, kind }].
+  function oscTimelineLines(n, count) {
+    return arr(n.timeline).filter(isObj).slice(-(count || 3)).map(function (e) {
+      return { text: str(e.label) + (e.known === false ? ' (state not known to this Sonar)' : '') + (str(e.message) && str(e.message) !== str(e.label) ? ': ' + firstLine(e.message, 140) : ''), kind: str(e.status) || 'idle' };
+    });
+  }
+
   // Facts under the headline: [{ k, v }].
   function oscFacts(osc) {
-    var run = isObj(osc.run) ? osc.run : {}, out = [];
+    var run = isObj(osc.run) ? osc.run : {}, out = [], extra = [];
+    extra.push({ k: 'Run id', v: str(run.id) || 'none (older feed: one run)' });
+    if (Number(run.staleIgnored) > 0) extra.push({ k: 'Older run, ignored', v: Number(run.staleIgnored) + ' line' + (Number(run.staleIgnored) === 1 ? '' : 's'), warn: true });
+    var unk = arr(osc.unknownStates).filter(isObj);
+    if (unk.length) extra.push({ k: 'States not known to Sonar', v: unk.map(function (u) { return str(u.state) + (Number(u.count) > 1 ? ' \u00d7' + u.count : ''); }).join(', '), warn: true });
+    var rem = isObj(osc.remoting) && isObj(osc.remoting.profile) ? osc.remoting.profile : null;
+    if (rem) extra.push({ k: 'Remoting', v: str(rem.class) + (str(rem.posture) ? ', ' + str(rem.posture) : '') + (str(rem.scheme) ? ', ' + str(rem.scheme) : ''), warn: rem.relaxed === true });
+    var th = isObj(osc.remoting) && isObj(osc.remoting.trustedHosts) ? osc.remoting.trustedHosts : null;
+    if (th && th.changed === true) extra.push({ k: 'TrustedHosts', v: th.restored === true ? 'changed, restored' : 'changed on the runner, not restored yet', warn: th.restored !== true });
     out.push({ k: 'Run', v: ({ waiting: 'not started', planning: 'planning', planned: 'plan finished', applying: 'applying', converged: 'converged', failed: 'failed', incomplete: 'ended, not converged' })[str(osc.state)] || str(osc.state) });
     out.push({ k: 'Machines converged', v: (Number(osc.nodesConverged) || 0) + ' of ' + (Number(osc.nodesTotal) || 0) });
     var w = isObj(osc.wipe) ? osc.wipe : {};
     if (w.published) out.push({ k: 'Wipe list', v: !w.enabled ? 'off' : (Number(w.count) === 0 ? 'nothing to wipe' : (w.pending ? 'pending (' + arr(w.nodes).length + ' machine' + (arr(w.nodes).length === 1 ? '' : 's') + ')' : 'done')), warn: !!(w.enabled && w.pending && Number(w.count) > 0) });
+    var wa = isObj(osc.wipe) && isObj(osc.wipe.approval) ? osc.wipe.approval : null;
+    if (wa) out.push({ k: 'Wipe list approval', v: str(wa.state).toLowerCase() + (str(wa.message) ? ': ' + firstLine(wa.message, 100) : ''), warn: str(wa.state) === 'Rejected' });
     if (run.mode) out.push({ k: 'Mode', v: run.mode });
-    return out;
+    return out.concat(extra);
+  }
+
+  // ------------------------------------------------------------------ Discovery (pure; also run by tests under Node)
+  //
+  // The first stage, before ZTP: the toolkit's Invoke-HardwareDiscovery.ps1 reads each iDRAC and writes one file per machine
+  // and a summary. The back end reads them (state.discovery); the page shows the service tag, the ports with their MACs, the
+  // suggested management port and the BOSS card of every machine.
+
+  var DISC_STATE_LABEL = { discovered: 'Discovered', attention: 'Check', missing: 'Not discovered yet', unreadable: 'Unreadable' };
+  var DISC_STATE_KIND = { discovered: 'ok', attention: 'warn', missing: 'idle', unreadable: 'err' };
+
+  function discOf(state) { return isObj(state) && isObj(state.discovery) ? state.discovery : null; }
+  function discNodes(state) { var d = discOf(state); return d ? arr(d.nodes).filter(isObj) : []; }
+  // Is there anything from the discovery to show? (a machine was read, or a file could not be)
+  function discHasData(d) { return isObj(d) && (Number(d.nodesDiscovered) > 0 || arr(d.problems).length > 0); }
+
+  // One tree item per machine; its children are the identity, the ports, the management port and the BOSS card.
+  function discoveryTreeOf(state) {
+    return discNodes(state).map(function (n) {
+      return {
+        id: str(n.name), name: str(n.name), description: str(n.stateText), status: normStatus(n.status), start: null, end: null,
+        errors: arr(n.errors).map(str).filter(Boolean), children: arr(n.tree),
+        disc: { machine: true, state: str(n.state), serviceTag: str(n.serviceTag), model: str(n.model), notes: arr(n.notes).map(str), management: isObj(n.management) ? n.management : null,
+          boss: isObj(n.boss) ? n.boss : null, bmcMac: str(n.bmcMac), ports: arr(n.ports).filter(isObj) }
+      };
+    });
+  }
+
+  // The summary-card model of one machine in the Discovery mode.
+  function discCard(n) {
+    var state = str(n.state) || 'missing', m = isObj(n.management) ? n.management : null, b = isObj(n.boss) ? n.boss : {};
+    var lines = [];
+    if (state === 'missing') lines.push(str(n.stateText));
+    if (state === 'unreadable') lines.push(firstLine(arr(n.errors)[0] || str(n.stateText), 140));
+    if (n.found !== false && state !== 'unreadable') {
+      if (str(n.serviceTag)) lines.push('Service tag ' + str(n.serviceTag));
+      var ports = arr(n.ports), up = ports.filter(function (p) { return isObj(p) && p.linkUp === true; }).length;
+      if (ports.length) lines.push(ports.length + ' network port' + (ports.length === 1 ? '' : 's') + ', ' + up + ' with link up');
+      lines.push(m ? 'Management port: ' + str(m.name) + (str(m.mac) ? ' (' + str(m.mac) + ')' : '') + (m.confirmed ? '' : ' - a guess, confirm it') : 'No management port suggested');
+      arr(n.notes).slice(0, 2).forEach(function (t) { lines.push('Check: ' + firstLine(t, 140)); });
+    }
+    var chips = [];
+    if (str(n.model)) chips.push({ text: str(n.model), kind: 'idle', title: 'The model the iDRAC reports.' });
+    if (b.present === true) chips.push({ text: b.hasVirtualDisk ? 'BOSS: virtual disk' : 'BOSS: no virtual disk', kind: b.hasVirtualDisk ? 'ok' : 'warn', title: 'The BOSS card holds the OS drives. A card without a virtual disk gets one in the toolkit\u2019s Phase 02 Task 01, before the OS install.' });
+    else if (n.found !== false && state !== 'unreadable') chips.push({ text: 'No BOSS card', kind: 'idle', title: 'The iDRAC lists no BOSS card.' });
+    return {
+      name: str(n.name), seed: false, state: DISC_STATE_LABEL[state] || state, kind: DISC_STATE_KIND[state] || 'idle', status: normStatus(n.status),
+      tip: str(n.stateText), arc: null, chips: chips, lines: lines, waits: '', progress: null, until: '', discovery: true
+    };
+  }
+
+  function discHeadline(d, manual) {
+    if (!isObj(d) || d.configured !== true) return 'Discovery is not configured: set discoveryPath to the folder of the toolkit\u2019s hardware discovery';
+    var total = Number(d.nodesTotal) || 0, ok = Number(d.nodesDiscovered) || 0;
+    switch (str(d.state)) {
+      case 'waiting': return 'Waiting for the discovery output. Run Invoke-HardwareDiscovery.ps1 from the toolkit; Sonar reads the folder it writes.';
+      case 'empty': return 'The discovery folder is there but holds no machine yet';
+      case 'partial': return ok + ' of ' + total + ' machine' + (total === 1 ? '' : 's') + ' read; the discovery is still running';
+      case 'failed': return arr(d.problems).length ? arr(d.problems).length + ' discovery file' + (arr(d.problems).length === 1 ? '' : 's') + ' could not be read (' + str(d.problems[0].file) + ')' : ok + ' of ' + total + ' machines discovered; ' + (Number(d.nodesFailed) || 0) + ' not';
+      case 'discovered': return str(d.stateText) + '. Next: ' + (manual ? 'OS configuration' : 'ZTP');
+      default: return str(d.stateText);
+    }
   }
 
   // ------------------------------------------------------------------ ARM Validate and Deploy (pure; also run by tests under Node)
@@ -808,16 +918,27 @@
 
   // ------------------------------------------------------------------ modes and summary (pure; also run by tests under Node)
   //
-  // The page shows one "mode" at a time: Provisioning, Validate, Deployment, Update, Health. A mode maps onto the phase the
-  // back end reports (phase / activePhase) and the section of the state that holds its data (provisioning, validation,
-  // deployment, update). Azure's raw states are turned into plain words here; the raw value goes into a tooltip.
+  // The page shows one "mode" at a time: Discovery, Provisioning, OS configuration, Validate, Deployment, Update (and, for a
+  // run that Sonar was started for, Add node or Repair). A mode maps onto the phase the back end reports (phase /
+  // activePhase) and the section of the state that holds its data (discovery, provisioning, validation, deployment,
+  // update). Azure's raw states are turned into plain words here; the raw value goes into a tooltip. A finished
+  // deployment is the Deployment mode in its Done state; the machine cards keep each machine's Azure Arc status.
 
-  var MODE_IDS = ['prov', 'osconfig', 'validate', 'deploy', 'update', 'health'];
+  var MODE_IDS = ['discovery', 'prov', 'osconfig', 'validate', 'deploy', 'update', 'addnode', 'repair'];
   var MODE_OF_PHASE = {
     provisioning: 'prov', 'arc-registration': 'prov', validation: 'validate', deployment: 'deploy', update: 'update',
-    done: 'health', 'post-deployment': 'health', 'add-node': 'health', repair: 'health'
+    done: 'deploy', 'post-deployment': 'deploy', 'add-node': 'addnode', repair: 'repair'
   };
-  var MODE_TITLE = { osconfig: 'OS configuration', validate: 'Validate', deploy: 'Deployment', update: 'Update', health: 'Health' };
+  var MODE_TITLE = { discovery: 'Discovery', osconfig: 'OS configuration', validate: 'Validate', deploy: 'Deployment', update: 'Update', addnode: 'Add node', repair: 'Repair' };
+  // Start-AzlSonar.ps1 -Monitor (the monitor key of the config): the one tile a standalone monitor shows.
+  var MONITOR_TILE = { discovery: 'discovery', provisioning: 'prov', osconfiguration: 'osconfig', validate: 'validate', deployment: 'deploy', update: 'update', addnode: 'addnode', repair: 'repair' };
+  // The tile a standalone monitor was started for, or '' (Auto: every tile of the flow).
+  function monitorOf(state) {
+    var k = isObj(state) ? str(state.monitor).toLowerCase().replace(/[^a-z]/g, '') : '';
+    return MONITOR_TILE[k] || '';
+  }
+  // Provisioning is not used when the master file says the OS was installed by hand (scenario.os_install is not simplified).
+  function manualInstall(state) { return isObj(state) && isObj(state.provisioning) && state.provisioning.manualInstall === true; }
 
   // The provisioning route the run follows: the one the state names, else what the phase says (Arc registration is the
   // OEM image route's machine phase).
@@ -834,15 +955,22 @@
     return MODE_TITLE[id] || id;
   }
 
-  // The mode that is happening now. A failed run stays on the mode that failed; a finished one is Health.
+  // The mode that is happening now. A failed run stays on the mode that failed; a finished one is Deployment (Done).
   function activeModeId(state) {
     if (!isObj(state)) return 'prov';
     var p = normPhase(state.phase), act = str(state.activePhase).toLowerCase();
     var key = p === 'failed' ? (act || 'provisioning') : (p === 'done' ? 'done' : (act || p));
+    var only = monitorOf(state);
+    if (only) return only;
     var mode = MODE_OF_PHASE[key] || 'prov';
     // Provisioning is over for the machines that ZTP finished, or an OS configuration run has started: that mode is the one to watch.
+    // A manual install has no provisioning to watch: the run starts at OS configuration.
     if (mode === 'prov') {
-      var osc = oscOf(state);
+      var osc = oscOf(state), disc = discOf(state);
+      var provStarted = provisioningTreeOf(state).some(function (n) { return normStatus(n.status) !== 'notstarted'; });
+      // Discovery comes first: while it is the only stage with anything to show, it is the one to watch.
+      if (disc && disc.configured === true && !provStarted && !(osc && oscHasData(osc))) return 'discovery';
+      if (manualInstall(state)) return 'osconfig';
       if (osc && (oscHasData(osc) || (osc.configured === true && ztpComplete(state)))) return 'osconfig';
     }
     // The toolkit's ARM run can be ahead of what Azure reports (checks that failed before anything was submitted).
@@ -877,40 +1005,63 @@
   }
 
   var MODE_WHEN = {
+    discovery: 'Runs first, before ZTP: the toolkit’s Invoke-HardwareDiscovery.ps1 reads each iDRAC; Sonar follows the folder it writes (discoveryPath)',
+    prov: { simplified: 'Starts after discovery: ZTP claims the machines', 'oem-image': 'Starts when the machines register with Azure Arc', '': 'Starts after discovery' },
+    addnode: 'Available after the cluster is deployed; Sonar follows the Arc machines and the node log',
+    repair: 'Available after the cluster is deployed; Sonar follows the Arc machines and the node log',
     osconfig: 'Starts after ZTP is complete; follows the toolkit’s OS configuration event file (osConfigEventsPath)',
     validate: { simplified: 'Starts after OS configuration has converged on every machine', 'oem-image': 'Starts when every machine is registered', '': 'Starts after the machines are ready' },
     deploy: 'Starts after validation passes',
-    update: 'Available after the cluster is deployed; starts when Azure reports an update',
-    health: 'Available after the cluster is deployed'
+    update: 'Available after the cluster is deployed; starts when Azure reports an update'
   };
-  function modeWhen(id, route) {
+  function modeWhen(id, route, manual) {
     if (id === 'validate') return MODE_WHEN.validate[route] || MODE_WHEN.validate[''];
+    if (id === 'prov') return manual ? 'Not used: the OS was installed by hand' : (MODE_WHEN.prov[route] || MODE_WHEN.prov['']);
+    if (id === 'osconfig' && manual) return 'Starts when the machines answer; follows the toolkit’s OS configuration event file (osConfigEventsPath)';
     return MODE_WHEN[id] || '';
   }
 
-  // The six tiles: { id, name, status ok|run|idle|err, line, tip, hidden }. A waiting tile has no state line; its tip
-  // says when it starts.
+  // The tiles of the flow: { id, name, status ok|run|idle|na|err, line, tip, hidden }. Discovery, Provisioning, OS configuration,
+  // Validate, Deployment and Update are the six of a normal run; Add node and Repair are tiles of their own that show only when
+  // the run is one of them. A waiting tile has no state line; its tip says when it starts. Status na is a stage that is not
+  // used in this run (a manual install has no provisioning). A standalone monitor (state.monitor) shows its tile only.
   function modeStates(state) {
     var s = isObj(state) ? state : {};
     var route = provRouteOf(s), machines = provMachines(s);
     var active = activeModeId(s), order = MODE_IDS.indexOf(active), phase = normPhase(s.phase);
+    var provIdx = MODE_IDS.indexOf('prov'), manual = manualInstall(s);
     var out = [];
     function tile(id, status, line, hidden, tip) {
-      out.push({ id: id, name: modeName(id, route), status: status, line: line || '', tip: tip || (status === 'idle' ? modeWhen(id, route) : ''), hidden: !!hidden });
+      out.push({ id: id, name: id === 'prov' && manual ? 'Provisioning' : modeName(id, route), status: status, line: line || '', tip: tip || (status === 'idle' ? modeWhen(id, route, manual) : ''), hidden: !!hidden });
     }
+
+    // Discovery: the first stage, before ZTP. Grey with a tip that says how to get its data when there is none.
+    var disc = discOf(s), dst = 'idle', dline = '', dtip = '';
+    if (disc && disc.configured === true && (discHasData(disc) || str(disc.state) === 'failed')) {
+      var dtotal = Number(disc.nodesTotal) || 0, dok = Number(disc.nodesDiscovered) || 0;
+      if (str(disc.state) === 'failed') { dst = 'err'; dline = arr(disc.problems).length ? arr(disc.problems).length + ' unreadable' : dok + ' of ' + dtotal + ' discovered, ' + (Number(disc.nodesFailed) || 0) + ' failed'; }
+      else if (str(disc.state) === 'partial') { dst = 'run'; dline = dok + ' of ' + dtotal + ' machines read'; }
+      else { dst = 'ok'; dline = dok + ' of ' + dtotal + ' machines'; }
+    } else if (disc && disc.configured === true) {
+      dtip = order > provIdx || phase === 'done' ? 'No discovery data in this run.' : modeWhen('discovery', route, manual);
+    } else {
+      dtip = 'Set discoveryPath to follow the toolkit’s hardware discovery (Invoke-HardwareDiscovery.ps1), which runs before ZTP.';
+    }
+    tile('discovery', dst, dline, false, dtip);
 
     var psum = provisioningSummary(provisioningTreeOf(s));
     var unit = route === 'oem-image' ? 'registered' : 'ready';
     var counted = psum.ready + ' of ' + psum.total + ' machines ' + unit;
-    var pst, pline = '';
-    if (psum.failed) { pst = 'err'; pline = psum.ready + ' of ' + psum.total + ' ' + unit + ', ' + psum.failed + ' failed'; }
+    var pst, pline = '', ptip = '';
+    if (manual) { pst = 'na'; pline = 'Not used: manual install'; ptip = 'The OS was installed by hand; OS configuration starts when the machines answer.'; }
+    else if (psum.failed) { pst = 'err'; pline = psum.ready + ' of ' + psum.total + ' ' + unit + ', ' + psum.failed + ' failed'; }
     else if (psum.total && psum.ready === psum.total) { pst = 'ok'; pline = ztpComplete(s) ? 'ZTP complete' : counted; }
-    else if ((order > 0 || phase === 'done') && !psum.total && !machines.length && !route) { pst = 'idle'; }   // Sonar saw no machines: it cannot say provisioning is done
-    else if (order > 0 || phase === 'done') { pst = 'ok'; pline = psum.total ? counted : 'Done'; }
+    else if ((order > provIdx || phase === 'done') && !psum.total && !machines.length && !route) { pst = 'idle'; }   // Sonar saw no machines: it cannot say provisioning is done
+    else if (order > provIdx || phase === 'done') { pst = 'ok'; pline = psum.total ? counted : 'Done'; }
     else if (active === 'prov') { pst = 'run'; pline = psum.total ? counted : 'Waiting for the machines'; }
     else pst = 'idle';
-    // Always six tiles. With no machine data (a run Sonar joined after provisioning) the tile is grey and its tip says why.
-    tile('prov', pst, pline, false, pst === 'idle' && order > 0 ? 'No machine data in this run: Sonar started after provisioning, or the resource group has no edge machines.' : '');
+    // With no machine data (a run Sonar joined after provisioning) the tile is grey and its tip says why.
+    tile('prov', pst, pline, false, ptip || (pst === 'idle' && order > provIdx ? 'No machine data in this run: Sonar started after provisioning, or the resource group has no edge machines.' : ''));
 
     // OS configuration: ready for the cluster when every machine has converged. It never keeps Provisioning running.
     var osc = oscOf(s), ost, oline = '', otip = '';
@@ -922,7 +1073,7 @@
       else { ost = 'idle'; oline = osc.state === 'planned' ? 'Plan ready' : ook + ' of ' + ototal + ' converged'; otip = osc.state === 'planned' ? 'The plan was made and nothing was changed. Run the OS configuration with -Mode Apply.' : ''; }
     } else {
       ost = 'idle';
-      otip = osc && osc.configured === true ? (order > MODE_IDS.indexOf('osconfig') || phase === 'done' ? 'No OS configuration data in this run.' : modeWhen('osconfig', route)) : 'Set osConfigEventsPath to follow the toolkit’s OS configuration run.';
+      otip = osc && osc.configured === true ? (order > MODE_IDS.indexOf('osconfig') || phase === 'done' ? 'No OS configuration data in this run.' : modeWhen('osconfig', route, manual)) : 'Set osConfigEventsPath to follow the toolkit’s OS configuration run.';
     }
     tile('osconfig', ost, oline, false, otip);
 
@@ -943,12 +1094,16 @@
     else if (ust === 'error') tile('update', 'err', 'Failed');
     else tile('update', 'idle');
 
-    var nodes = arr(s.nodes).filter(isObj);
-    var connected = nodes.filter(function (n) { return str(n.arcStatus).toLowerCase() === 'connected'; }).length;
-    if (phase === 'done' || active === 'health') {
-      if (nodes.length && connected < nodes.length) tile('health', 'err', connected + ' of ' + nodes.length + ' connected');
-      else tile('health', 'ok', nodes.length ? connected + ' of ' + nodes.length + ' connected' : 'Cluster deployed');
-    } else tile('health', 'idle');
+    // Add node and Repair: a tile of their own, shown only when the run is one of them (Azure reports no steps for them).
+    var track = str(s.track).toLowerCase(), act = str(s.activePhase).toLowerCase(), only = monitorOf(s);
+    ['addnode', 'repair'].forEach(function (id) {
+      var key = id === 'addnode' ? 'add-node' : 'repair', on = track === key || act === key || only === id;
+      if (!on) return;
+      if (act === key) tile(id, 'run', 'Following the node log', false);
+      else tile(id, 'idle', '', false);
+    });
+    // A standalone monitor shows its own tile only; the others are hidden, not greyed.
+    if (only) out.forEach(function (t) { t.hidden = t.id !== only; });
     return out;
   }
 
@@ -1038,10 +1193,26 @@
     var s = isObj(state) ? state : {};
     var route = provRouteOf(s), modes = modeStates(s);
     var me = modes.filter(function (m) { return m.id === modeId; })[0] || modes[0];
-    var chipText = { ok: 'Done', run: 'Running', err: 'Failed', idle: 'Waiting' };
+    var chipText = { ok: 'Done', run: 'Running', err: 'Failed', idle: 'Waiting', na: 'Not used' };
     var out = { id: me.id, title: me.name, status: me.status, chip: { kind: me.status, text: chipText[me.status] }, headline: '',
       startedAt: NaN, endedAt: NaN, when: me.tip, cards: [] };
     var machines = machineList(s, config);
+
+    if (me.id === 'discovery') {
+      var dd = discOf(s) || {}, dnodes = discNodes(s);
+      var dlatest = parseTime(dd.collectedAt);
+      if (!isNaN(dlatest) && me.status === 'ok') out.endedAt = dlatest;
+      out.cards = dnodes.map(function (n) { return discCard(n); });
+      out.headline = discHeadline(dd, manualInstall(s));
+      out.facts = discHasData(dd) ? [{ k: 'Discovered', v: (Number(dd.nodesDiscovered) || 0) + ' of ' + (Number(dd.nodesTotal) || 0) }, { k: 'Summary', v: dd.summaryFound ? 'written (the run finished)' : 'not written yet' }].concat(dd.collectedAt ? [{ k: 'Latest read', v: fmtDateTime(dlatest) }] : []) : [];
+      return out;
+    }
+
+    if (me.id === 'prov' && manualInstall(s)) {
+      out.headline = 'Not used: the OS was installed by hand, so Sonar has no provisioning to watch. OS configuration starts when the machines answer.';
+      out.cards = [];
+      return out;
+    }
 
     if (me.id === 'prov') {
       var tree = provisioningTreeOf(s), sum = provisioningSummary(tree), zDone = ztpComplete(s);
@@ -1078,23 +1249,24 @@
       out.cards = oscNodes(s).map(function (n) { return oscCard(n); });
       out.headline = me.status === 'idle' && !oscHasData(os) ? me.tip : oscHeadline(os);
       out.facts = oscHasData(os) ? oscFacts(os) : [];
+      out.panels = oscGuardedPanels(os);
       return out;
     }
 
     var sec = me.id === 'validate' ? s.validation : me.id === 'deploy' ? s.deployment : me.id === 'update' ? s.update : null;
     var secTree = isObj(sec) ? arr(sec.tree) : [];
-    var pr = stepProgress(secTree), word = { validate: 'Validation', deploy: 'Deployment', update: 'Update' }[me.id];
-    if (me.id !== 'health') {
+    var pr = stepProgress(secTree), word = { validate: 'Validation', deploy: 'Deployment', update: 'Update', addnode: 'Add node', repair: 'Repair' }[me.id];
+    if (me.id === 'validate' || me.id === 'deploy' || me.id === 'update') {
       var a = treeStartMin(secTree), b = treeEndMax(secTree);
       if (!isNaN(a)) out.startedAt = a;
       if (me.status === 'ok' && !isNaN(b)) out.endedAt = b;
     }
     var past = { validate: 'Validation passed', deploy: 'Deployment finished', update: 'Update finished' };
     var cur = isObj(s.current) && str(s.current.stepName) && MODE_OF_PHASE[str(s.current.phase)] === me.id ? str(s.current.stepName) : pr.name;
-    if (me.id === 'health') {
-      var conn = machines.filter(function (m) { return str(m.arcStatus).toLowerCase() === 'connected'; }).length;
-      out.headline = me.status === 'idle' ? me.tip : (machines.length ? 'Cluster deployed: ' + conn + ' of ' + machines.length + ' machines are connected to Azure Arc' : 'Cluster deployed');
-    } else if (me.status === 'ok') out.headline = past[me.id];
+    var conn = machines.filter(function (m) { return str(m.arcStatus).toLowerCase() === 'connected'; }).length;
+    if (me.id === 'addnode' || me.id === 'repair') {
+      out.headline = me.status === 'run' ? word + ': Sonar follows the Arc machines and the node log; Azure reports no steps for it' : me.tip;
+    } else if (me.status === 'ok') out.headline = past[me.id] + (me.id === 'deploy' && machines.length ? ': ' + conn + ' of ' + machines.length + ' machines are connected to Azure Arc' : '');
     else if (me.status === 'err') {
       var bad = firstError(secTree);
       out.headline = word + ' failed' + (bad ? ' at ' + str(bad.name) + (arr(bad.errors)[0] ? ': ' + firstLine(arr(bad.errors)[0], 160) : '') : '');
@@ -1103,17 +1275,16 @@
     } else out.headline = me.tip;
 
     var verb = { validate: ['Validated', 'Being validated', 'Waiting'], deploy: ['Deployed', 'Taking part', 'Waiting'],
-      update: ['Updated', 'Being updated', 'Waiting'] }[me.id];
+      update: ['Updated', 'Being updated', 'Waiting'], addnode: ['Added', 'Following', 'Waiting'], repair: ['Repaired', 'Following', 'Waiting'] }[me.id];
     var pct = pr.total ? Math.round(100 * pr.done / pr.total) : null;
-    var waitsFor = { validate: 'the machines to be ready', deploy: 'validation', update: 'an update from Azure' }[me.id];
+    var waitsFor = { validate: 'the machines to be ready', deploy: 'validation', update: 'an update from Azure', addnode: 'the cluster', repair: 'the cluster' }[me.id];
     out.cards = machines.map(function (m) {
       var arc = arcInfo(m.arcStatus);
       var card = { name: m.name, seed: !!m.seed, arc: arc, progress: null, waits: '', tip: '', status: me.status, kind: me.status };
-      if (me.id === 'health') {
-        card.state = arc.kind === 'ok' ? 'Connected' : (arc.kind === 'idle' ? 'Not connected' : str(m.arcStatus));
-        card.kind = arc.kind === 'ok' ? 'ok' : (arc.kind === 'idle' ? 'err' : arc.kind);
-        card.tip = 'Azure Arc says: ' + (str(m.arcStatus) || 'no status');
+      if (me.id === 'addnode' || me.id === 'repair') {
+        card.state = me.status === 'run' ? 'Following' : 'Waiting';
         card.waits = me.status === 'idle' ? me.tip : '';
+        card.tip = 'Azure Arc says: ' + (str(m.arcStatus) || 'no status');
         return card;
       }
       card.state = me.status === 'ok' ? verb[0] : me.status === 'run' ? verb[1] : me.status === 'err' ? 'Stopped' : verb[2];
@@ -1149,7 +1320,7 @@
   // the step's time window, or, for a ZTP stage, to the ZTP event lines tagged with that stage. A machine row selects
   // the machine, like its card.
 
-  var MODE_SECTIONS = { prov: ['provisioning'], osconfig: ['osconfiguration'], validate: ['armvalidation', 'validation', 'extensions'], deploy: ['armdeployment', 'deployment'], update: ['update'], health: [] };
+  var MODE_SECTIONS = { discovery: ['discovery'], prov: ['provisioning'], osconfig: ['osconfiguration'], validate: ['armvalidation', 'validation', 'extensions'], deploy: ['armdeployment', 'deployment'], update: ['update'], addnode: [], repair: [] };
 
   // chain: the items from the top of the section down to the clicked step ({ id, name, ... }).
   // Returns { side: 'machine' | 'azure' | 'node', node, stage, window }.
@@ -1172,6 +1343,10 @@
     }
     // The toolkit's own checks and steps: reported by the ARM run, not by a node (no log window) and not read from Azure.
     if (section === 'armvalidation' || section === 'armdeployment') return { side: 'arm', node: '', stage: '', window: false };
+    if (section === 'discovery') {
+      // A machine row selects the machine; what discovery read about it is a file, not a node log: a click filters nothing.
+      return { side: list.length === 1 ? 'machine' : 'file', node: str(top.name), stage: '', window: false };
+    }
     if (section === 'validation' || section === 'extensions') return { side: 'azure', node: '', stage: '', window: false };
     return { side: 'node', node: '', stage: '', window: true };
   }
@@ -1202,7 +1377,9 @@
 
   // What the Steps box says when the selected mode has no steps to show.
   function stepsEmptyText(modeId, status, when, hasMachines) {
-    if (modeId === 'health') return 'There are no steps here. Sonar does not run health checks; the cards above show each machine’s Azure Arc status.';
+    if (modeId === 'addnode' || modeId === 'repair') return 'Azure reports no steps for this operation. Sonar follows the Arc machines (the cards above) and the seed node’s log.';
+    if (modeId === 'discovery') return status === 'idle' ? 'The machines appear here when the toolkit’s hardware discovery has written its output. Run Invoke-HardwareDiscovery.ps1 and point discoveryPath at its output folder.' + (when ? ' ' + when + '.' : '') : 'No machines reported yet.';
+    if (modeId === 'prov' && status === 'na') return 'Not used: the OS was installed by hand. There is nothing to provision; OS configuration starts when the machines answer.';
     if (modeId === 'prov' && !hasMachines) return 'No machines reported yet.';
     if (modeId === 'osconfig' && status === 'idle') return 'The steps appear here when the OS configuration run starts. Run Invoke-AzureLocalOsConfiguration.ps1 from the toolkit and point osConfigEventsPath at its os-configuration-events.jsonl.' + (when ? ' ' + when + '.' : '');
     if (status === 'idle') return 'The steps appear here when this mode begins.' + (when ? ' ' + when + '.' : '');
@@ -1683,9 +1860,44 @@
           ? { kind: 'local', userName: 'azl-admin', reason: 'joined, waiting for domain administrators: using azl-admin', warning: '', waitingForAdmins: true }
           : { kind: 'local', userName: 'azl-admin', reason: 'workgroup: using azl-admin', warning: '', waitingForAdmins: false },
       guarded: gstep ? gstep.osc.guarded.state : '',
-      guardedDetail: gstep ? gstep.osc.guarded : null,
+      guardedDetail: gstep ? Object.assign({ phase: gstep.osc.guarded.state, active: ['Committed', 'RolledBack', 'Refused'].indexOf(gstep.osc.guarded.state) < 0, reconnecting: false,
+        group: 'Management', oldAddress: '192.0.2.31', newAddress: '192.0.2.21', verdict: gstep.osc.guarded.state === 'RolledBack' ? 'GatewayUnreachable' : '', startedAt: null }, gstep.osc.guarded) : null,
+      address: started ? { value: sp.transport === 'WinRM' ? '192.0.2.22' : '192.0.2.21', source: sp.transport === 'WinRM' ? 'neighbor' : 'handoff', sourceLabel: sp.transport === 'WinRM' ? 'Neighbor table, by MAC' : 'ZTP handoff', forced: false, reconnected: false, at: at(0.3) } : { value: '', source: '', sourceLabel: 'not reported', forced: false, reconnected: false, at: null },
+      timeline: started ? [{ at: at(0.3), state: 'TransportResolved', label: 'Transport and address resolved', group: 'node', known: true, status: 'idle', step: '', level: 'Info', seq: null,
+        message: 'Reached over ' + (sp.transport || 'WinRM') + ' for every step.' }] : [],
+      unknownStates: [], unknownEvents: [], waiting: null, remoting: { bootstrap: null, firewall: null, listener: null }, lastEvent: null,
       runCommands: sp.transport === 'ArcRunCommand' && started && !converged ? [{ name: 'azl-osconfig-3f9c1a7b2d4e', state: retrying ? 'Unknown' : 'Running', provisioning: 'Succeeded', since: at(Math.max(cur.start, r - 0.2)), ageMinutes: 0, stuck: false }] : [],
       tree: tree
+    };
+  }
+
+  // The Discovery stage of the demo: n machines read ('discovered'), or part of them ('partial'), or none yet ('waiting').
+  function demoDiscovery(names, kind, iso, M) {
+    var read = kind === 'waiting' ? 0 : kind === 'partial' ? Math.max(1, names.length - 1) : names.length;
+    var nodes = names.map(function (name, i) {
+      var found = i < read, attention = i === 1 && found;
+      var mac = function (n) { return '00-00-5E-00-53-' + ('0' + (i * 4 + n).toString(16).toUpperCase()).slice(-2); };
+      var notes = attention ? ['The BOSS card has no virtual disk yet: the toolkit\u2019s Phase 02 Task 01 creates it before the OS install.'] : [];
+      return {
+        name: name, found: found, state: !found ? 'missing' : attention ? 'attention' : 'discovered', status: found ? 'success' : 'notstarted',
+        stateText: !found ? 'Not discovered yet' : attention ? 'Discovered; 1 thing to check' : 'Discovered', serviceTag: found ? 'EXAMPLE' + (i + 1) : '', serial: found ? 'CHEXAMPLE' + (i + 1) : '',
+        model: found ? 'Example R660' : '', biosVersion: found ? '2.1.0' : '', bmcMac: found ? mac(10) : '', collectedAt: iso(20 * M),
+        management: found ? { name: 'Embedded Port 1', mac: mac(1), confirmed: !attention, reason: 'its MAC is already the management MAC in infrastructure.yml' } : null,
+        ports: found ? [{ name: 'Embedded Port 1', slot: 'Embedded', mac: mac(1), linkUp: true, speedMbps: 10000, adapterModel: 'Example 10G' }, { name: 'Slot 3 Port 1', slot: 'Slot 3', mac: mac(2), linkUp: false, speedMbps: null, adapterModel: 'Example 25G' }] : [],
+        boss: { present: found, driveCount: found ? 2 : 0, hasVirtualDisk: found && !attention, needsVirtualDisk: attention }, warnings: 0, warningTexts: [], notes: notes, errors: [],
+        tree: found ? [
+          { id: 'disc.identity', name: 'Identity', description: 'Service tag EXAMPLE' + (i + 1) + ', Example R660, BIOS 2.1.0', status: 'success', errors: [], children: [] },
+          { id: 'disc.ports', name: 'Network ports (2)', description: '1 of 2 with link up', status: 'success', errors: [], children: [
+            { id: 'disc.port.1', name: 'Embedded Port 1', description: mac(1) + ', link up, 10000 Mbps', status: 'success', errors: [], children: [] },
+            { id: 'disc.port.2', name: 'Slot 3 Port 1', description: mac(2) + ', no link', status: 'success', errors: [], children: [] }] },
+          { id: 'disc.management', name: 'Management port', description: 'Embedded Port 1, ' + mac(1), status: attention ? 'notstarted' : 'success', errors: [], children: [] },
+          { id: 'disc.boss', name: 'BOSS card', description: attention ? '2 drives, no virtual disk yet' : '2 drives, a virtual disk exists', status: attention ? 'notstarted' : 'success', errors: [], children: [] }] : []
+      };
+    });
+    return {
+      configured: true, status: kind === 'discovered' ? 'success' : kind === 'partial' ? 'running' : 'notstarted', state: kind,
+      stateText: kind === 'discovered' ? 'All ' + names.length + ' machines discovered; 1 to check before ZTP' : kind === 'partial' ? read + ' of ' + names.length + ' machines read; the discovery is still running' : 'Waiting for the discovery output',
+      location: 'discovery', summaryFound: kind === 'discovered', collectedAt: iso(20 * M), ready: kind === 'discovered', nodesTotal: names.length, nodesDiscovered: read, nodesFailed: 0, problems: [], nodes: nodes
     };
   }
 
@@ -1708,7 +1920,11 @@
       configured: true, status: !started ? 'notstarted' : failed ? 'error' : ready ? 'success' : 'running',
       state: !started ? 'waiting' : failed ? 'failed' : ready ? 'converged' : !planDone ? 'planning' : 'applying', ready: ready,
       run: { started: started ? at(0.2) : null, completed: completed ? at(endAt + 0.1) : null, mode: 'Apply', exitCode: completed ? 0 : null, planCompleted: planDone, planChanges: 17,
-        cluster: 'iic-azl-c01', schemaVersion: '5.3.0', wrapperVersion: '1.0.0', lastEventAt: at(Math.min(r, endAt)), events: 64 },
+        cluster: 'iic-azl-c01', schemaVersion: '5.3.0', wrapperVersion: '1.0.0', lastEventAt: at(Math.min(r, endAt)), events: 64,
+        id: 'run-20261107-1', legacy: false, runsSeen: 1, staleIgnored: 0, seq: 64, timeline: [] },
+      remoting: { profile: { class: 'lab', posture: 'standard', relaxed: false, scheme: 'http', trustedHosts: 'Merge', remoteAddress: ['192.0.2.0/24'], level: 'Info', message: '', at: at(0.1) }, trustedHosts: null },
+      unknownStates: [],
+      guarded: nodes.filter(function (n) { return n.guardedDetail; }).map(function (n) { return Object.assign({ node: n.name }, n.guardedDetail); }),
       nodesTotal: total, nodesConverged: ok, nodesFailed: failed, nodesRetrying: retrying,
       wipe: planDone ? { published: true, enabled: true, count: wipeNodes.length ? 1 : 0, pending: wipeNodes.some(function (w) { return !w.done; }), nodes: wipeNodes } : { published: false, enabled: false, count: 0, pending: false, nodes: [] },
       nodes: nodes, warnings: warnings
@@ -1963,6 +2179,9 @@
       nodeDuration: nodeDuration,
       modeStates: modeStates, activeModeId: activeModeId, modeName: modeName, summaryFor: summaryFor, stepProgress: stepProgress,
       lifecyclePlain: lifecyclePlain, arcInfo: arcInfo, machineWaits: machineWaits, machineList: machineList,
+      discOf: discOf, discNodes: discNodes, discHasData: discHasData, discoveryTreeOf: discoveryTreeOf, discCard: discCard, discHeadline: discHeadline,
+      demoDiscovery: demoDiscovery, laMonitorPhases: laMonitorPhases, monitorOf: monitorOf, manualInstall: manualInstall, MODE_IDS: MODE_IDS, MODE_TITLE: MODE_TITLE,
+      oscGuardedPanels: oscGuardedPanels, oscAddressChip: oscAddressChip, oscTimelineLines: oscTimelineLines, oscFacts: oscFacts,
       oscOf: oscOf, oscNodes: oscNodes, oscHasData: oscHasData, osConfigTreeOf: osConfigTreeOf, oscMethodChip: oscMethodChip, oscVersionLines: oscVersionLines,
       oscCard: oscCard, oscHeadline: oscHeadline, oscFacts: oscFacts, oscCountdown: oscCountdown, fmtCountdown: fmtCountdown,
       oscDemoState: oscDemoState, oscDemoLines: oscDemoLines,
@@ -2214,7 +2433,8 @@
     var s = app.state || {}, c = app.config || {};
     var name = s.cluster || cfgCluster(c) || 'Unknown cluster';
     $('cluster-name').textContent = name;
-    document.title = (app.replay ? 'Replay \u2013 ' : '') + (name !== 'Unknown cluster' ? name + ' \u2013 ' : '') + 'AzL Sonar';
+    var only = monitorOf(app.state);
+    document.title = (app.replay ? 'Replay \u2013 ' : '') + (name !== 'Unknown cluster' ? name + ' \u2013 ' : '') + (only ? MODE_TITLE[only] + ' \u2013 ' : '') + 'AzL Sonar';
 
     var phase = app.state ? normPhase(s.phase) : 'unknown';
     var ov = overallStatus();
@@ -2429,6 +2649,15 @@
       cards.appendChild(b);
     });
     host.appendChild(cards);
+    arr(sm.panels).forEach(function (p) {
+      var box = el('section', { class: 'panel-guard guard-' + p.kind, 'aria-label': p.title });
+      box.appendChild(el('h3', { class: 'sub-h', text: p.title }));
+      var dl = el('dl', { class: 'facts' });
+      p.rows.forEach(function (r) { dl.appendChild(el('div', null, [el('dt', { text: r.k }), el('dd', { text: r.v })])); });
+      box.appendChild(dl);
+      if (p.until) box.appendChild(el('p', { class: 'ln' }, [el('span', { class: 'countdown', 'data-until': p.until, text: 'Confirmation window: ' + fmtCountdown(oscCountdown(p.until)) })]));
+      host.appendChild(box);
+    });
     host.setAttribute('data-empty', String(!sm.cards.length));
     if (focusedCard) { var fc = cards.querySelector('[data-node="' + cssEscape(focusedCard) + '"]'); if (fc) fc.focus(); }
   }
@@ -2461,11 +2690,13 @@
     app.state = s;
     app.provTree = provisioningTreeOf(s);
     app.oscTree = osConfigTreeOf(s);
+    app.discTree = discoveryTreeOf(s);
     app.extTree = extensionsTreeOf(s);
     var collapse = provisioningCollapse(s.activePhase || (normPhase(s.phase) === 'failed' ? '' : s.phase), app.provAutoCollapsed);
     if (collapse === 'collapse') { app.sectionCollapsed.provisioning = true; app.provAutoCollapsed = true; }
     else if (collapse === 'expand') { app.sectionCollapsed.provisioning = false; app.provAutoCollapsed = false; }
     app.stepIndex = new Map();
+    indexSection('discovery');
     indexSection('provisioning');
     indexSection('osconfiguration');
     indexSection('armvalidation');
@@ -2524,7 +2755,7 @@
         walk(n.children, k);
       });
     }
-    walk(armTree ? armTree : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'extensions' ? app.extTree : (isObj(sec) ? sec.tree : null), section);
+    walk(armTree ? armTree : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'discovery' ? app.discTree : section === 'extensions' ? app.extTree : (isObj(sec) ? sec.tree : null), section);
   }
 
   function findCurrentKey() {
@@ -2637,8 +2868,8 @@
     wanted.forEach(function (section) {
       var armWhich = section === 'armvalidation' ? 'validation' : section === 'armdeployment' ? 'deployment' : '';
       var sec = armWhich ? (armPhaseOf(s, armWhich) || {}) : section === 'provisioning' ? (isObj(s.provisioning) ? s.provisioning : {}) : section === 'osconfiguration' ? (isObj(s.osConfiguration) ? s.osConfiguration : {}) : (isObj(s[section]) ? s[section] : {});
-      var tree = armWhich ? armTreeOf(s, armWhich) : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'extensions' ? app.extTree : arr(sec.tree);
-      var only = section === 'provisioning' || section === 'osconfiguration' ? str(app.filter.node).toLowerCase() : '';
+      var tree = armWhich ? armTreeOf(s, armWhich) : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'discovery' ? app.discTree : section === 'extensions' ? app.extTree : arr(sec.tree);
+      var only = section === 'provisioning' || section === 'osconfiguration' || section === 'discovery' ? str(app.filter.node).toLowerCase() : '';
       if (only) tree = tree.filter(function (n) { return str(n.name).toLowerCase() === only; });
       var wrap = host.querySelector('.tree-section[data-section="' + section + '"]');
       if (!tree.length) { if (wrap) wrap.remove(); app.treeSig[section] = null; return; }
@@ -2686,7 +2917,7 @@
 
   function buildSection(section, tree) {
     var wrap = el('div', { class: 'tree-section', 'data-section': section });
-    var title = section === 'provisioning' || section === 'osconfiguration' ? 'Machines' : section === 'extensions' ? 'Extensions (installed during Validate)' :
+    var title = section === 'provisioning' || section === 'osconfiguration' || section === 'discovery' ? 'Machines' : section === 'extensions' ? 'Extensions (installed during Validate)' :
       section === 'armvalidation' ? 'Toolkit run: checks and validation results' : section === 'armdeployment' ? 'Toolkit run: checks and deployment progress' :
       section === 'validation' ? 'Validation' : section === 'update' ? 'Update (unverified against a live run)' : 'Deployment';
     if (section === 'extensions' || section === 'armvalidation' || section === 'armdeployment') wrap.appendChild(el('h3', { class: 'sub-h', text: title }));
@@ -2720,7 +2951,7 @@
     var name = str(n.name) || str(n.description) || '(unnamed step)';
     var rule = stepRule(section, chain);
     var selected = app.selectedKey === k;
-    var label = name + (rule.side === 'azure' ? ', runs in Azure' : '') + ', ' + (st === 'unknown' ? str(n.status) || 'unknown status' : STATUS_LABEL[st]) +
+    var label = name + (rule.side === 'azure' ? ', runs in Azure' : (rule.side === 'file' ? ', read from the discovery files' : '')) + ', ' + (st === 'unknown' ? str(n.status) || 'unknown status' : STATUS_LABEL[st]) +
       (dur !== null ? ', ' + fmtDuration(dur) : '') + (arr(n.errors).length ? ', ' + arr(n.errors).length + ' error message(s)' : '');
 
     var li = el('li', { role: 'treeitem', 'data-key': k, 'data-side': rule.side, 'aria-level': String(level), 'aria-label': label,
@@ -2742,7 +2973,7 @@
 
     var nameEl = el('span', { class: 'step-name' });
     if (isObj(n.arm) && n.arm.kind === 'step') nameEl.appendChild(el('span', { class: 'idx', text: str(n.arm.step) }));
-    else if (!isObj(n.arm) && rule.side !== 'machine' && section !== 'provisioning' && section !== 'osconfiguration' && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
+    else if (!isObj(n.arm) && rule.side !== 'machine' && section !== 'provisioning' && section !== 'osconfiguration' && section !== 'discovery' && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
     nameEl.appendChild(el('span', { class: 'sn', text: name }));
     if (rule.side === 'azure') nameEl.appendChild(el('span', { class: 'az', title: 'This step runs in Azure: Sonar reads its status from Azure, there are no node log lines for it.', text: 'Azure' }));
     if (isObj(n.osc) && n.osc.arc === true) nameEl.appendChild(el('span', { class: 'az', title: 'This step runs as an Azure Arc Run Command: Azure starts it on the node and Sonar can read the run command from Azure.', text: 'Azure' }));
@@ -2779,6 +3010,7 @@
     if (isObj(n.prov)) li.appendChild(buildProvMeta(n, st));
     if (isObj(n.osc) && n.osc.machine === true) li.appendChild(buildOscMeta(n));
     if (isObj(n.arm)) li.appendChild(buildArmMeta(n));
+    if (isObj(n.disc) && n.disc.machine === true) li.appendChild(buildDiscMeta(n));
 
     if (selected && rule.side === 'azure') li.appendChild(buildAzureDetail(n, st, name));
     var errs = arr(n.errors).map(str).filter(Boolean);
@@ -2861,6 +3093,8 @@
     var chip = oscMethodChip(m);
     meta.appendChild(chipEl(chip.kind, chip.text, chip.title));
     if (m.transport) meta.appendChild(el('span', { title: 'How this machine is reached', text: OSC_TRANSPORT_LABEL[m.transport] || m.transport }));
+    if (m.address) meta.appendChild(el('span', { class: 'osc-addr', title: m.address.title, text: m.address.text }));
+    m.timeline.forEach(function (t) { meta.appendChild(el('span', { class: 'osc-event osc-event-' + t.kind, text: t.text })); });
     oscVersionLines({ versions: m.versions }).forEach(function (t) { meta.appendChild(el('span', { class: 'osc-ver', text: t })); });
     if (m.retries) meta.appendChild(el('span', { class: 'prov-steps', 'data-status': 'running', title: 'An Arc Run Command ended in state Unknown and was run again', text: 'Retried ' + m.retries + '×' }));
     if (m.restarts) meta.appendChild(el('span', { class: 'prov-steps', 'data-status': 'running', text: 'Restarted ' + m.restarts + '×' }));
@@ -2882,6 +3116,18 @@
     }
     m.warnings.forEach(function (w) { meta.appendChild(el('span', { class: 'prov-msg osc-warn', text: 'Warning: ' + w })); });
     return meta;
+  }
+
+  // Under a machine row of the Discovery mode: the model, the iDRAC MAC, the management port and the BOSS card, and what to check.
+  function buildDiscMeta(n) {
+    var d = n.disc, meta = el('div', { class: 'prov-meta disc-meta' });
+    if (d.model) meta.appendChild(el('span', { text: d.model }));
+    if (d.serviceTag) meta.appendChild(el('span', { title: 'The service tag is the serial number ZTP maps the ownership voucher by.', text: 'Service tag ' + d.serviceTag }));
+    if (d.bmcMac) meta.appendChild(el('span', { title: 'The iDRAC\u2019s own MAC address.', text: 'iDRAC MAC ' + d.bmcMac }));
+    if (d.management) meta.appendChild(el('span', { class: 'prov-steps', 'data-status': d.management.confirmed ? 'success' : 'running', title: str(d.management.reason),
+      text: 'Management port ' + str(d.management.name) + (d.management.mac ? ' ' + str(d.management.mac) : '') + (d.management.confirmed ? '' : ' (suggested)') }));
+    d.notes.forEach(function (t) { meta.appendChild(el('span', { class: 'prov-msg disc-note', text: 'Check: ' + t })); });
+    return meta.childNodes.length ? meta : document.createDocumentFragment();
   }
 
   function isVisibleItem(item) {
@@ -2990,6 +3236,7 @@
     if (!info) return;
     var rule = stepRuleOf(k), name = str(info.node.name);
     if (rule.side === 'machine') { selectNode(rule.node); return; }
+    if (rule.side === 'file') { announce(name + ' is read from the discovery files; there is no node log for it.'); return; }
     if (app.selectedKey === k) { clearStepFilter(); return; }
     app.selectedKey = k;
     app.focusKey[info.section] = k;
@@ -3042,7 +3289,7 @@
 
   // ------------------------------------------------------------------ mode bar
 
-  var MODE_OF_SECTION = { provisioning: 'prov', osconfiguration: 'osconfig', armvalidation: 'validate', validation: 'validate', extensions: 'validate', armdeployment: 'deploy', deployment: 'deploy', update: 'update' };
+  var MODE_OF_SECTION = { discovery: 'discovery', provisioning: 'prov', osconfiguration: 'osconfig', armvalidation: 'validate', validation: 'validate', extensions: 'validate', armdeployment: 'deploy', deployment: 'deploy', update: 'update' };
 
   // The mode shown: the one the user clicked while the run is still in the same mode, else the active one.
   function currentModeId() {
@@ -3056,8 +3303,8 @@
     return a && !a.hidden ? active : (tiles.filter(function (x) { return !x.hidden; })[0] || { id: active }).id;
   }
 
-  var MODE_GLYPH = { ok: '✓', run: '●', idle: '○', err: '✕' };
-  var MODE_WORD = { ok: 'done', run: 'running', idle: 'waiting', err: 'failed' };
+  var MODE_GLYPH = { ok: '✓', run: '●', idle: '○', err: '✕', na: '–' };
+  var MODE_WORD = { ok: 'done', run: 'running', idle: 'waiting', err: 'failed', na: 'not used' };
 
   function renderModes() {
     var host = $('modes');
@@ -3070,7 +3317,7 @@
     host.style.setProperty('--n', String(tiles.length));
     host.textContent = '';
     tiles.forEach(function (t) {
-      var b = el('button', { type: 'button', class: 'mode' + (t.id === cur ? ' sel' : '') + (t.status === 'idle' ? ' off' : ''), 'data-m': t.id,
+      var b = el('button', { type: 'button', class: 'mode' + (t.id === cur ? ' sel' : '') + (t.status === 'idle' || t.status === 'na' ? ' off' : ''), 'data-m': t.id,
         'aria-pressed': String(t.id === cur), title: t.tip || null }, [
         el('span', { class: 'mi mi-' + t.status + (t.status === 'run' ? ' pulse' : ''), 'aria-hidden': 'true', text: MODE_GLYPH[t.status] }),
         el('span', { class: 'mt' }, [
@@ -3211,7 +3458,7 @@
   // The phase that matches a mode (the tab the window opens on), and the phase that is happening now.
   function phaseOfMode(modeId) {
     var route = provRouteOf(app.state);
-    return { prov: route === 'oem-image' ? 'arc-registration' : 'provisioning', osconfig: 'provisioning', validate: 'validation', deploy: 'deployment', update: 'update', health: 'post-deployment' }[modeId] || 'provisioning';
+    return { discovery: 'provisioning', prov: route === 'oem-image' ? 'arc-registration' : 'provisioning', osconfig: 'provisioning', validate: 'validation', deploy: 'deployment', update: 'update', addnode: 'add-node', repair: 'repair' }[modeId] || 'provisioning';
   }
   function currentGuidancePhase() {
     var s = app.state, act = s ? str(s.activePhase).toLowerCase() : '';
@@ -3241,6 +3488,12 @@
     return undefined;
   }
 
+  // A standalone monitor lists only the access its own phases need (config.monitorPhases from the back end).
+  function laMonitorPhases(phases, config) {
+    if (!isObj(config) || !Array.isArray(config.monitorPhases) || !config.monitor || String(config.monitor).toLowerCase() === 'auto') return phases;
+    return phases.filter(function (p) { return config.monitorPhases.indexOf(p) >= 0; });
+  }
+
   // The tabs the window shows: the phases that have guidance, only the machine-readiness phase of the route Sonar follows.
   function laShownPhases() {
     var available = guidancePhases();
@@ -3248,7 +3501,7 @@
     var hide = route === 'simplified' ? 'arc-registration' : route === 'oem-image' ? 'provisioning' : '';
     var shown = LA_PHASES.filter(function (p) { return available.indexOf(p) >= 0 && p !== hide; });
     available.forEach(function (p) { if (shown.indexOf(p) < 0 && p !== hide) shown.push(p); });
-    return shown;
+    return laMonitorPhases(shown, app.config);
   }
 
   function renderGuidance() { renderGuidanceSummary(); if (laIsOpen()) renderLogAccessWindow(); }
@@ -4516,24 +4769,38 @@
   // after one retry of a lost Arc Run Command; iic-azl-n02 is an ISO install whose OEM drivers step failed (its network
   // change was committed and it restarted for its computer name); iic-azl-n03 is ZTP and still applying. The run moves on
   // while the page is open (planned, applying, converged). Sample data only; no API calls.
-  function startOsConfigDemo(iso, M) {
+  function startOsConfigDemo(iso, M, manual) {
     var NAMES = ['iic-azl-n01', 'iic-azl-n02', 'iic-azl-n03'], now = Date.now(), r = 4.95, base = now - r * M;
     function provMachine(name, i) {
       return { name: name, route: 'simplified', lifecycle: 'Provisioned', lifecycleMessage: 'Machine has been successfully provisioned.', status: 'success', percent: 100, reportedPercent: 100,
         arcMachineName: '00000000-0000-0000-0000-00000000000' + (i + 1) + '-1', arcSource: 'edgeMachine.job', arcStatus: 'Connected', extensions: [], start: iso(150 * M), end: iso(40 * M), errors: [],
         ztp: { complete: true, device: { status: 'success' }, network: { status: 'success' }, restore: { status: 'success' } }, tree: [] };
     }
-    var provNodes = NAMES.map(provMachine);
+    var provNodes = manual ? [] : NAMES.map(provMachine);
+    // A manual install: every machine was installed from an ISO, so the toolkit resolves them as ISO machines over WinRM.
+    function oscState() {
+      var o = oscDemoState(r, base, 3);
+      if (manual) o.nodes.forEach(function (n) {
+        n.method = 'Iso'; n.methodSource = n.methodSource === 'resolved' ? 'resolved' : 'expected'; n.methodNote = 'scenario.os_install is iso'; n.declared = 'iso'; n.declaredMethod = 'Iso'; n.mismatch = false; n.warnings = [];
+        n.transport = n.transport ? 'WinRM' : ''; if (n.address && n.address.value) { n.address.source = 'file'; n.address.sourceLabel = 'Infrastructure file'; }
+      });
+      return o;
+    }
     var state = {
-      cluster: 'iic-azl-c01', mode: null, provisioningState: null, phase: 'provisioning', activePhase: 'provisioning',
-      provisioning: { route: 'simplified', routeSource: 'config', phase: 'provisioning', status: 'success', readyForValidate: false, ztpComplete: true, nextStep: null, nodes: provNodes },
-      osConfiguration: oscDemoState(r, base, 3),
+      cluster: 'iic-azl-c01', mode: null, provisioningState: null, phase: 'provisioning', activePhase: 'provisioning', monitor: 'Auto',
+      provisioning: manual
+        ? { manualInstall: true, route: 'oem-image', routeSource: 'config', phase: 'provisioning', status: 'notstarted', readyForValidate: false, ztpComplete: false, nextStep: null, nodes: [] }
+        : { manualInstall: false, route: 'simplified', routeSource: 'config', phase: 'provisioning', status: 'success', readyForValidate: false, ztpComplete: true, nextStep: null, nodes: provNodes },
+      discovery: demoDiscovery(NAMES, 'discovered', iso, M),
+      osConfiguration: oscState(),
       extensions: { shown: false, status: 'notstarted', nodes: [] },
       validation: { status: 'notstarted', tree: [], counts: {} }, deployment: { status: 'notstarted', tree: [], counts: {} },
-      nodes: provNodes.map(function (n) { return { name: n.name, arcStatus: n.arcStatus, arcMachineName: n.arcMachineName, arcSource: n.arcSource, lastStatusChange: iso(30 * M) }; }),
+      nodes: NAMES.map(function (name, i) { return { name: name, arcStatus: 'Connected', arcMachineName: '00000000-0000-0000-0000-00000000000' + (i + 1) + '-1', arcSource: 'edgeMachine.job', lastStatusChange: iso(30 * M) }; }),
       current: { phase: 'provisioning', stepPath: [], stepName: null }, warnings: [], polledAt: iso(4000)
     };
-    applyConfig({ cluster: 'iic-azl-c01', resourceGroup: 'rg-iic-azl-c01', identityModel: 'ActiveDirectory', pollSeconds: 20, provisioningRoute: 'simplified',
+    // The page opens on OS configuration here (the demo shows that mode); a click on Discovery shows the stage before ZTP.
+    state.discovery.nodes.forEach(function (n) { n.found = true; });
+    applyConfig({ cluster: 'iic-azl-c01', resourceGroup: 'rg-iic-azl-c01', identityModel: 'ActiveDirectory', pollSeconds: 20, provisioningRoute: manual ? 'oem-image' : 'simplified',
       nodes: NAMES.map(function (n, i) { return { name: n, seed: i === 0 }; }), logPaths: ['C:\\Windows\\System32\\Bootstrap\\Logs'] });
     app.guidance = demoGuidance();
     applyState(state);
@@ -4549,7 +4816,7 @@
     feed();
     setInterval(function () {
       if (r < 6.6) r = Math.round((r + 0.15) * 100) / 100;
-      state.osConfiguration = oscDemoState(r, base, 3);
+      state.osConfiguration = oscState();
       state.polledAt = new Date().toISOString();
       applyState(state);
       feed();
@@ -4759,6 +5026,23 @@
     }, 15000);
     app.demoExport = function () { return { config: app.config, timeline: [state], logs: app.store.lines.map(function (l) { return { seq: l.seq, time: l.time, received: l.received, timeSource: l.timeSource, file: l.file, level: l.level, text: l.text }; }) }; };
   }
+  // Demo of the Discovery stage alone (?demo=1&route=discovery): the machines appear one by one, the summary comes last.
+  function startDiscoveryDemo(iso, M) {
+    var NAMES = ['iic-azl-n01', 'iic-azl-n02', 'iic-azl-n03'], kinds = ['waiting', 'partial', 'discovered'], i = 0;
+    function build() {
+      var d = demoDiscovery(NAMES, kinds[i], iso, M);
+      return { cluster: 'iic-azl-c01', mode: null, provisioningState: null, phase: 'provisioning', activePhase: 'provisioning', monitor: 'Auto',
+        provisioning: { manualInstall: false, route: 'simplified', routeSource: 'config', phase: 'provisioning', status: 'notstarted', readyForValidate: false, ztpComplete: false, nextStep: null, nodes: [] },
+        discovery: d, osConfiguration: { configured: false, status: 'notstarted', state: 'waiting', ready: false, run: {}, nodesTotal: 0, nodes: [], warnings: [] },
+        extensions: { shown: false, status: 'notstarted', nodes: [] }, validation: { status: 'notstarted', tree: [], counts: {} }, deployment: { status: 'notstarted', tree: [], counts: {} },
+        nodes: [], current: { phase: 'provisioning', stepPath: [], stepName: null }, warnings: [], polledAt: new Date().toISOString() };
+    }
+    applyConfig({ cluster: 'iic-azl-c01', resourceGroup: 'rg-iic-azl-c01', identityModel: 'ActiveDirectory', pollSeconds: 20, provisioningRoute: 'simplified',
+      nodes: NAMES.map(function (n, k) { return { name: n, seed: k === 0 }; }), logPaths: [] });
+    app.guidance = demoGuidance();
+    applyState(build());
+    setInterval(function () { if (i < kinds.length - 1) i++; applyState(build()); }, 15000);
+  }
 
   // Steps for a demo machine: names (or [name, description] pairs) one after the other from startAgo; cur is the index of
   // the current step (-1: all finished) and curStatus its status.
@@ -4790,6 +5074,8 @@
     if (route === 'simplified') { startZtpDemo(iso, step, M); return; }
     if (route === 'osconfig') { startOsConfigDemo(iso, M); return; }
     if (route === 'arm') { startArmDemo(iso, M); return; }
+    if (route === 'iso') { startOsConfigDemo(iso, M, true); return; }
+    if (route === 'discovery') { startDiscoveryDemo(iso, M); return; }
     function steps(prefix, names, startAgo, per, cur, curStatus, errors) { return demoSteps(step, prefix, names, startAgo, per, cur, curStatus, errors); }
     // OEM image route: the three groups Arc registration shows per machine (OS image update, Bootstrap, Azure registration).
     var UPD = ['Scan', 'Download', 'Install'];

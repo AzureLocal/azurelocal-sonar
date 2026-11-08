@@ -85,8 +85,12 @@ function Test-AzlSonarConfig {
         $problems.Add('architecture must be hyperconverged or disaggregated.')
     }
     $trackValue = Get-AzlSonarMember $Config 'track'
-    if ($null -ne $trackValue -and ([string]$trackValue).ToLowerInvariant() -notin 'auto', 'deployment', 'update', 'add-node', 'repair') {
+    if ($null -ne $trackValue -and ([string]$trackValue).ToLowerInvariant() -notin 'auto', 'deployment', 'update', 'add-node', 'repair', 'health') {
         $problems.Add('track must be auto, deployment, update, add-node or repair.')
+    }
+    $monitorValue = Get-AzlSonarMember $Config 'monitor'
+    if ($null -ne $monitorValue -and (Get-AzlSonarMonitorName -Value ([string]$monitorValue)) -eq '') {
+        $problems.Add("monitor must be one of: $((Get-AzlSonarMonitorNameList) -join ', ').")
     }
     $updateTrackValue = Get-AzlSonarMember $Config 'updateTrack'
     if ($null -ne $updateTrackValue -and ([string]$updateTrackValue).ToLowerInvariant() -notin 'auto', 'off') {
@@ -126,7 +130,12 @@ function Test-AzlSonarConfig {
 
     $osConfigEventsPath = Get-AzlSonarMember $Config 'osConfigEventsPath'
     if ($null -ne $osConfigEventsPath -and ($osConfigEventsPath -isnot [string] -or [string]::IsNullOrWhiteSpace($osConfigEventsPath))) {
-        $problems.Add('osConfigEventsPath must be the path of the OS configuration event file (JSON Lines written by the toolkit''s Invoke-AzureLocalOsConfiguration.ps1), for example ./os-configuration-events.jsonl.')
+        $problems.Add('osConfigEventsPath must be the path of the OS configuration event file (JSON Lines written by the toolkit''s Invoke-AzureLocalOsConfiguration.ps1; a folder of per-run files or a pattern such as ./os-configuration-events*.jsonl also works), for example ./os-configuration-events.jsonl.')
+    }
+
+    $discoveryPath = Get-AzlSonarMember $Config 'discoveryPath'
+    if ($null -ne $discoveryPath -and ($discoveryPath -isnot [string] -or [string]::IsNullOrWhiteSpace($discoveryPath))) {
+        $problems.Add('discoveryPath must be the folder the toolkit''s Invoke-HardwareDiscovery.ps1 wrote (-OutputPath: one <ServiceTag>.json per node and discovery-summary.json), or one of those files, for example ./discovery.')
     }
 
     $armEventsPath = Get-AzlSonarMember $Config 'armEventsPath'
@@ -427,6 +436,11 @@ function Read-AzlSonarConfig {
     if ($armEventsPath -and -not [System.IO.Path]::IsPathRooted($armEventsPath) -and $baseDirectory) {
         $armEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $armEventsPath))
     }
+    # discoveryPath: the hardware discovery output (a folder or a file); relative to the config file's folder.
+    $discoveryPath = [string](Get-AzlSonarMember $raw 'discoveryPath' '')
+    if ($discoveryPath -and -not [System.IO.Path]::IsPathRooted($discoveryPath) -and $baseDirectory) {
+        $discoveryPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $discoveryPath))
+    }
 
     return [pscustomobject]@{
         subscriptionId = ([string]$raw.subscriptionId).ToLowerInvariant()
@@ -445,7 +459,13 @@ function Read-AzlSonarConfig {
         clusterPattern = $(if (([string](Get-AzlSonarMember $raw 'clusterPattern' 'Standard')).ToLowerInvariant() -eq 'rackaware') { 'RackAware' } else { 'Standard' })
         architecture   = ([string](Get-AzlSonarMember $raw 'architecture' 'hyperconverged')).ToLowerInvariant()
         internalDns    = [bool](Get-AzlSonarMember $raw 'internalDns' $false)
-        track          = ([string](Get-AzlSonarMember $raw 'track' 'auto')).ToLowerInvariant()
+        track          = $(
+            $trackRaw = ([string](Get-AzlSonarMember $raw 'track' 'auto')).ToLowerInvariant()
+            # Health was removed (the machine cards show each machine's Arc status in every mode): an old track value maps to auto.
+            if ($trackRaw -eq 'health') { Write-Warning 'track "health" is no longer a monitor (there is no Health mode); it is treated as "auto". The machine cards show each machine''s Azure Arc status.'; 'auto' } else { $trackRaw })
+        monitor        = $(
+            $monitorRaw = Get-AzlSonarMonitorName -Value ([string](Get-AzlSonarMember $raw 'monitor' 'Auto'))
+            if ($monitorRaw) { $monitorRaw } else { 'Auto' })
         updateTrack    = ([string](Get-AzlSonarMember $raw 'updateTrack' 'auto')).ToLowerInvariant()
         identityModel  = $identityModel
         pollSeconds    = $pollSeconds
@@ -457,6 +477,7 @@ function Read-AzlSonarConfig {
         ztpEventsPath  = $ztpEventsPath
         osConfigEventsPath = $osConfigEventsPath
         armEventsPath  = $armEventsPath
+        discoveryPath  = $discoveryPath
         logAccounts    = $logAccountsNormalised
         sourcePath     = $source
         # Where the settings came from: the master infrastructure.yml, a config file, or a JSON string (tests).
@@ -499,6 +520,8 @@ function ConvertTo-AzlSonarPublicConfig {
         nodes         = @($nodes)
         logs          = [ordered]@{ paths = [string[]]@($Config.logs.paths) }
         pollSeconds   = $Config.pollSeconds
+        monitor       = [string](Get-AzlSonarMember $Config 'monitor' 'Auto')
+        monitorPhases = [string[]]@((Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))).phases)
         profile       = $(if ($null -ne (Get-AzlSonarMember $Config 'clusterPattern')) {
                 $p = Get-AzlSonarDeploymentProfile -Config $Config
                 [ordered]@{ clusterPattern = $p.clusterPattern; architecture = $p.architecture; internalDns = $p.internalDns; notes = [string[]]@($p.notes) }

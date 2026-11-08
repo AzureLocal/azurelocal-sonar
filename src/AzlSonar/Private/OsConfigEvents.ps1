@@ -21,6 +21,12 @@ Set-StrictMode -Version Latest
 $script:AzlSonarOsRunKey = '*'
 # Per node: has it reported that it is joined to the domain? Kept apart from the attempts, which a new run clears.
 $script:AzlSonarOsDomainKey = '*domain'
+# Run bookkeeping (the hardened feed puts runId and seq on every line): how many run ids and sequence numbers the run entry remembers.
+$script:AzlSonarOsMaxRuns = 32
+$script:AzlSonarOsMaxSeen = 256
+# The newest events kept per node for the timeline of the page, and per run for its run-level events.
+$script:AzlSonarOsTimelineNode = 12
+$script:AzlSonarOsMaxRunEvents = 40
 $script:AzlSonarOsEventFile = 'os-config-events'
 $script:AzlSonarOsMaxNodeEvents = 600
 # A run command still 'Creating' after this many minutes gets a warning with its age.
@@ -44,6 +50,132 @@ $script:AzlSonarOsStep = [ordered]@{
     Sbe              = @{ Name = 'SBE package'; Description = 'The OEM Solution Builder Extension package is on the node.' }
     Drivers          = @{ Name = 'OEM drivers'; Description = 'The OEM network drivers from the SBE.' }
     ArcRegistration  = @{ Name = 'Azure Arc registration'; Description = 'The machine is registered with Azure Arc. ZTP does it, so there it is only checked.' }
+}
+
+# Every state the toolkit's feed can carry (AzlOsConfigurationEvents.psm1 and the adapters of the guard, the domain join,
+# the remoting profile and the wipe list): group, the words the page shows, and the status it gets before the level is
+# applied. A state that is not in this table is still shown (see Get-AzlSonarOsEventInfo).
+$script:AzlSonarOsEventInfo = @{
+    RunStarted                   = @('run', 'Run started', 'run')
+    PlanCompleted                = @('run', 'Plan complete', 'idle')
+    RunCompleted                 = @('run', 'Run complete', 'ok')
+    WipeListPublished            = @('wipe', 'Wipe list published', 'warn')
+    WipeListApproved             = @('wipe', 'Wipe list approved', 'ok')
+    WipeListRejected             = @('wipe', 'Wipe list rejected', 'err')
+    NodeStarted                  = @('node', 'Node started', 'run')
+    MethodResolved               = @('node', 'Method resolved', 'idle')
+    TransportResolved            = @('node', 'Transport and address resolved', 'idle')
+    NodeRetry                    = @('node', 'Run command lost, trying again', 'warn')
+    NodeRestarting               = @('node', 'Restarting', 'run')
+    NodeReconnecting             = @('node', 'Reconnecting', 'run')
+    NodeReconnected              = @('node', 'Reconnected', 'ok')
+    NodeWaiting                  = @('node', 'Waiting for the node', 'run')
+    NodeConverged                = @('node', 'Converged', 'ok')
+    NodeFailed                   = @('node', 'Failed', 'err')
+    NodeBlocked                  = @('node', 'Blocked', 'err')
+    StepPlanned                  = @('step', 'Step planned', 'idle')
+    StepSkipped                  = @('step', 'Step not applicable', 'idle')
+    StepApplying                 = @('step', 'Step applying', 'run')
+    StepApplied                  = @('step', 'Step applied', 'ok')
+    StepFailed                   = @('step', 'Step failed', 'err')
+    StepVerified                 = @('step', 'Step verified', 'ok')
+    DomainJoinPlanned            = @('domain', 'Domain join planned', 'idle')
+    DomainJoinApplying           = @('domain', 'Joining the domain', 'run')
+    DomainJoined                 = @('domain', 'Joined the domain', 'ok')
+    DomainAdminsConfigured       = @('domain', 'Domain administrators configured', 'ok')
+    DomainJoinFailed             = @('domain', 'Domain join failed', 'err')
+    NetworkChangeStaged          = @('guarded', 'Network change staged on the node', 'run')
+    NetworkChangeVerifying       = @('guarded', 'Network change: the node is verifying', 'run')
+    NetworkChangeAwaitingConfirm = @('guarded', 'Network change waiting for the confirmation', 'warn')
+    NetworkChangeCommitted       = @('guarded', 'Network change committed', 'ok')
+    NetworkChangeRepaired        = @('guarded', 'Network change: the node repaired itself', 'warn')
+    NetworkChangeRolledBack      = @('guarded', 'Network change rolled back', 'err')
+    NetworkChangeRefused         = @('guarded', 'Network change refused', 'err')
+    RemotingProfileResolved      = @('remoting', 'Remoting profile resolved', 'idle')
+    RemotingFirewallChange       = @('remoting', 'Remoting firewall scope', 'ok')
+    RemotingListenerChange       = @('remoting', 'Remoting listeners', 'ok')
+    RemotingBootstrapStarted     = @('remoting', 'Remoting bootstrap started', 'run')
+    RemotingBootstrapSucceeded   = @('remoting', 'Remoting bootstrap succeeded', 'ok')
+    RemotingBootstrapFailed      = @('remoting', 'Remoting bootstrap failed', 'warn')
+    RemotingBootstrap            = @('remoting', 'Remoting bootstrap', 'idle')
+    TrustedHostsChanged          = @('remoting', 'TrustedHosts changed on the runner', 'idle')
+    TrustedHostsRestored         = @('remoting', 'TrustedHosts restored', 'ok')
+    StaleRunCommandDeleted       = @('transport', 'Stale run command deleted', 'warn')
+}
+
+function Get-AzlSonarOsEventInfo {
+    <#
+    .SYNOPSIS
+        What the page shows for one event state: { state, known, group, label, status, message }.
+    .DESCRIPTION
+        status is ok, run, warn, err or idle. The level of the event colours it: Error is always err, Warning turns ok,
+        run and idle into warn. message is the event's own evidence when it has some, else the label. A state that is not
+        in the table (the toolkit is newer than Sonar) is not dropped: known is false, the label is the state split into
+        words, the status follows the level, and the message names the state.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$State,
+
+        [string]$Level = 'Info',
+
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Evidence = ''
+    )
+
+    $known = $script:AzlSonarOsEventInfo.ContainsKey($State)
+    if ($known) {
+        $entry = $script:AzlSonarOsEventInfo[$State]
+        $group = $entry[0]; $label = $entry[1]; $status = $entry[2]
+    }
+    else {
+        $group = 'unknown'; $status = 'idle'
+        $label = ([regex]::Replace($State, '(?<=[a-z0-9])(?=[A-Z])|_+', ' ')).Trim()
+        if (-not $label) { $label = $State }
+    }
+    if ($Level -eq 'Error') { $status = 'err' }
+    elseif ($Level -eq 'Warning' -and $status -in 'ok', 'run', 'idle') { $status = 'warn' }
+    $message = if ($Evidence) { $Evidence } elseif ($known) { $label } else { "Unrecognised event '$State'" }
+    return [ordered]@{ state = $State; known = $known; group = $group; label = $label; status = $status; message = $message }
+}
+
+function ConvertTo-AzlSonarOsAddressSource {
+    <#
+    .SYNOPSIS
+        The way a node's management address was found, as { Id, Label }: override, handoff, arc, file, neighbor, or the text as written.
+    .DESCRIPTION
+        The toolkit resolves an address from (in order) an override, the ZTP handoff, the Arc machine, the infrastructure
+        file and a MAC lookup in the neighbor table. Names are matched loosely (case, dashes and spaces ignored).
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+
+    $raw = if ($null -ne $Text) { $Text.Trim() } else { '' }
+    if (-not $raw) { return @{ Id = ''; Label = 'not reported' } }
+    $key = $raw.ToLowerInvariant() -replace '[^a-z]', ''
+    if ($key -match 'handoff') { return @{ Id = 'handoff'; Label = 'ZTP handoff' } }
+    if ($key -match '^(override|nodeaddress|parameter|manual|operator)') { return @{ Id = 'override'; Label = 'Override (-NodeAddress)' } }
+    if ($key -match 'maclookup|neighbo|^arp|layer') { return @{ Id = 'neighbor'; Label = 'Neighbor table, by MAC' } }
+    if ($key -match '^arc') { return @{ Id = 'arc'; Label = 'Azure Arc machine' } }
+    if ($key -match '^(file|infra|master|config|yml|yaml)') { return @{ Id = 'file'; Label = 'Infrastructure file' } }
+    return @{ Id = $raw; Label = "Other ($raw)" }
+}
+
+function Get-AzlSonarOsAddressSourceText {
+    # The source text an event carries: one of the fields the resolver may use, else "found by <source>" in the evidence.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([hashtable]$Data, [string]$Evidence)
+    foreach ($k in 'addressSource', 'source', 'addressFrom') {
+        if ($Data.ContainsKey($k) -and $null -ne $Data[$k] -and "$($Data[$k])".Trim()) { return "$($Data[$k])" }
+    }
+    $m = [regex]::Match($Evidence, '(?i)\bfound by\s+([A-Za-z][A-Za-z\- ]*?)(?:\s*[\(,;.]|$)')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return ''
 }
 
 function ConvertFrom-AzlSonarOsConfigEvent {
@@ -80,8 +212,9 @@ function ConvertFrom-AzlSonarOsConfigEvent {
 function ConvertFrom-AzlSonarOsConfigLine {
     <#
     .SYNOPSIS
-        Parses one line of the event file into a hashtable { node, state, step, when (UTC datetime or $null), timestamp,
-        evidence, level, nextAction, method, transport, data (the other fields) }, or $null when it is not an event.
+        Parses one line of the event file into a hashtable { node, state, runId ('' for a legacy line), seq ($null when the
+        line has none), step, when (UTC datetime or $null), timestamp, evidence, level, nextAction, method, transport, data
+        (the other fields) }, or $null when it is not an event.
     .DESCRIPTION
         Only objects with a node and a state are events. A timestamp is read as UTC with the invariant culture whatever
         the culture of this machine is. Unknown fields are kept in data.
@@ -108,12 +241,21 @@ function ConvertFrom-AzlSonarOsConfigLine {
     $when = ConvertTo-AzlSonarUtcDate $stamp
     $level = [string](& $get 'level' 'Info')
     if ($level -notin 'Info', 'Warning', 'Error') { $level = 'Info' }
-    $standard = 'node', 'state', 'stage', 'step', 'timestamp', 'evidence', 'level', 'nextAction', 'method', 'transport'
+    $standard = 'node', 'state', 'stage', 'step', 'timestamp', 'evidence', 'level', 'nextAction', 'method', 'transport', 'runId', 'seq'
     $data = @{}
     foreach ($k in $raw.Keys) { if ([string]$k -notin $standard) { $data[[string]$k] = $raw[$k] } }
+    # runId and seq (the hardened feed): a line without them belongs to the one legacy run and has no sequence number.
+    $seq = $null
+    $seqRaw = & $get 'seq' $null
+    if ($null -ne $seqRaw) {
+        $parsed = [long]0
+        if ([long]::TryParse(([string]$seqRaw).Trim(), [System.Globalization.NumberStyles]::Integer, [cultureinfo]::InvariantCulture, [ref]$parsed)) { $seq = $parsed }
+    }
     return @{
         node       = $node
         state      = $state
+        runId      = ([string](& $get 'runId' '')).Trim()
+        seq        = $seq
         step       = [string](& $get 'step' '')
         when       = $when
         timestamp  = $(if ($when) { $when.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [cultureinfo]::InvariantCulture) } else { '' })
@@ -152,17 +294,109 @@ function Read-AzlSonarOsConfigEventChunk {
     return @{ Lines = @($chunk.Lines); Offset = [long]$chunk.Offset; Truncated = $truncated }
 }
 
+function Copy-AzlSonarOsRunEntry {
+    # A new run entry that holds what the old one held (the entry is never edited in place), or an empty one.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([AllowNull()][System.Collections.IDictionary]$Run)
+    $c = @{}
+    if ($null -ne $Run) { foreach ($k in $Run.Keys) { $c[$k] = $Run[$k] } }
+    return $c
+}
+
+function Get-AzlSonarOsEmptyRun {
+    # An empty run entry for a run that is known only from its events so far.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([hashtable]$Evt, [string]$RunId, [string[]]$Runs = @(), [int]$Stale = 0)
+    return @{
+        Events = 0; LastEventAt = $Evt.timestamp; Started = $Evt.timestamp
+        RunId = $RunId; Runs = [string[]]@($Runs); Seen = [long[]]@(); Seq = $null; Stale = $Stale
+    }
+}
+
+function Resolve-AzlSonarOsEventRun {
+    <#
+    .SYNOPSIS
+        Decides whether an event belongs to the run the store follows. Returns $false for an event to ignore.
+    .DESCRIPTION
+        The hardened feed puts a runId and a seq on every line; an older feed has neither (one legacy run).
+        - A line with neither is applied as it always was.
+        - A line of the current run is applied, unless its seq was already seen in that run (a repeated line).
+        - A line of a run that was seen before and is no longer the current one is stale: ignored and counted.
+        - A line of an unseen run that is older than the current run's start is stale too (a late line of an earlier run).
+        - Any other unseen run becomes the current run: the nodes of the old run go (the domain flags stay), and the run
+          entry starts over. A RunStarted does exactly this; so does a first line of a run whose RunStarted was never read.
+        - A line with no runId inside a run that has one belongs to that run.
+        The run entry is replaced, not edited.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$Store,
+
+        [Parameter(Mandatory)]
+        [hashtable]$Evt
+    )
+
+    $id = [string]$Evt.runId
+    $seq = $Evt.seq
+    if (-not $id -and $null -eq $seq) { return $true }
+    $runKey = $script:AzlSonarOsRunKey
+    $run = $null
+    if ($Store.Contains($runKey) -and $null -ne $Store[$runKey]) { $run = $Store[$runKey] }
+    $current = if ($null -ne $run -and $run.ContainsKey('RunId')) { [string]$run['RunId'] } else { '' }
+    $seen = if ($null -ne $run -and $run.ContainsKey('Runs')) { @($run['Runs']) } else { @() }
+    $staleCount = if ($null -ne $run -and $run.ContainsKey('Stale')) { [int]$run['Stale'] } else { 0 }
+
+    if ($id -and $id -ne $current) {
+        $startedAt = if ($null -ne $run -and $run.ContainsKey('Started')) { ConvertTo-AzlSonarUtcDate $run['Started'] } else { $null }
+        $older = $seen -contains $id -or ($current -and $null -ne $startedAt -and $null -ne $Evt.when -and $Evt.when -lt $startedAt)
+        if ($older) {
+            $entry = Copy-AzlSonarOsRunEntry -Run $run
+            if ($null -eq $run) { $entry = Get-AzlSonarOsEmptyRun -Evt $Evt -RunId $current }
+            $entry['Stale'] = $staleCount + 1
+            if ($seen -notcontains $id) { $entry['Runs'] = [string[]]@(@($seen) + $id | Select-Object -Last $script:AzlSonarOsMaxRuns) }
+            $Store[$runKey] = $entry
+            return $false
+        }
+        foreach ($key in @($Store.Keys)) { if ($key -ne $runKey -and $key -ne $script:AzlSonarOsDomainKey) { $Store.Remove($key) } }
+        $run = Get-AzlSonarOsEmptyRun -Evt $Evt -RunId $id -Runs @(@($seen) + $id | Select-Object -Last $script:AzlSonarOsMaxRuns) -Stale $staleCount
+        $Store[$runKey] = $run
+    }
+    elseif ($id -and $null -eq $run) {
+        $run = Get-AzlSonarOsEmptyRun -Evt $Evt -RunId $id -Runs @($id)
+        $Store[$runKey] = $run
+    }
+
+    if ($null -ne $seq) {
+        $seenSeq = if ($null -ne $run -and $run.ContainsKey('Seen')) { @($run['Seen']) } else { @() }
+        if ($seenSeq -contains $seq) { return $false }
+        if ($null -eq $run) { $run = Get-AzlSonarOsEmptyRun -Evt $Evt -RunId $current -Runs @($seen) }
+        $entry = Copy-AzlSonarOsRunEntry -Run $run
+        $entry['Seen'] = [long[]]@(@($seenSeq) + $seq | Select-Object -Last $script:AzlSonarOsMaxSeen)
+        $top = if ($run.ContainsKey('Seq') -and $null -ne $run['Seq']) { [long]$run['Seq'] } else { [long]::MinValue }
+        $entry['Seq'] = [long][Math]::Max($top, [long]$seq)
+        $Store[$runKey] = $entry
+    }
+    return $true
+}
+
 function Add-AzlSonarOsConfigEvent {
     <#
     .SYNOPSIS
         Records one event line in the OS configuration store (run entry '*' and one entry per node).
     .DESCRIPTION
-        NodeStarted begins a new attempt of the node: its events are replaced by this one. RunStarted with a `nodes` array
+        NodeStarted begins a new attempt of the node: its events are replaced by this one, unless the line's seq says it
+        is older than events already held (then it takes its place in the attempt). RunStarted with a `nodes` array
         clears exactly those nodes (their next NodeStarted begins again anyway) and starts a new run entry; RunStarted
-        without one only starts a new run entry. The other node events and the step events are added to the node's
-        attempt (at most 600 kept: the oldest after the first two go). Run events update the run entry. An event of a node
-        with no attempt yet starts one. Each change stores new objects: the poller never reads one being written. Lines
-        that are not events are ignored.
+        without one only starts a new run entry. A new runId (Resolve-AzlSonarOsEventRun) starts over for all nodes and
+        lines of a run that is no longer current are ignored. The other node events and the step events are added to the
+        node's attempt in seq order (file order when there is no seq; at most 600 kept: the oldest after the first two go).
+        Run events update the run entry; the remoting profile, TrustedHosts, the wipe approval and states Sonar does not
+        know are kept on it. An event of a node with no attempt yet starts one. Each change stores new objects: the poller
+        never reads one being written. Lines that are not events are ignored.
     #>
     [CmdletBinding()]
     param(
@@ -176,32 +410,44 @@ function Add-AzlSonarOsConfigEvent {
 
     $evt = ConvertFrom-AzlSonarOsConfigLine -Line $Line
     if ($null -eq $evt) { return }
+    if (-not (Resolve-AzlSonarOsEventRun -Store $Store -Evt $evt)) { return }
     $runKey = $script:AzlSonarOsRunKey
     $run = $null
     if ($Store.Contains($runKey) -and $null -ne $Store[$runKey]) { $run = $Store[$runKey] }
-    $copyRun = {
-        $c = @{}
-        if ($null -ne $run) { foreach ($k in $run.Keys) { $c[$k] = $run[$k] } }
-        $c
-    }
+    $copyRun = { Copy-AzlSonarOsRunEntry -Run $run }
+    $info = Get-AzlSonarOsEventInfo -State $evt.state -Level $evt.level
+    $runItem = @{ at = $evt.timestamp; state = $evt.state; level = $evt.level; evidence = $evt.evidence; seq = $evt.seq; step = $evt.step; node = $evt.node }
+    $get = { param($k, $d) if ($evt.data.ContainsKey($k) -and $null -ne $evt.data[$k]) { $evt.data[$k] } else { $d } }
 
     if ($evt.node -eq $runKey) {
         $new = & $copyRun
         $new['Events'] = [int]$(if ($new.ContainsKey('Events')) { $new['Events'] } else { 0 }) + 1
         $new['LastEventAt'] = $evt.timestamp
+        $items = @($(if ($new.ContainsKey('RunEvents')) { $new['RunEvents'] }))
+        $unknown = @{}
+        if ($new.ContainsKey('Unknown') -and $null -ne $new['Unknown']) { foreach ($k in $new['Unknown'].Keys) { $unknown[$k] = $new['Unknown'][$k] } }
         switch ($evt.state) {
             'RunStarted' {
                 $names = @()
                 if ($evt.data.ContainsKey('nodes') -and $null -ne $evt.data['nodes']) { $names = @(@($evt.data['nodes']) | ForEach-Object { [string]$_ } | Where-Object { $_ }) }
                 foreach ($n in $names) { if ($Store.Contains($n)) { $Store.Remove($n) } }
-                $new = @{
-                    Events = 1; LastEventAt = $evt.timestamp; Started = $evt.timestamp; Nodes = [string[]]$names
+                # Lines of the same run that came before its RunStarted (the remoting profile is written first) stay.
+                $sameRun = $evt.runId -and $new.ContainsKey('RunId') -and [string]$new['RunId'] -eq $evt.runId -and [int]$new['Events'] -gt 1
+                $fresh = @{
+                    Events = [int]$new['Events']; LastEventAt = $evt.timestamp; Started = $evt.timestamp; Nodes = [string[]]$names
                     Mode = [string]$(if ($evt.data.ContainsKey('mode')) { $evt.data['mode'] } else { '' })
                     Cluster = [string]$(if ($evt.data.ContainsKey('cluster')) { $evt.data['cluster'] } else { '' })
                     SchemaVersion = [string]$(if ($evt.data.ContainsKey('schemaVersion')) { $evt.data['schemaVersion'] } else { '' })
                     WrapperVersion = [string]$(if ($evt.data.ContainsKey('wrapperVersion')) { $evt.data['wrapperVersion'] } else { '' })
                     PlanCompleted = $null; Completed = $null; ExitCode = $null; Wipe = $null; Level = $evt.level
                 }
+                if (-not $sameRun) { $fresh['Events'] = 1 }
+                foreach ($k in 'RunId', 'Runs', 'Seen', 'Seq', 'Stale', 'Remoting') { if ($new.ContainsKey($k)) { $fresh[$k] = $new[$k] } }
+                if ($sameRun) { $fresh['RunEvents'] = $new['RunEvents']; $fresh['Unknown'] = $new['Unknown'] }
+                $new = $fresh
+                $items = @($(if ($new.ContainsKey('RunEvents')) { $new['RunEvents'] }))
+                $unknown = @{}
+                if ($new.ContainsKey('Unknown') -and $null -ne $new['Unknown']) { foreach ($k in $new['Unknown'].Keys) { $unknown[$k] = $new['Unknown'][$k] } }
             }
             'PlanCompleted' {
                 $new['PlanCompleted'] = $evt.timestamp
@@ -219,13 +465,52 @@ function Add-AzlSonarOsConfigEvent {
                     Count = [int]$(if ($evt.data.ContainsKey('wipeCount')) { $evt.data['wipeCount'] } else { $wipe.Count }); Nodes = $wipe
                 }
             }
+            { $_ -in 'WipeListApproved', 'WipeListRejected' } {
+                $new['WipeApproval'] = @{
+                    State = $(if ($_ -eq 'WipeListApproved') { 'Approved' } else { 'Rejected' }); At = $evt.timestamp
+                    Hash = [string](& $get 'hash' ''); ApprovedHash = [string](& $get 'approvedHash' ''); Message = $evt.evidence
+                }
+            }
             'RunCompleted' {
                 $new['Completed'] = $evt.timestamp
                 $new['ExitCode'] = [int]$(if ($evt.data.ContainsKey('exitCode')) { $evt.data['exitCode'] } else { -1 })
                 $new['Level'] = $evt.level
                 if ($evt.data.ContainsKey('mode') -and $evt.data['mode']) { $new['Mode'] = [string]$evt.data['mode'] }
             }
+            'RemotingProfileResolved' {
+                $remoting = @{ Profile = $null; TrustedHosts = $null }
+                if ($new.ContainsKey('Remoting') -and $null -ne $new['Remoting']) { foreach ($k in $new['Remoting'].Keys) { $remoting[$k] = $new['Remoting'][$k] } }
+                $remoting['Profile'] = @{
+                    Class = [string](& $get 'class' ''); Posture = [string](& $get 'posture' ''); Relaxed = [bool](& $get 'relaxed' $false)
+                    Scheme = [string](& $get 'scheme' ''); TrustedHosts = [string](& $get 'trustedHosts' ''); RemoteAddress = [string[]]@(@(& $get 'remoteAddress' @()) | ForEach-Object { [string]$_ })
+                    Level = $evt.level; Message = $evt.evidence; At = $evt.timestamp
+                }
+                $new['Remoting'] = $remoting
+            }
+            { $_ -in 'TrustedHostsChanged', 'TrustedHostsRestored' } {
+                $remoting = @{ Profile = $null; TrustedHosts = $null }
+                if ($new.ContainsKey('Remoting') -and $null -ne $new['Remoting']) { foreach ($k in $new['Remoting'].Keys) { $remoting[$k] = $new['Remoting'][$k] } }
+                $th = @{ Changed = $false; Restored = $false; Mode = ''; Class = ''; Previous = ''; Applied = ''; Level = $evt.level; Message = $evt.evidence; At = $evt.timestamp }
+                if ($null -ne $remoting['TrustedHosts']) { foreach ($k in $remoting['TrustedHosts'].Keys) { $th[$k] = $remoting['TrustedHosts'][$k] } }
+                if ($_ -eq 'TrustedHostsChanged') {
+                    $th['Changed'] = $true; $th['Restored'] = $false
+                    $th['Mode'] = [string](& $get 'mode' ''); $th['Class'] = [string](& $get 'class' ''); $th['Previous'] = [string](& $get 'previous' ''); $th['Applied'] = [string](& $get 'applied' '')
+                }
+                else { $th['Restored'] = $true }
+                $th['Level'] = $evt.level; $th['Message'] = $evt.evidence; $th['At'] = $evt.timestamp
+                $remoting['TrustedHosts'] = $th
+                $new['Remoting'] = $remoting
+            }
+            default {
+                if (-not $info.known) {
+                    $count = if ($unknown.ContainsKey($evt.state)) { [int]$unknown[$evt.state].Count } else { 0 }
+                    $unknown[$evt.state] = @{ Count = $count + 1; At = $evt.timestamp; Level = $evt.level; Message = $evt.evidence; Node = $evt.node }
+                }
+            }
         }
+        $items = @($items + $runItem | Select-Object -Last $script:AzlSonarOsMaxRunEvents)
+        $new['RunEvents'] = $items
+        $new['Unknown'] = $unknown
         if (-not $new.ContainsKey('Started')) { $new['Started'] = $evt.timestamp }
         $Store[$runKey] = $new
         return
@@ -264,14 +549,24 @@ function Add-AzlSonarOsConfigEvent {
     $previous = $null
     if ($Store.Contains($evt.node) -and $null -ne $Store[$evt.node]) { $previous = $Store[$evt.node] }
     $attempt = if ($null -ne $previous) { [int]$previous['Attempt'] } else { 0 }
+    # A line whose seq is lower than a seq already in the attempt arrived late: it takes its place, it does not restart the attempt.
+    $late = $false
+    if ($null -ne $evt.seq -and $null -ne $previous) { $late = @($previous['Events'] | Where-Object { $null -ne $_.seq -and $_.seq -gt $evt.seq }).Count -gt 0 }
     $list = [System.Collections.ArrayList]::new()
-    if ($evt.state -eq 'NodeStarted' -or $null -eq $previous) {
+    if (($evt.state -eq 'NodeStarted' -and -not $late) -or $null -eq $previous) {
         $attempt++
     }
     else {
         foreach ($e in $previous['Events']) { $null = $list.Add($e) }
     }
-    $null = $list.Add($evt)
+    $position = $list.Count
+    if ($null -ne $evt.seq) {
+        for ($i = 0; $i -lt $list.Count; $i++) {
+            $other = $list[$i].seq
+            if ($null -ne $other -and $other -gt $evt.seq) { $position = $i; break }
+        }
+    }
+    $list.Insert($position, $evt)
     while ($list.Count -gt $script:AzlSonarOsMaxNodeEvents) { $list.RemoveAt(2) }
     $Store[$evt.node] = @{ Attempt = $attempt; Events = $list.ToArray() }
 }
@@ -320,23 +615,53 @@ function Invoke-AzlSonarOsConfigEventLoop {
 
     $path = [string](Get-AzlSonarMember $Config 'osConfigEventsPath' '')
     if (-not $path) { return }
-    $offset = [long]0
+    $offsets = @{}
     while (-not $Shared.Stop) {
         try {
-            $chunk = Read-AzlSonarOsConfigEventChunk -Path $path -Offset $offset
-            if ($chunk.Truncated -and $Shared.Contains('OsConfigEvents')) {
-                # The file was replaced or emptied: what the store holds came from a file that is gone.
-                foreach ($key in @($Shared['OsConfigEvents'].Keys)) { $Shared['OsConfigEvents'].Remove($key) }
+            # A file that is gone or got smaller (replaced, emptied): what the store holds came from a file that is gone, so start over.
+            $files = @(Resolve-AzlSonarOsConfigEventFile -Path $path)
+            $reset = $false
+            foreach ($known in @($offsets.Keys)) {
+                if (-not (Test-Path -LiteralPath $known -PathType Leaf) -or (Get-Item -LiteralPath $known).Length -lt [long]$offsets[$known]) { $reset = $true }
             }
-            $offset = [long]$chunk.Offset
-            $lines = foreach ($raw in $chunk.Lines) { ConvertFrom-AzlSonarOsConfigEvent -Line $raw }
-            if (@($lines).Count -gt 0) { Add-AzlSonarLogLine -Shared $Shared -Line @($lines) }
-            if ($Shared.Contains('OsConfigInfo')) { Update-AzlSonarOsConfigInfo -Info $Shared['OsConfigInfo'] -Line @($chunk.Lines) }
-            if ($Shared.Contains('OsConfigEvents')) { foreach ($raw in $chunk.Lines) { Add-AzlSonarOsConfigEvent -Store $Shared['OsConfigEvents'] -Line $raw } }
+            if ($reset) {
+                $offsets = @{}
+                if ($Shared.Contains('OsConfigEvents')) { foreach ($key in @($Shared['OsConfigEvents'].Keys)) { $Shared['OsConfigEvents'].Remove($key) } }
+            }
+            foreach ($file in $files) {
+                $chunk = Read-AzlSonarOsConfigEventChunk -Path $file -Offset ([long]$(if ($offsets.ContainsKey($file)) { $offsets[$file] } else { 0 }))
+                $offsets[$file] = [long]$chunk.Offset
+                $lines = foreach ($raw in $chunk.Lines) { ConvertFrom-AzlSonarOsConfigEvent -Line $raw }
+                if (@($lines).Count -gt 0) { Add-AzlSonarLogLine -Shared $Shared -Line @($lines) }
+                if ($Shared.Contains('OsConfigInfo')) { Update-AzlSonarOsConfigInfo -Info $Shared['OsConfigInfo'] -Line @($chunk.Lines) }
+                if ($Shared.Contains('OsConfigEvents')) { foreach ($raw in $chunk.Lines) { Add-AzlSonarOsConfigEvent -Store $Shared['OsConfigEvents'] -Line $raw } }
+            }
         }
         catch { Write-Verbose "OS configuration event file poll failed: $($_.Exception.Message)" }
         Wait-AzlSonarInterval -Shared $Shared -Seconds $PollSeconds
     }
+}
+
+function Resolve-AzlSonarOsConfigEventFile {
+    <#
+    .SYNOPSIS
+        The event files osConfigEventsPath names, oldest first: one file, every *.jsonl file of a folder (the toolkit's
+        one file per run), or the files a wildcard matches. Nothing found is an empty list, never an error.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return [string[]]@() }
+    $items = @()
+    if (Test-Path -LiteralPath $Path -PathType Leaf) { return [string[]]@($Path) }
+    elseif (Test-Path -LiteralPath $Path -PathType Container) { $items = @(Get-ChildItem -LiteralPath $Path -File -Filter '*.jsonl' -ErrorAction SilentlyContinue) }
+    elseif ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($Path)) { $items = @(Get-ChildItem -Path $Path -File -ErrorAction SilentlyContinue) }
+    return [string[]]@($items | Sort-Object -Property @{ Expression = { $_.LastWriteTimeUtc } }, @{ Expression = { $_.Name } } | ForEach-Object { $_.FullName })
 }
 
 function Get-AzlSonarOsConfigRunCommand {
@@ -396,7 +721,7 @@ function Get-AzlSonarOsStepStage {
     [CmdletBinding()]
     param([AllowEmptyCollection()][object[]]$Events = @())
 
-    $s = @{ stage = 'waiting'; action = ''; verifyOnly = $false; evidence = ''; current = ''; desired = ''; item = ''; start = $null; end = $null; errors = @(); level = 'Info'; nextAction = ''; guarded = ''; transport = ''; changeId = ''; rung = ''; repairs = 0; reason = ''; confirmBy = $null; confirmMinutes = 0 }
+    $s = @{ stage = 'waiting'; oldAddress = ''; newAddress = ''; group = ''; verdict = ''; items = ''; startedAt = $null; action = ''; verifyOnly = $false; evidence = ''; current = ''; desired = ''; item = ''; start = $null; end = $null; errors = @(); level = 'Info'; nextAction = ''; guarded = ''; transport = ''; changeId = ''; rung = ''; repairs = 0; reason = ''; confirmBy = $null; confirmMinutes = 0 }
     foreach ($e in $Events) {
         $data = $e.data
         switch ($e.state) {
@@ -437,8 +762,10 @@ function Get-AzlSonarOsStepStage {
                 $g = $_.Substring('NetworkChange'.Length)
                 $s.guarded = $g; $s.evidence = $e.evidence; $s.level = $e.level; $s.nextAction = $e.nextAction
                 if ($data.ContainsKey('changeId')) { $s.changeId = [string]$data['changeId'] }
+                foreach ($k in 'group', 'oldAddress', 'newAddress', 'items', 'verdict') { if ($data.ContainsKey($k) -and $null -ne $data[$k] -and "$($data[$k])" -ne '') { $s[$k] = [string]$data[$k] } }
+                if ($data.ContainsKey('confirmMinutes') -and $g -ne 'AwaitingConfirm') { $s.confirmMinutes = [int]$data['confirmMinutes'] }
                 switch ($g) {
-                    'Staged' { $s.stage = 'changing'; if ($null -eq $s.start) { $s.start = $e.when }; $s.end = $null; $s.errors = @(); $s.repairs = 0 }
+                    'Staged' { $s.stage = 'changing'; if ($null -eq $s.start) { $s.start = $e.when }; $s.startedAt = $e.when; $s.end = $null; $s.errors = @(); $s.repairs = 0; $s.reason = ''; $s.verdict = '' }
                     'Verifying' { $s.stage = 'changing'; $s.end = $null }
                     'AwaitingConfirm' {
                         $s.stage = 'changing'; $s.end = $null; $s.confirmAt = $e.when
@@ -447,7 +774,7 @@ function Get-AzlSonarOsStepStage {
                         $by = if ($data.ContainsKey('confirmBy')) { ConvertTo-AzlSonarUtcDate $data['confirmBy'] } else { $null }
                         $s.confirmBy = if ($null -ne $by) { $by } elseif ($null -ne $e.when) { $e.when.AddMinutes($minutes) } else { $null }
                     }
-                    'Repaired' { $s.stage = 'changing'; $s.repairs = [int]$(if ($s.ContainsKey('repairs')) { $s['repairs'] } else { 0 }) + 1; $s.rung = [string]$(if ($data.ContainsKey('rung')) { $data['rung'] } else { '' }) }
+                    'Repaired' { $s.stage = 'changing'; $s.repairs = [int]$(if ($s.ContainsKey('repairs')) { $s['repairs'] } else { 0 }) + 1; $s.rung = (@($(if ($data.ContainsKey('rung') -and $null -ne $data['rung']) { $data['rung'] }) | ForEach-Object { [string]$_ } | Where-Object { $_ }) -join ', ') }
                     'Committed' { $s.stage = 'applied'; $s.end = $e.when; $s.errors = @() }
                     'RolledBack' {
                         $s.stage = 'rolledback'; $s.end = $e.when; $s.level = 'Error'
@@ -523,6 +850,7 @@ function ConvertTo-AzlSonarOsConfigNode {
 
     # Method, transport and versions: the last MethodResolved events win field by field.
     $method = ''; $transport = ''; $methodResolved = $false
+    $addr = [ordered]@{ value = ''; source = ''; sourceLabel = 'not reported'; forced = $false; reconnected = $false; at = $null }
     $facts = @{}
     $warnings = [System.Collections.Generic.List[string]]::new()
     foreach ($e in $events) {
@@ -536,6 +864,16 @@ function ConvertTo-AzlSonarOsConfigNode {
         elseif ($e.state -eq 'TransportResolved') {
             if ($e.transport) { $transport = $e.transport }
             foreach ($k in 'address', 'forced') { if ($e.data.ContainsKey($k) -and $null -ne $e.data[$k]) { $facts[$k] = $e.data[$k] } }
+            $src = ConvertTo-AzlSonarOsAddressSource -Text (Get-AzlSonarOsAddressSourceText -Data $e.data -Evidence $e.evidence)
+            $addr = [ordered]@{
+                value = [string]$(if ($e.data.ContainsKey('address') -and $null -ne $e.data['address']) { $e.data['address'] } else { '' })
+                source = $src.Id; sourceLabel = $src.Label; forced = [bool]$(if ($e.data.ContainsKey('forced') -and $null -ne $e.data['forced']) { $e.data['forced'] } else { $false })
+                reconnected = $false; at = $e.timestamp
+            }
+        }
+        elseif ($e.state -eq 'NodeReconnected' -and $e.data.ContainsKey('address') -and $e.data['address']) {
+            $addr['value'] = [string]$e.data['address']; $addr['reconnected'] = $true; $addr['at'] = $e.timestamp
+            if ($e.transport -and -not $transport) { $transport = $e.transport }
         }
         else {
             if ($e.method -and -not $method) { $method = $e.method }
@@ -553,19 +891,53 @@ function ConvertTo-AzlSonarOsConfigNode {
     # Steps.
     $byStep = @{}
     foreach ($step in $script:AzlSonarOsStep.Keys) { $byStep[$step] = [System.Collections.Generic.List[object]]::new() }
-    $retries = 0; $restarts = 0
+    $retries = 0; $restarts = 0; $prevSig = ''
     $outcome = ''; $outcomeEvent = $null; $last = $null; $started = $null; $lastWhen = $null
+    $timeline = [System.Collections.Generic.List[object]]::new()
+    $unknownSeen = [ordered]@{}
+    $remoting = [ordered]@{ bootstrap = $null; firewall = $null; listener = $null }
     foreach ($e in $events) {
         $stepName = if ($e.state -like 'NetworkChange*' -and -not $e.step) { 'Network' } elseif ($e.state -like 'DomainJoin*' -or $e.state -eq 'DomainAdminsConfigured') { 'DomainJoin' } else { $e.step }
         if ($stepName -and $byStep.ContainsKey($stepName)) { $byStep[$stepName].Add($e) }
         switch ($e.state) {
             'NodeRetry' { $retries++ }
-            { $_ -in 'NodeRestarting', 'NodeReconnecting' } { $restarts++ }
+            { $_ -in 'NodeRestarting', 'NodeReconnecting' } { if (-not ($_ -eq 'NodeReconnecting' -and $prevSig -eq 'NodeRestarting')) { $restarts++ } }
             'NodeStarted' { $started = $e.when }
             { $_ -in 'NodeConverged', 'NodeFailed', 'NodeBlocked' } { $outcome = $e.state; $outcomeEvent = $e }
         }
         if ($null -ne $e.when) { $lastWhen = $e.when }
-        $last = $e
+        $einfo = Get-AzlSonarOsEventInfo -State $e.state -Level $e.level -Evidence $e.evidence
+        $message = $einfo.message
+        if ($e.state -eq 'NodeWaiting' -and -not $e.evidence) {
+            $what = if ($e.data.ContainsKey('waiting') -and $e.data['waiting']) { [string]$e.data['waiting'] } else { 'the node' }
+            $secs = if ($e.data.ContainsKey('elapsedSeconds') -and $null -ne $e.data['elapsedSeconds']) { " ($([int]$e.data['elapsedSeconds']) s so far$(if ($e.data.ContainsKey('phase') -and $e.data['phase']) { ", phase $($e.data['phase'])" }))" } else { '' }
+            $message = "Waiting for $what$secs"
+        }
+        $item = [ordered]@{ at = $e.timestamp; state = $e.state; label = $einfo.label; group = $einfo.group; known = $einfo.known; status = $einfo.status; step = $e.step; level = $e.level; seq = $e.seq; message = (Protect-AzlSonarText -Text $message) }
+        if ($e.state -eq 'NodeWaiting' -and $timeline.Count -gt 0 -and $timeline[$timeline.Count - 1].state -eq 'NodeWaiting') { $timeline[$timeline.Count - 1] = $item } else { $timeline.Add($item) }
+        if (-not $einfo.known) {
+            $c = if ($unknownSeen.Contains($e.state)) { [int]$unknownSeen[$e.state].count } else { 0 }
+            $unknownSeen[$e.state] = [ordered]@{ state = $e.state; count = $c + 1; at = $e.timestamp; level = $e.level; message = (Protect-AzlSonarText -Text $einfo.message) }
+        }
+        switch ($e.state) {
+            { $_ -in 'RemotingBootstrapStarted', 'RemotingBootstrapSucceeded', 'RemotingBootstrapFailed', 'RemotingBootstrap' } {
+                $remoting.bootstrap = [ordered]@{ state = $e.state; status = $einfo.status; route = [string]$(if ($e.data.ContainsKey('route')) { $e.data['route'] } else { '' }); message = (Protect-AzlSonarText -Text $einfo.message) }
+            }
+            'RemotingFirewallChange' { $remoting.firewall = [ordered]@{ state = $e.state; status = $einfo.status; class = [string]$(if ($e.data.ContainsKey('class')) { $e.data['class'] } else { '' }); message = (Protect-AzlSonarText -Text $einfo.message) } }
+            'RemotingListenerChange' { $remoting.listener = [ordered]@{ state = $e.state; status = $einfo.status; message = (Protect-AzlSonarText -Text $einfo.message) } }
+        }
+        # Events that only report (a heartbeat, an address, a remoting step, a state Sonar does not know) never change what the node is doing.
+        if ($einfo.known -and $einfo.group -notin 'remoting', 'transport' -and $e.state -notin 'NodeWaiting', 'TransportResolved', 'MethodResolved') { $last = $e; $prevSig = $e.state }
+    }
+    $lastEvent = if ($timeline.Count) { $timeline[$timeline.Count - 1] } else { $null }
+    $lastRaw = if (@($events).Count) { @($events)[-1] } else { $null }
+    $waiting = $null
+    if ($null -ne $lastRaw -and $lastRaw.state -eq 'NodeWaiting') {
+        $d = $lastRaw.data
+        $waiting = [ordered]@{
+            what = [string]$(if ($d.ContainsKey('waiting') -and $d['waiting']) { $d['waiting'] } else { 'the node' }); phase = [string]$(if ($d.ContainsKey('phase')) { $d['phase'] } else { '' })
+            elapsedSeconds = [int]$(if ($d.ContainsKey('elapsedSeconds') -and $null -ne $d['elapsedSeconds']) { $d['elapsedSeconds'] } else { 0 }); heartbeat = [int]$(if ($d.ContainsKey('heartbeat') -and $null -ne $d['heartbeat']) { $d['heartbeat'] } else { 0 }); at = $lastRaw.timestamp
+        }
     }
     $stages = @{}
     foreach ($step in $script:AzlSonarOsStep.Keys) { $stages[$step] = Get-AzlSonarOsStepStage -Events @($byStep[$step]) }
@@ -605,7 +977,12 @@ function ConvertTo-AzlSonarOsConfigNode {
         'planned' { if ($blockedCount) { "Planned: $blockedCount blocked" } elseif ($changesPending) { "Planned: $changesPending change$(if ($changesPending -ne 1) { 's' }) pending" } else { 'Planned: nothing to change' } }
         'applying' { 'Applying changes' }
         'retrying' { "Retrying (run command lost, try $retries)" }
-        'reconnecting' { 'Reconnecting after a restart or an address change' }
+        'reconnecting' {
+            $pending = $null -ne $last -and $last.data.ContainsKey('pendingReconciliation') -and $last.data['pendingReconciliation'] -eq $true
+            $base = if ($pending) { 'Pending reconciliation: the host could not confirm the node answered; its state on the node decides' } else { 'Reconnecting after a restart or an address change' }
+            if ($null -ne $waiting) { $base += "; waiting for $(Protect-AzlSonarText -Text $waiting.what) ($($waiting.elapsedSeconds) s)" }
+            $base
+        }
         'awaitingconfirm' { "Network change applied; waiting for the orchestrator's confirmation" }
         'rolledback' { 'Network change rolled back' + $(if ($stages['Network'].reason) { ': ' + (Protect-AzlSonarText -Text $stages['Network'].reason) }) }
         'refused' { 'Network change refused' + $(if ($stages['Network'].reason) { ': ' + (Protect-AzlSonarText -Text $stages['Network'].reason) }) }
@@ -619,7 +996,7 @@ function ConvertTo-AzlSonarOsConfigNode {
     $currentStep = ''
     foreach ($step in $script:AzlSonarOsStep.Keys) { if ($stages[$step].stage -eq 'changing') { $currentStep = $step; break } }
     if (-not $currentStep -and $status -eq 'running') {
-        $touched = @($events | Where-Object { $_.step } | Select-Object -Last 1)
+        $touched = @($events | Where-Object { $_.step -and $script:AzlSonarOsStep.Contains($_.step) } | Select-Object -Last 1)
         if ($touched.Count) { $currentStep = $touched[0].step }
     }
     if (-not $currentStep -and $state -in 'failed', 'blocked', 'rolledback', 'refused') {
@@ -663,7 +1040,11 @@ function ConvertTo-AzlSonarOsConfigNode {
                 arc        = [bool](($st.transport -eq 'ArcRunCommand' -or (-not $st.transport -and $arc)) -and $st.stage -notin 'waiting', 'skipped' -and -not $verify)
                 guarded    = $(if ($st.guarded) {
                         [ordered]@{
-                            state = $st.guarded; changeId = $st.changeId; rung = $st.rung; repairs = [int]$st.repairs
+                            state = $st.guarded; phase = $st.guarded; active = [bool]($st.guarded -notin 'Committed', 'RolledBack', 'Refused')
+                            reconnecting = [bool]($state -eq 'reconnecting')
+                            changeId = $st.changeId; group = $st.group; oldAddress = $st.oldAddress; newAddress = $st.newAddress; items = (Protect-AzlSonarText -Text $st.items)
+                            rung = $st.rung; repairs = [int]$st.repairs; verdict = $st.verdict
+                            startedAt = (Format-AzlSonarDate $st.startedAt)
                             confirmBy = (Format-AzlSonarDate $st.confirmBy); confirmMinutes = [int]$st.confirmMinutes
                             reason = (Protect-AzlSonarText -Text $st.reason)
                         }
@@ -720,6 +1101,13 @@ function ConvertTo-AzlSonarOsConfigNode {
         converged      = [bool]($state -eq 'converged')
         retries        = $retries
         restarts       = $restarts
+        address        = $addr
+        lastEvent      = $lastEvent
+        timeline       = @($timeline | Select-Object -Last $script:AzlSonarOsTimelineNode)
+        unknownStates  = [string[]]@($unknownSeen.Keys)
+        unknownEvents  = @($unknownSeen.Values)
+        waiting        = $waiting
+        remoting       = $remoting
         guarded        = $stages['Network'].guarded
         guardedDetail  = $(@($tree | Where-Object { $_.osc.step -eq 'Network' })[0].osc.guarded)
         changes        = $changesPending
@@ -829,7 +1217,7 @@ function Get-AzlSonarOsConfigurationState {
     }
 
     # The wipe list: pending while a listed node has not finished its ClearStorage step.
-    $wipe = [ordered]@{ published = $false; enabled = $false; count = 0; pending = $false; nodes = @() }
+    $wipe = [ordered]@{ published = $false; enabled = $false; count = 0; pending = $false; nodes = @(); approval = $null }
     if ($null -ne $run -and $null -ne $run['Wipe']) {
         $w = $run['Wipe']
         $listed = foreach ($item in @($w['Nodes'])) {
@@ -840,12 +1228,58 @@ function Get-AzlSonarOsConfigurationState {
         $listed = @($listed)
         $wipe = [ordered]@{
             published = $true; enabled = [bool]$w['Enabled']; count = [int]$w['Count']
-            pending = [bool](@($listed | Where-Object { -not $_.done }).Count -gt 0); nodes = $listed
+            pending = [bool](@($listed | Where-Object { -not $_.done }).Count -gt 0); nodes = $listed; approval = $null
         }
     }
 
     $warnings = [System.Collections.Generic.List[string]]::new()
     foreach ($n in $nodes) { foreach ($w in $n.warnings) { $warnings.Add("$($n.name): $w") } }
+
+    # Wipe approval (the approved list the Apply was bound to, or the rejection).
+    $approval = $null
+    if ($null -ne $run -and $run.ContainsKey('WipeApproval') -and $null -ne $run['WipeApproval']) {
+        $a = $run['WipeApproval']
+        $approval = [ordered]@{ state = [string]$a.State; at = [string]$a.At; hash = [string]$a.Hash; approvedHash = [string]$a.ApprovedHash; message = (Protect-AzlSonarText -Text ([string]$a.Message)) }
+    }
+    $wipe['approval'] = $approval
+
+    # The run's own events (labelled), the remoting facts of the run and every state Sonar does not know (never dropped).
+    $runTimeline = @(if ($null -ne $run -and $run.ContainsKey('RunEvents')) {
+            foreach ($item in @($run['RunEvents'])) {
+                $ri = Get-AzlSonarOsEventInfo -State $item.state -Level $item.level -Evidence $item.evidence
+                [ordered]@{ at = [string]$item.at; state = $item.state; label = $ri.label; group = $ri.group; known = $ri.known; status = $ri.status; level = $item.level; seq = $item.seq; message = (Protect-AzlSonarText -Text $ri.message) }
+            }
+        })
+    $remotingOut = [ordered]@{ profile = $null; trustedHosts = $null }
+    if ($null -ne $run -and $run.ContainsKey('Remoting') -and $null -ne $run['Remoting']) {
+        $r = $run['Remoting']
+        if ($null -ne $r['Profile']) {
+            $p = $r['Profile']
+            $remotingOut.profile = [ordered]@{ class = $p.Class; posture = $p.Posture; relaxed = [bool]$p.Relaxed; scheme = $p.Scheme; trustedHosts = $p.TrustedHosts; remoteAddress = @($p.RemoteAddress); level = $p.Level; message = (Protect-AzlSonarText -Text ([string]$p.Message)); at = $p.At }
+        }
+        if ($null -ne $r['TrustedHosts']) {
+            $th = $r['TrustedHosts']
+            $remotingOut.trustedHosts = [ordered]@{ changed = [bool]$th.Changed; restored = [bool]$th.Restored; mode = $th.Mode; class = $th.Class; previous = (Protect-AzlSonarText -Text ([string]$th.Previous)); applied = (Protect-AzlSonarText -Text ([string]$th.Applied)); level = $th.Level; message = (Protect-AzlSonarText -Text ([string]$th.Message)); at = $th.At }
+        }
+    }
+    $unknown = [ordered]@{}
+    $addUnknown = {
+        param($state, $count, $at, $level, $message, $node)
+        if ($unknown.Contains($state)) { $u = $unknown[$state]; $u.count += $count; if ($node -and $u.nodes -notcontains $node) { $u.nodes += $node } }
+        else { $unknown[$state] = [ordered]@{ state = $state; count = $count; nodes = @($node | Where-Object { $_ }); at = $at; level = $level; message = $message } }
+    }
+    foreach ($n in $nodes) { foreach ($u in @($n.unknownEvents)) { & $addUnknown $u.state $u.count $u.at $u.level $u.message $n.name } }
+    if ($null -ne $run -and $run.ContainsKey('Unknown') -and $null -ne $run['Unknown']) {
+        foreach ($k in $run['Unknown'].Keys) { $u = $run['Unknown'][$k]; & $addUnknown $k $u.Count $u.At $u.Level (Protect-AzlSonarText -Text ([string]$(if ($u.Message) { $u.Message } else { "Unrecognised event '$k'" }))) '*' }
+    }
+    $guarded = @(foreach ($n in $nodes) {
+            if ($null -ne $n.guardedDetail) {
+                $d = [ordered]@{ node = $n.name }
+                foreach ($k in $n.guardedDetail.Keys) { $d[$k] = $n.guardedDetail[$k] }
+                $d
+            }
+        })
+    $runId = if ($null -ne $run -and $run.ContainsKey('RunId')) { [string]$run['RunId'] } else { '' }
 
     return [ordered]@{
         configured     = $configured
@@ -864,7 +1298,16 @@ function Get-AzlSonarOsConfigurationState {
             wrapperVersion = $(if ($null -ne $run) { [string]$run['WrapperVersion'] } else { '' })
             lastEventAt   = $(if ($null -ne $run) { [string]$run['LastEventAt'] } else { $null })
             events        = $(if ($null -ne $run -and $run.ContainsKey('Events')) { [int]$run['Events'] } else { 0 })
+            id            = $runId
+            legacy        = [bool](-not $runId)
+            runsSeen      = $(if ($null -ne $run -and $run.ContainsKey('Runs')) { @($run['Runs']).Count } else { 0 })
+            staleIgnored  = $(if ($null -ne $run -and $run.ContainsKey('Stale')) { [int]$run['Stale'] } else { 0 })
+            seq           = $(if ($null -ne $run -and $run.ContainsKey('Seq') -and $null -ne $run['Seq']) { [long]$run['Seq'] } else { $null })
+            timeline      = $runTimeline
         }
+        remoting       = $remotingOut
+        unknownStates  = @($unknown.Values)
+        guarded        = $guarded
         nodesTotal     = $total
         nodesConverged = $converged
         nodesFailed    = $failed

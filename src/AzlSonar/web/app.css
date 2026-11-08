@@ -691,7 +691,7 @@ body { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 .src-note { font-size: 12px; color: var(--muted); margin: 0; }
 .age { white-space: nowrap; }
 
-/* ---------- Mode bar: equal tiles (six: Provisioning, OS configuration, Validate, Deployment, Update, Health) ---------- */
+/* ---------- Mode bar: equal tiles (Discovery, Provisioning, OS configuration, Validate, Deployment, Update (Add node and Repair when the run is one of them)) ---------- */
 
 .modes { display: grid; grid-template-columns: repeat(var(--n, 6), minmax(0, 1fr)); gap: 10px; }
 .mode {
@@ -709,6 +709,18 @@ body { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 .mi-run { background: var(--accent-soft); color: var(--accent); }
 .mode.sel .mi-run { background: var(--surface); }
 .mi-idle { background: var(--idle-soft); color: var(--idle); }
+.mi-na { background: var(--idle-soft); color: var(--idle); }
+.panel-guard { margin: 10px 0 0; padding: 8px 12px; border: 1px solid var(--border); border-left: 4px solid var(--idle); border-radius: 6px; background: var(--surface-2); }
+.panel-guard.guard-ok { border-left-color: var(--ok); }
+.panel-guard.guard-run { border-left-color: var(--accent); }
+.panel-guard.guard-warn { border-left-color: var(--warn); }
+.panel-guard.guard-err { border-left-color: var(--err); }
+.panel-guard .sub-h { margin: 0 0 4px; }
+.osc-addr, .osc-event { font-size: 12px; }
+.osc-event-warn { color: var(--warn); }
+.osc-event-err { color: var(--err); }
+.osc-event-ok { color: var(--ok); }
+.disc-note { color: var(--warn); }
 .mi-err { background: var(--err-soft); color: var(--err); }
 .pulse { animation: pulse 1.6s ease-in-out infinite; }
 .mt { display: flex; flex-direction: column; justify-content: center; min-width: 0; }

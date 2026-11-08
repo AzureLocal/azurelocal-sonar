@@ -42,7 +42,7 @@ function Get-AzlSonarConfigKeyName {
     [OutputType([string])]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('cluster', 'resourceGroup', 'subscription', 'location', 'route', 'identity', 'nodes', 'address', 'ztpEvents', 'osConfigEvents', 'armEvents', 'credential', 'pollSeconds')]
+        [ValidateSet('cluster', 'resourceGroup', 'subscription', 'location', 'route', 'identity', 'nodes', 'address', 'ztpEvents', 'osConfigEvents', 'armEvents', 'discovery', 'credential', 'pollSeconds')]
         [string]$Setting,
 
         [AllowEmptyString()]
@@ -52,12 +52,12 @@ function Get-AzlSonarConfigKeyName {
     $infrastructure = @{
         cluster = 'cluster.name'; resourceGroup = 'azure.resource_group'; subscription = 'azure.subscription_id'; location = 'azure.location'
         route = 'scenario.os_install'; identity = 'scenario.identity'; nodes = 'nodes[].name'; address = 'nodes[].network_adapters[]'
-        ztpEvents = 'provisioning.simplified.evidence_path'; osConfigEvents = 'provisioning.simplified.evidence_path'; armEvents = 'cluster.name (the toolkit''s default report directory)'; credential = 'credential.source (Sonar config only)'; pollSeconds = '-PollSeconds'
+        ztpEvents = 'provisioning.simplified.evidence_path'; osConfigEvents = 'provisioning.simplified.evidence_path'; armEvents = 'cluster.name (the toolkit''s default report directory)'; discovery = 'provisioning.simplified.evidence_path (the discovery folder inside it)'; credential = 'credential.source (Sonar config only)'; pollSeconds = '-PollSeconds'
     }
     $configFile = @{
         cluster = 'clusterName'; resourceGroup = 'resourceGroup'; subscription = 'subscriptionId'; location = 'location'
         route = 'provisioningRoute'; identity = 'identityModel'; nodes = 'nodes[].name'; address = 'nodes[].address'
-        ztpEvents = 'ztpEvents.path'; osConfigEvents = 'osConfigEventsPath'; armEvents = 'armEventsPath'; credential = 'credential.source'; pollSeconds = 'pollSeconds'
+        ztpEvents = 'ztpEvents.path'; osConfigEvents = 'osConfigEventsPath'; armEvents = 'armEventsPath'; discovery = 'discoveryPath'; credential = 'credential.source'; pollSeconds = 'pollSeconds'
     }
     if ($Kind -eq 'infrastructure') { return $infrastructure[$Setting] }
     return $configFile[$Setting]
@@ -101,6 +101,7 @@ function New-AzlSonarDetailFact {
     $ztpPath = [string](Get-AzlSonarMember $Config 'ztpEventsPath' '')
     $osConfigPath = [string](Get-AzlSonarMember $Config 'osConfigEventsPath' '')
     $armPath = [string](Get-AzlSonarMember $Config 'armEventsPath' '')
+    $discoveryPath = [string](Get-AzlSonarMember $Config 'discoveryPath' '')
     $domainAccount = [string](Get-AzlSonarLogAccount -Config $Config -DomainJoined $true -AdminsConfigured $true).domainAccount
     $maxRejections = (Get-AzlSonarBreakerSetting -Config $Config).MaxRejections
 
@@ -119,6 +120,9 @@ function New-AzlSonarDetailFact {
     }
     if (-not $armPath) {
         $notSet.Add([ordered]@{ setting = 'armEvents'; label = 'ARM deployment event file'; key = (& $key 'armEvents'); effect = 'The Validate and Deployment modes show only what Azure reports; the toolkit''s checks, step list and known-failure hints are not shown.' })
+    }
+    if (-not $discoveryPath) {
+        $notSet.Add([ordered]@{ setting = 'discovery'; label = 'Hardware discovery folder'; key = (& $key 'discovery'); effect = 'The Discovery stage shows nothing: the serial numbers, ports and BOSS cards of the machines are not read.' })
     }
     $missingAddress = @($nodes | Where-Object { -not $_.address })
     if ($missingAddress.Count -gt 0) {
@@ -141,6 +145,8 @@ function New-AzlSonarDetailFact {
         osConfigEventsPath = $osConfigPath
         armEventsFile     = $(if ($armPath) { [System.IO.Path]::GetFileName($armPath) } else { '' })
         armEventsPath     = $armPath
+        discoveryFile     = $(if ($discoveryPath) { [System.IO.Path]::GetFileName($discoveryPath.TrimEnd('\', '/')) } else { '' })
+        discoveryPath     = $discoveryPath
         domainAccount     = $domainAccount
         maxRejections     = $maxRejections
         sourceKind        = $kind
@@ -245,7 +251,7 @@ function Get-AzlSonarDetail {
     $osInfo = $shared['OsConfigInfo']
     $osEvents = if ($null -ne $osInfo -and $null -ne $osInfo['Count']) { [long]$osInfo['Count'] } else { 0 }
     $osFileFound = $false
-    if ($null -ne $facts -and $facts.osConfigEventsPath) { $osFileFound = Test-Path -LiteralPath $facts.osConfigEventsPath -PathType Leaf }
+    if ($null -ne $facts -and $facts.osConfigEventsPath) { $osFileFound = @(Resolve-AzlSonarOsConfigEventFile -Path $facts.osConfigEventsPath).Count -gt 0 }
     $armInfo = $shared['ArmInfo']
     $armEvents = if ($null -ne $armInfo -and $null -ne $armInfo['Count']) { [long]$armInfo['Count'] } else { 0 }
     $armFileFound = $false
@@ -298,6 +304,13 @@ function Get-AzlSonarDetail {
                 fileFound   = [bool]$armFileFound
                 events      = $armEvents
                 lastEventAt = $(if ($null -ne $armInfo -and $armInfo['LastEventAt']) { [string]$armInfo['LastEventAt'] } else { $null })
+            }
+            discovery = [ordered]@{
+                configured  = [bool]($null -ne $facts -and $facts.discoveryFile)
+                location    = $(if ($null -ne $facts) { [string]$facts.discoveryFile } else { '' })
+                found       = [bool]($null -ne $facts -and $facts.discoveryPath -and (Test-Path -LiteralPath $facts.discoveryPath))
+                machines    = [int](Get-AzlSonarMember (Get-AzlSonarMember $state 'discovery') 'nodesDiscovered' 0)
+                state       = [string](Get-AzlSonarMember (Get-AzlSonarMember $state 'discovery') 'state' '')
             }
             nodeLogs  = [ordered]@{
                 state       = [string](Get-AzlSonarMember $tailer 'state' 'unknown')
@@ -364,6 +377,7 @@ function New-AzlSonarReplayDetailFact {
         ztpEventsPath     = ''
         osConfigEventsPath = ''
         armEventsPath     = ''
+        discoveryPath     = ''
         sourceKind        = 'config'
         sourcePath        = ''
     }

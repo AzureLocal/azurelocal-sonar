@@ -407,6 +407,8 @@ function ConvertFrom-AzlSonarInfrastructureTree {
         file, next to the ZTP one; on the ISO route only when evidence_path is set),
         <temp>/azl-arm-<cluster.name>/arm-deployment-events.jsonl -> armEventsPath (the toolkit's default report directory for
         the ARM Validate and Deploy run).
+        provisioning.simplified.evidence_path\discovery -> discoveryPath (the folder the toolkit's Invoke-HardwareDiscovery.ps1
+        writes with -OutputPath; the same evidence folder rule).
         Returns { Config; Problems }. Config is $null when there are problems.
     #>
     [CmdletBinding()]
@@ -499,6 +501,7 @@ function ConvertFrom-AzlSonarInfrastructureTree {
 
     $ztpPath = $null
     $osConfigPath = $null
+    $discoveryPath = $null
     $eventFile = {
         param($folder, $name)
         $folder = [Environment]::ExpandEnvironmentVariables([string]$folder)
@@ -524,12 +527,13 @@ function ConvertFrom-AzlSonarInfrastructureTree {
             $rooted = $ztpPath -match '^([A-Za-z]:[\\/]|\\\\|/)'
             if (-not $rooted -and $BaseDirectory) { $ztpPath = [System.IO.Path]::GetFullPath((Join-Path -Path $BaseDirectory -ChildPath $ztpPath)) }
             $osConfigPath = & $eventFile $evidence 'os-configuration-events.jsonl'
+            $discoveryPath = & $eventFile $evidence 'discovery'
         }
     }
     else {
         # ISO route: OS configuration still writes its event file; follow it when the file names the evidence folder.
         $isoEvidence = Get-AzlSonarInfrastructureValue $Tree 'provisioning.simplified.evidence_path'
-        if ($isoEvidence) { $osConfigPath = & $eventFile $isoEvidence 'os-configuration-events.jsonl' }
+        if ($isoEvidence) { $osConfigPath = & $eventFile $isoEvidence 'os-configuration-events.jsonl'; $discoveryPath = & $eventFile $isoEvidence 'discovery' }
     }
 
     # Which account reads a node's logs: the local administrator (identity.local_admin) until the node has reported DomainJoined
@@ -576,6 +580,7 @@ function ConvertFrom-AzlSonarInfrastructureTree {
     # The toolkit's ARM Validate and Deploy run writes arm-deployment-events.jsonl into its -ReportDirectory, which defaults to
     # <temp>/azl-arm-<cluster.name> (Invoke-AzlArmDeploymentRun). Sonar follows that default; armEventsPath moves it.
     $config['armEventsPath'] = Join-Path -Path (Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ('azl-arm-' + [string]$values['cluster.name'])) -ChildPath 'arm-deployment-events.jsonl'
+    if ($discoveryPath) { $config['discoveryPath'] = $discoveryPath }
     if ($accounts.Count -gt 0) { $config['logAccounts'] = $accounts }
     # The credential never comes from the infrastructure file (it holds keyvault:// references only).
     $config['credential'] = [ordered]@{ source = 'prompt' }
