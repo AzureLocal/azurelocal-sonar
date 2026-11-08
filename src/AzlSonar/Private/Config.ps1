@@ -149,7 +149,7 @@ function Test-AzlSonarConfig {
                 if ($why) { $problems.Add("logAccounts.domain.passwordRef $why.") }
             }
             $max = Get-AzlSonarMember $logAccounts 'domain.maxRejections'
-            if ($null -ne $max -and -not ("$max" -match '^[1-5]$')) { $problems.Add('logAccounts.domain.maxRejections must be a whole number from 1 to 5.') }
+            if ($null -ne $max -and -not ("$max" -match '\A[1-5]\z')) { $problems.Add('logAccounts.domain.maxRejections must be a whole number from 1 to 5.') }
             foreach ($forbidden in 'password', 'secret', 'secretValue') {
                 if ($null -ne (Get-AzlSonarMember $logAccounts "domain.$forbidden") -or $null -ne (Get-AzlSonarMember $logAccounts "local.$forbidden")) { $problems.Add("logAccounts: '$forbidden' is refused; secrets never go in the file.") }
             }
@@ -412,7 +412,7 @@ function Read-AzlSonarConfig {
             maxRejections = $(
                 $limit = 0
                 $given = Get-AzlSonarMember $accountsRaw 'domain.maxRejections'
-                if ($null -ne $given -and [int]::TryParse("$given", [ref]$limit) -and $limit -ge 1 -and $limit -le 5) { $limit } else { 2 })
+                if ($null -ne $given -and "$given" -match '\A[1-5]\z' -and [int]::TryParse("$given", [ref]$limit)) { $limit } else { 2 })
         }
     }
 

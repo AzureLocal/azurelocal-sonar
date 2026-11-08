@@ -148,39 +148,59 @@ function Open-AzlSonarNodeConnection {
         Opens a connection to one node: WinRM first, then SSH (Posh-SSH) as the log tailer does. Never changes the
         workstation (TrustedHosts is only reported by the tailer).
     .OUTPUTS
-        Hashtable { Session; Ssh; Reason } - Session or Ssh set when connected, else Reason says why not.
+        Hashtable { Session; Ssh; Reason; Legs } - Session or Ssh set when connected, else Reason says why not. Legs lists
+        each transport tried (or skipped) as { Transport, Exception (the error record), Message }, so the caller classifies
+        the error numbers and types of every leg, not only the text.
     #>
     [CmdletBinding()]
     [OutputType([hashtable])]
     param(
         [Parameter(Mandatory)][string]$Address,
         [AllowNull()][pscredential]$Credential,
-        [ValidateSet('auto', 'winrm', 'ssh')][string]$Transport = 'auto'
+        [ValidateSet('auto', 'winrm', 'ssh')][string]$Transport = 'auto',
+
+        # The credential is the domain account: its password is never sent over a second transport after a WinRM failure.
+        [switch]$DomainAccount
     )
 
     $reasons = [System.Collections.Generic.List[string]]::new()
+    $legs = [System.Collections.Generic.List[object]]::new()
+    $winrmFailed = $false
     if ($Transport -in 'auto', 'winrm') {
         try {
             $options = New-PSSessionOption -OpenTimeout $script:AzlSonarProbe.SessionOpenMs -OperationTimeout $script:AzlSonarProbe.SessionOperationMs -NoMachineProfile
             $parameters = @{ ComputerName = $Address; SessionOption = $options; Name = 'AzlSonarProbe'; ErrorAction = 'Stop' }
             if ($null -ne $Credential) { $parameters.Credential = $Credential }
-            return @{ Session = (New-PSSession @parameters); Ssh = $null; Reason = $null }
+            return @{ Session = (New-PSSession @parameters); Ssh = $null; Reason = $null; Legs = @() }
         }
-        catch { $reasons.Add("WinRM: $($_.Exception.Message)") }
+        catch {
+            $winrmFailed = $true
+            $reasons.Add("WinRM: $($_.Exception.Message)")
+            $legs.Add(@{ Transport = 'winrm'; Exception = $_; Message = [string]$_.Exception.Message })
+        }
     }
     if ($Transport -in 'auto', 'ssh') {
-        if ($null -eq $Credential) { $reasons.Add('SSH: needs a credential.') }
-        elseif (-not (Get-Module -ListAvailable -Name Posh-SSH)) { $reasons.Add('SSH: the Posh-SSH module is not installed on this workstation.') }
+        $skipped = $null
+        if ($DomainAccount -and $winrmFailed) { $skipped = 'SSH: not tried with the domain account after a WinRM failure (its password is not sent over a second transport).' }
+        elseif ($null -eq $Credential) { $skipped = 'SSH: needs a credential.' }
+        elseif (-not (Get-Module -ListAvailable -Name Posh-SSH)) { $skipped = 'SSH: the Posh-SSH module is not installed on this workstation.' }
+        if ($null -ne $skipped) {
+            $reasons.Add($skipped)
+            $legs.Add(@{ Transport = 'ssh'; Exception = $null; Message = $skipped; Skipped = $true })
+        }
         else {
             try {
                 Import-Module Posh-SSH -ErrorAction Stop
                 $ssh = New-SSHSession -ComputerName $Address -Credential $Credential -AcceptKey -ConnectionTimeout ([int]($script:AzlSonarProbe.SessionOpenMs / 1000)) -ErrorAction Stop -WarningAction SilentlyContinue
-                return @{ Session = $null; Ssh = $ssh; Reason = $null }
+                return @{ Session = $null; Ssh = $ssh; Reason = $null; Legs = @() }
             }
-            catch { $reasons.Add("SSH: $($_.Exception.Message)") }
+            catch {
+                $reasons.Add("SSH: $($_.Exception.Message)")
+                $legs.Add(@{ Transport = 'ssh'; Exception = $_; Message = [string]$_.Exception.Message })
+            }
         }
     }
-    return @{ Session = $null; Ssh = $null; Reason = ($reasons -join ' | ') }
+    return @{ Session = $null; Ssh = $null; Reason = ($reasons -join ' | '); Legs = $legs.ToArray() }
 }
 
 function Close-AzlSonarNodeConnection {
@@ -352,16 +372,20 @@ function Invoke-AzlSonarNodeProbeLoop {
                     if ($null -ne $connection) { Close-AzlSonarNodeConnection $connection }
                     # The local account until the node reports DomainJoined, then the domain account (back to the local one if it is refused).
                     $pick = Select-AzlSonarNodeAccount -Shared $Shared -Config $Config -Node $node.name -Local $Credential
-                    $connection = Open-AzlSonarNodeConnection -Address $node.address -Credential $pick.Credential -Transport $transport
+                    $connection = Open-AzlSonarNodeConnection -Address $node.address -Credential $pick.Credential -Transport $transport -DomainAccount:($pick.Account.kind -eq 'domain')
                     if ($pick.Account.kind -eq 'domain') {
                         # The same rules as the log tailer: the account-wide breaker, one probe at a time, never a retry per poll.
+                        # Every transport leg is classified for its own transport and the worst wins; the result carries the ticket.
                         $opened = $null -ne $connection.Session -or $null -ne $connection.Ssh
                         $reason = Protect-AzlSonarText -Text ([string]$connection.Reason) -Secret $Shared.Redact
-                        $class = if ($opened) { [pscustomobject]@{ Class = 'ok' } } else { Get-AzlSonarConnectionFailureClass -Transport $(if ($reason -match '^SSH') { 'ssh' } else { 'winrm' }) -Message $reason }
-                        Register-AzlSonarAccountResult -Shared $Shared -Config $Config -Node $node.name -Class $class.Class -Message $reason
-                        if ($class.Class -in 'rejected', 'lockedOut', 'authorization') {
+                        # (the legs carry the exceptions, so their error numbers and types count, not only the text)
+                        $class = if ($opened) { [pscustomobject]@{ Class = 'ok' } }
+                        elseif ($connection.ContainsKey('Legs') -and @($connection.Legs).Count -gt 0) { Get-AzlSonarWorstFailureClass -Leg $connection.Legs }
+                        else { Get-AzlSonarWorstFailureClass -Reason $reason }
+                        Register-AzlSonarAccountResult -Shared $Shared -Config $Config -Node $node.name -Class $class.Class -Message $reason -Ticket $pick.Ticket
+                        if ($class.Class -in 'rejected', 'lockedOut', 'accountUnusable', 'authorization') {
                             $pick = Select-AzlSonarNodeAccount -Shared $Shared -Config $Config -Node $node.name -Local $Credential
-                            $connection = Open-AzlSonarNodeConnection -Address $node.address -Credential $pick.Credential -Transport $transport
+                            $connection = Open-AzlSonarNodeConnection -Address $node.address -Credential $pick.Credential -Transport $transport -DomainAccount:($pick.Account.kind -eq 'domain')
                         }
                     }
                     $connections[$node.name] = $connection

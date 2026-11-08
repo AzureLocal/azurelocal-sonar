@@ -14,6 +14,7 @@ BeforeAll {
     }
     function New-ModifiedInfrastructure {
         # The 3-node fixture with a text edit applied, written to TestDrive.
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'A test helper that writes a file under TestDrive.')]
         param([Parameter(Mandatory)][scriptblock]$Edit)
         $text = Get-Content -LiteralPath $script:Fixture -Raw
         $text = & $Edit $text
