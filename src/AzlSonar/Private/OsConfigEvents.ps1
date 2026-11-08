@@ -773,7 +773,7 @@ function Get-AzlSonarOsConfigurationState {
         [AllowNull()]
         [System.Collections.IDictionary]$RunCommand,
 
-        # Shared.LogAccount: the nodes that rejected the domain account, for the account shown per node.
+        # Shared.LogAccount: the account-wide breaker and the per-node records, for the account shown per node.
         [AllowNull()]
         [System.Collections.IDictionary]$LogAccount,
 
@@ -797,9 +797,8 @@ function Get-AzlSonarOsConfigurationState {
         if ($null -ne $RunCommand -and $RunCommand.Contains($nm)) { $rc = @($RunCommand[$nm]) }
         $domainState = Get-AzlSonarOsDomainState -Store $Store -Node $nm
         $joined = $domainState.Joined
-        $rejected = $false
-        if ($null -ne $LogAccount -and $LogAccount.Contains($nm) -and $null -ne $LogAccount[$nm]) { $rejected = [bool]$LogAccount[$nm]['Rejected'] }
-        $account = Get-AzlSonarLogAccount -Config $Config -Node $nm -DomainJoined $joined -AdminsConfigured $domainState.AdminsConfigured -Rejected $rejected -LocalUserName $LocalUserName
+        $pause = Get-AzlSonarNodePauseFor -Table $LogAccount -Node $nm
+        $account = Get-AzlSonarLogAccount -Config $Config -Node $nm -DomainJoined $joined -AdminsConfigured $domainState.AdminsConfigured -Pause $pause -LocalUserName $LocalUserName
         ConvertTo-AzlSonarOsConfigNode -Name $nm -Entry $entry -Run $run -ExpectedRoute $ExpectedRoute -ZtpNode $ZtpNode -RunCommand $rc -IdentityModel $identityModel -DomainJoined $joined -AdminsConfigured $domainState.AdminsConfigured -LogAccount $account
     }
     $nodes = @($nodes)
