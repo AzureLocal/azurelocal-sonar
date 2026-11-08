@@ -47,7 +47,7 @@ function Get-AzlSonarMonitorPlan {
         What a monitor needs: which sources are read and which log access is listed.
     .DESCRIPTION
         { monitor, standalone, azure (poll the Azure resources), ztpEvents, osConfigEvents, nodeProbe (OEM image route
-        probes), tailer (the seed node's log), armEvents (the toolkit's ARM Validate and Deploy event file; Validate and Deployment only), discovery (the discovery files), phases (the log access phases listed) }.
+        probes), tailer (the seed node's log), armEvents (the toolkit's ARM Validate and Deploy event file; Validate and Deployment only), cluster (the cluster resource, for the cluster card of Validate, Deployment, Update, AddNode and Repair), discovery (the discovery files), phases (the log access phases listed) }.
         Auto is today's behaviour: everything. Discovery reads the discovery files only (no Azure sign-in, no node). Provisioning
         reads Azure and the ZTP event file. OsConfiguration reads the OS configuration event file (and the Arc run commands in
         Azure) but not the node logs. Validate, Deployment, Update, AddNode and Repair read the Azure resources of their
@@ -59,12 +59,12 @@ function Get-AzlSonarMonitorPlan {
 
     $name = Get-AzlSonarMonitorName -Value $Monitor
     if (-not $name) { $name = 'Auto' }
-    $plan = [ordered]@{ monitor = $name; standalone = ($name -ne 'Auto'); azure = $true; ztpEvents = $true; osConfigEvents = $true; nodeProbe = $true; tailer = $true; discovery = $true; armEvents = $true
+    $plan = [ordered]@{ monitor = $name; standalone = ($name -ne 'Auto'); azure = $true; ztpEvents = $true; osConfigEvents = $true; nodeProbe = $true; tailer = $true; discovery = $true; armEvents = $true; cluster = $true
         phases = @('provisioning', 'arc-registration', 'validation', 'deployment', 'post-deployment', 'update', 'add-node', 'repair') }
     switch ($name) {
-        'Discovery' { $plan.azure = $false; $plan.armEvents = $false; $plan.ztpEvents = $false; $plan.osConfigEvents = $false; $plan.nodeProbe = $false; $plan.tailer = $false; $plan.phases = @() }
-        'Provisioning' { $plan.armEvents = $false; $plan.osConfigEvents = $false; $plan.discovery = $false; $plan.tailer = $false; $plan.phases = @('provisioning', 'arc-registration') }
-        'OsConfiguration' { $plan.armEvents = $false; $plan.ztpEvents = $false; $plan.nodeProbe = $false; $plan.discovery = $false; $plan.tailer = $false; $plan.phases = @('provisioning') }
+        'Discovery' { $plan.azure = $false; $plan.cluster = $false; $plan.armEvents = $false; $plan.ztpEvents = $false; $plan.osConfigEvents = $false; $plan.nodeProbe = $false; $plan.tailer = $false; $plan.phases = @() }
+        'Provisioning' { $plan.cluster = $false; $plan.armEvents = $false; $plan.osConfigEvents = $false; $plan.discovery = $false; $plan.tailer = $false; $plan.phases = @('provisioning', 'arc-registration') }
+        'OsConfiguration' { $plan.cluster = $false; $plan.armEvents = $false; $plan.ztpEvents = $false; $plan.nodeProbe = $false; $plan.discovery = $false; $plan.tailer = $false; $plan.phases = @('provisioning') }
         'Validate' { $plan.ztpEvents = $false; $plan.osConfigEvents = $false; $plan.nodeProbe = $false; $plan.discovery = $false; $plan.phases = @('validation') }
         'Deployment' { $plan.ztpEvents = $false; $plan.osConfigEvents = $false; $plan.nodeProbe = $false; $plan.discovery = $false; $plan.phases = @('deployment', 'post-deployment') }
         'Update' { $plan.armEvents = $false; $plan.ztpEvents = $false; $plan.osConfigEvents = $false; $plan.nodeProbe = $false; $plan.discovery = $false; $plan.phases = @('update') }

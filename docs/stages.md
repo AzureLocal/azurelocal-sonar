@@ -194,6 +194,10 @@ A machine is **converged** when the toolkit reports `NodeConverged` for it. The 
 
 **In Sonar:** the **Validate** and **Deployment** tiles and modes. Before Azure has steps of its own the tiles follow the toolkit (*Checking*, *2 checks failed*, *Step 0.4*, *Failed at 0.41.2*); the Steps box lists the checks (failures first) and the validation results or the deployment progress per step with its duration; a failure that matches the toolkit's known-issues list carries a hint, for example the device-ID Arc name problem at step 0.41. Set [`armEventsPath`](./config.md) when the toolkit run used its own report directory. The full description, the states and what Sonar never does are on [Validate and Deploy from the toolkit](./arm-run.md).
 
+## The cluster card (Validate, Deployment, Update, Add node, Repair)
+
+These modes act on the cluster resource (`Microsoft.AzureStackHCI/clusters`), so the summary box starts with a **cluster card**: the cluster name, the resource's status, connectivity, provisioning state, solution version and machine count as Azure reports them, the mode's own result (validation pass and fail counts with the failures first, deployment progress and elapsed time, the update state with current and target version, the add node or repair operation) and the last error. Until Validate creates the cluster the card reads *The cluster resource does not exist yet*. Selecting it shows the cluster-level steps only. See the [tour](./tour.md#the-cluster-card). Discovery, Provisioning and OS configuration have no cluster card.
+
 ## After ZTP
 
 | Next step | In Sonar | How to run it |

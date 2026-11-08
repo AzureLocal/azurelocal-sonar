@@ -49,6 +49,27 @@ The row under the top bar has one tile per mode: **Discovery**, **Provisioning (
 
 The first screenshot is the demo `?demo=1&route=discovery`, the second `?demo=1&route=iso`.
 
+## The cluster card
+
+![The cluster card of Validate: the cluster resource, the validation result with the failures first and the last error](images/tour-cluster-validate.png)
+
+Validate, Deployment, Update, Add node and Repair act on the **cluster**, not on one machine, so their summary has a **cluster card** above the machine cards. Discovery, Provisioning and OS configuration stay per machine.
+
+The card shows the cluster name and what Azure says about the cluster resource (*status, connectivity*, *provisioning state*, *solution version*, *machines* the cluster reports), then what the mode adds at cluster level:
+
+| Mode | The card adds |
+| --- | --- |
+| **Validate** | The validation result (*Passed*, *Running*, *Failed*), *N of M steps passed, K failed* with the **failed steps first**, and the toolkit's check counts when its ARM run is followed. |
+| **Deployment** | The result, *Step n of m (the step running)*, the **elapsed time**, the deployment mode and the deployment settings' state. |
+| **Update** | The update state (*Update available*, *Preparing*, *Installing*, *Failed*, *Needs attention*), the **current and target version** and the failed health checks. |
+| **Add node**, **Repair** | The operation, and that Azure does not report its target; the machines that are not connected are named. |
+
+![The cluster card of Deployment: progress, elapsed time, deployment mode and settings](images/tour-cluster-deploy.png)
+
+![Before Validate has created the cluster: The cluster resource does not exist yet](images/tour-cluster-waiting.png)
+
+Every card ends with the **last error** when there is one. Before the cluster exists (Validate creates it) the card says *The cluster resource does not exist yet*. **Click the card** to show only the cluster-level steps (the machine rows of Validate go) and clear the machine filter; click it again to clear. The card is read from one extra read-only request for the cluster resource; the rest was already in the page. It is built from the Microsoft Learn REST reference (clusters, 2026-10-01) and is unverified against a live run. The screenshot is the demo `?demo=1&route=cluster`.
+
 ## The summary box
 
 The title and status chip of the selected mode, one sentence that says where things stand (and, when something blocks, what), when the mode started, and **a card per machine**.

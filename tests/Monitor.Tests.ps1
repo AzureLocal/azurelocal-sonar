@@ -32,7 +32,7 @@ Describe 'what each monitor reads' {
     It 'Auto is today: everything' {
         $p = InModuleScope AzlSonar { Get-AzlSonarMonitorPlan -Monitor 'Auto' }
         $p.standalone | Should -BeFalse
-        ($p.azure -and $p.ztpEvents -and $p.osConfigEvents -and $p.armEvents -and $p.nodeProbe -and $p.tailer -and $p.discovery) | Should -BeTrue
+        ($p.azure -and $p.ztpEvents -and $p.osConfigEvents -and $p.armEvents -and $p.cluster -and $p.nodeProbe -and $p.tailer -and $p.discovery) | Should -BeTrue
         @($p.phases).Count | Should -Be 8
     }
     It '<Name> reads only what it needs' -ForEach @(
@@ -53,6 +53,7 @@ Describe 'what each monitor reads' {
         $p.tailer | Should -Be $Tail
         $p.discovery | Should -Be $Disc
         $p.armEvents | Should -Be ($Name -in 'Validate', 'Deployment')
+        $p.cluster | Should -Be ($Name -in 'Validate', 'Deployment', 'Update', 'AddNode', 'Repair')
         @($p.phases) | Should -Be $Phases
         $p.nodeProbe | Should -Be ($Name -eq 'Provisioning')
     }

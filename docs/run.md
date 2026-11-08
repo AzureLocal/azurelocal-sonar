@@ -6,6 +6,8 @@ In every command, `-InfrastructureFile ./infrastructure.yml` (the master file, t
 
 The ZTP run has a page of its own for each stage (Boot, Bootstrap, Vouchers and the claim, Install OS, Device, Network, Restore, Handoff): [Running Sonar, stage by stage](./stages.md); the Log access window (which account and folders for each phase) is explained in [Log access](./log-access.md). Access for each purpose is summarised in its section. The full picture, which roles and network paths a run needs, is in the toolkit's [access and connectivity](https://github.com/AzureLocal/azurelocal-toolkit/blob/main/docs/access-and-connectivity.md) page.
 
+The Validate, Deployment, Update, Add node and Repair modes start with a **cluster card** (the cluster resource as Azure reports it, the mode's result, the last error): [what it shows](./tour.md#the-cluster-card).
+
 ## Watch the hardware discovery (before ZTP)
 
 **When:** you ran, or are about to run, the toolkit's `Invoke-HardwareDiscovery.ps1` (the first stage of the flow, before ZTP). Sonar reads the files it writes; it never talks to an iDRAC.

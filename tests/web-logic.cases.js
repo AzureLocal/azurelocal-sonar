@@ -2059,4 +2059,137 @@ test('level filter: the buttons show the count of their own level only', functio
   eq(/data-level="error"[^>]*>Errors</.test(html), true);
 });
 
+// ---------------------------------------------------------------- the cluster card (Validate, Deployment, Update, Add node, Repair)
+
+function clusterRes(extra) {
+  var c = { name: 'clus01', read: true, exists: true, status: 'ConnectedRecently', connectivityStatus: 'Connected', provisioningState: 'Succeeded', solutionVersion: '12.2609.0.1',
+    nodeCount: 2, nodesConfigured: 2, deploymentState: 'Provisioning', deploymentMode: 'Deploy', error: '' };
+  Object.keys(extra || {}).forEach(function (k) { c[k] = extra[k]; });
+  return c;
+}
+function rowsOf(card) { var o = {}; card.rows.forEach(function (r) { o[r.k] = r.v; }); return o; }
+function stepN(id, name, status, errors, children) { return { id: id, name: name, status: status, errors: errors || [], children: children || [] }; }
+
+test('cluster card: only Validate, Deployment, Update, Add node and Repair have one; Discovery, Provisioning and OS configuration stay per machine', function () {
+  var s = { phase: 'validation', activePhase: 'validation', cluster: 'clus01', clusterResource: clusterRes() };
+  var tracks = { addnode: 'add-node', repair: 'repair' };
+  ['validate', 'deploy', 'update', 'addnode', 'repair'].forEach(function (id) {
+    var st = JSON.parse(JSON.stringify(s)); if (tracks[id]) st.track = tracks[id];
+    eq(m.clusterCard(st, id) !== null, true, id); eq(m.summaryFor(st, id).cluster !== null, true, id + ' summary');
+  });
+  ['discovery', 'prov', 'osconfig'].forEach(function (id) { eq(m.clusterCard(s, id), null, id); eq(m.summaryFor(s, id).cluster, null, id + ' summary'); });
+  eq(m.CLUSTER_MODES, ['validate', 'deploy', 'update', 'addnode', 'repair']);
+  eq(m.clusterCard(null, 'validate'), null);
+  eq(m.clusterCard(s, 'validate').title, 'Cluster clus01');
+});
+
+test('cluster card: the waiting state says the cluster resource does not exist yet (Validate creates it)', function () {
+  var s = { phase: 'validation', activePhase: 'validation', cluster: 'clus01', clusterResource: clusterRes({ exists: false, status: '', connectivityStatus: '', provisioningState: '', nodeCount: null }) };
+  var v = m.clusterCard(s, 'validate');
+  eq(v.waiting, true); eq(v.kind, 'idle');
+  eq(v.rows, [{ k: 'Cluster resource', v: 'The cluster resource does not exist yet: Validate creates it', warn: false }]);
+  eq(m.clusterCard(s, 'deploy').rows[0].v, 'The cluster resource does not exist yet', 'only Validate creates it');
+  // nothing read yet (a state from an older Sonar or the first poll): no row claims anything
+  var unread = m.clusterCard({ phase: 'validation', cluster: 'clus01' }, 'validate');
+  eq(unread.waiting, false);
+  eq(unread.title, 'Cluster clus01');
+});
+
+test('cluster card: the cluster resource as Azure reports it, the machines, and a read that failed', function () {
+  var s = { phase: 'deployment', activePhase: 'deployment', clusterResource: clusterRes(), deployment: { status: 'InProgress', tree: [] } };
+  var r = rowsOf(m.clusterCard(s, 'deploy'));
+  eq(r['Azure says'], 'ConnectedRecently, Connected');
+  eq(r['Provisioning state'], 'Succeeded');
+  eq(r['Solution version'], '12.2609.0.1');
+  eq(r['Machines'], '2 of 2 reported by the cluster');
+  eq(rowsOf(m.clusterCard({ clusterResource: clusterRes({ nodeCount: 1 }) }, 'deploy'))['Machines'], '1 of 2 reported by the cluster');
+  var failed = m.clusterCard({ clusterResource: clusterRes({ exists: null, status: '', connectivityStatus: '', provisioningState: '', nodeCount: null, error: 'The client does not have authorization' }) }, 'deploy');
+  eq(failed.rows[0], { k: 'Azure says', v: 'not read: The client does not have authorization', warn: true });
+});
+
+test('cluster card (Validate): pass and fail counts, failures first, and the last error', function () {
+  var tree = [stepN('1', 'Validate deployment prerequisites', 'error', [], [
+    stepN('1.1', 'Validate hardware', 'success'), stepN('1.2', 'Validate network', 'success'),
+    stepN('1.3', 'Validate DNS', 'error', ['The DNS server did not answer.']), stepN('1.4', 'Validate storage', 'error', ['No eligible disks.']), stepN('1.5', 'Validate Arc', 'running')])];
+  var s = { phase: 'failed', activePhase: 'validation', clusterResource: clusterRes({ deploymentMode: 'Validate' }), validation: { status: 'Failed', tree: tree } };
+  var c = m.clusterCard(s, 'validate'), r = rowsOf(c);
+  eq(r['Validation'], 'Failed');
+  eq(r['Validation steps'], '2 of 5 passed, 2 failed');
+  eq(c.rows.filter(function (x) { return x.k === 'Validation steps'; })[0].warn, true);
+  eq(c.failures, ['Validate DNS: The DNS server did not answer.', 'Validate storage: No eligible disks.']);
+  eq(c.lastError, 'Validate DNS: The DNS server did not answer.');
+  eq(c.kind, 'err');
+  eq(m.clusterLeaves(tree).map(function (x) { return x.name; }).slice(0, 2), ['Validate DNS', 'Validate storage'], 'failures sort first');
+  var ok = m.clusterCard({ clusterResource: clusterRes(), validation: { status: 'Success', tree: [stepN('1', 'Validate', 'success', [], [stepN('1.1', 'a', 'success'), stepN('1.2', 'b', 'skipped')])] } }, 'validate');
+  eq(rowsOf(ok)['Validation'], 'Passed'); eq(rowsOf(ok)['Validation steps'], '2 of 2 passed'); eq(ok.kind, 'ok'); eq(ok.failures, []); eq(ok.lastError, '');
+  var running = m.clusterCard({ clusterResource: clusterRes(), validation: { status: 'InProgress', tree: [stepN('1', 'Validate', 'running', [], [stepN('1.1', 'a', 'success'), stepN('1.2', 'b', 'running')])] } }, 'validate');
+  eq(running.kind, 'run'); eq(rowsOf(running)['Validation'], 'Running');
+});
+
+test('cluster card (Deployment): progress, elapsed time and the deployment mode and settings', function () {
+  m.setClock(function () { return Date.parse('2026-11-07T20:00:00Z'); });
+  try {
+  var tree = [{ id: '2', name: 'Deploy Azure Local', status: 'running', start: '2026-11-07T19:00:00Z', end: null, errors: [], children: [
+    { id: '2.1', name: 'Pre-deployment checks', status: 'success', start: '2026-11-07T19:00:00Z', end: '2026-11-07T19:10:00Z', errors: [], children: [] },
+    { id: '2.2', name: 'Create cluster', status: 'running', start: '2026-11-07T19:10:00Z', end: null, errors: [], children: [] },
+    { id: '2.3', name: 'Extensions', status: 'notstarted', start: null, end: null, errors: [], children: [] }] }];
+  var c = m.clusterCard({ phase: 'deployment', activePhase: 'deployment', clusterResource: clusterRes(), deployment: { status: 'InProgress', tree: tree } }, 'deploy'), r = rowsOf(c);
+  eq(r['Deployment'], 'Running');
+  eq(r['Progress'], 'Step 2 of 3 (Create cluster)');
+  eq(r['Elapsed'], '1h 0m 0s');
+  eq(r['Deployment mode'], 'Deploy'); eq(r['Deployment settings'], 'Provisioning');
+  eq(c.kind, 'run');
+  } finally { m.setClock(null); }
+  var done = m.clusterCard({ clusterResource: clusterRes({ deploymentState: 'Succeeded' }), deployment: { status: 'Success', tree: [{ id: '2', name: 'Deploy', status: 'success', start: '2026-11-07T19:00:00Z', end: '2026-11-07T19:30:00Z', errors: [], children: [
+    { id: '2.1', name: 'a', status: 'success', errors: [], children: [] }, { id: '2.2', name: 'b', status: 'success', errors: [], children: [] }] }] } }, 'deploy');
+  eq(rowsOf(done)['Deployment'], 'Done'); eq(rowsOf(done)['Progress'], 'Step 2 of 2'); eq(rowsOf(done)['Elapsed'], '30m 0s'); eq(done.kind, 'ok');
+  var failed = m.clusterCard({ clusterResource: clusterRes(), deployment: { status: 'Failed', tree: [stepN('2', 'Deploy', 'error', [], [stepN('2.1', 'Create cluster', 'error', ['Cluster creation failed: node02 did not join.'])])] } }, 'deploy');
+  eq(failed.kind, 'err'); eq(failed.lastError, 'Create cluster: Cluster creation failed: node02 did not join.');
+});
+
+test('cluster card (Update): the update state, the current and target version and the failed health checks', function () {
+  var up = { phase: 'installing', summary: { currentVersion: '12.2609.0.1', healthState: 'Success', failedChecks: [] }, active: { version: '12.2610.0.4', state: 'Installing' }, tree: [] };
+  var c = m.clusterCard({ clusterResource: clusterRes(), update: up }, 'update'), r = rowsOf(c);
+  eq(r['Update'], 'Installing'); eq(r['Current version'], '12.2609.0.1'); eq(r['Target version'], '12.2610.0.4'); eq(c.kind, 'run');
+  eq(r['Update health'], undefined, 'a healthy summary adds no row');
+  var bad = m.clusterCard({ clusterResource: clusterRes(), update: { phase: 'attention', summary: { currentVersion: '1', healthState: 'Failure', failedChecks: [{ title: 'Storage pool is not healthy' }, { title: 'A node is paused' }] }, active: null, tree: [] } }, 'update');
+  eq(rowsOf(bad)['Update'], 'Needs attention'); eq(rowsOf(bad)['Update health'], 'Failure'); eq(bad.failures, ['Storage pool is not healthy', 'A node is paused']); eq(bad.kind, 'err');
+  ['idle', 'available', 'preparing', 'failed'].forEach(function (p) { eq(typeof rowsOf(m.clusterCard({ clusterResource: clusterRes(), update: { phase: p, summary: {}, tree: [] } }, 'update'))['Update'], 'string', p); });
+  eq(rowsOf(m.clusterCard({ clusterResource: clusterRes(), update: { phase: 'idle', summary: {}, tree: [] } }, 'update'))['Update'], 'Up to date');
+});
+
+test('cluster card (Add node, Repair): the operation, that Azure does not report the target, and the machines that are not connected', function () {
+  var s = { phase: 'add-node', activePhase: 'add-node', track: 'add-node', clusterResource: clusterRes(), nodes: [{ name: 'n1', arcStatus: 'Connected' }, { name: 'n3', arcStatus: 'Disconnected' }] };
+  var a = m.clusterCard(s, 'addnode'), r = rowsOf(a);
+  eq(r['Operation'], 'Add node');
+  eq(/does not report the target/.test(r['Target']), true);
+  eq(r['Not connected'], 'n3'); eq(a.kind, 'run');
+  var rep = m.clusterCard({ phase: 'repair', activePhase: 'repair', track: 'repair', clusterResource: clusterRes(), nodes: [{ name: 'n1', arcStatus: 'Connected' }] }, 'repair');
+  eq(rowsOf(rep)['Operation'], 'Repair'); eq(rowsOf(rep)['Not connected'], undefined);
+  eq(rowsOf(m.clusterCard({ phase: 'done', clusterResource: clusterRes() }, 'repair'))['Operation'], 'Repair (not started)');
+});
+
+test('cluster card: selecting it shows the cluster-level steps only (the machine rows of Validate go), and every other mode is unchanged', function () {
+  eq(m.visibleSections('validate', false), ['armvalidation', 'validation', 'extensions']);
+  eq(m.visibleSections('validate', true), ['armvalidation', 'validation'], 'the extensions are per machine');
+  eq(m.visibleSections('deploy', true), ['armdeployment', 'deployment']);
+  eq(m.visibleSections('update', true), ['update']);
+  eq(m.visibleSections('osconfig', true), ['osconfiguration']);
+  eq(m.visibleSections('nonsense', true), []);
+  eq(/function selectCluster\(\)/.test(appSource), true);
+  eq(/'data-cluster': '1'/.test(appSource), true, 'the card is a button the page can select');
+  eq(/app\.filter\.cluster = false;\s*\n\s*app\.filter\.node = ''/.test(appSource), true, 'a mode change clears it');
+});
+
+test('cluster card: demo data, the cluster route, and the state of each moment of the run', function () {
+  eq(/route === 'cluster'\) \{ startClusterDemo/.test(appSource), true);
+  var none = m.demoClusterResource('none'), there = m.demoClusterResource('exists', 2, 'Provisioning', 'Deploy');
+  eq([none.exists, there.exists], [false, true]); eq(there.solutionVersion, '12.2609.0.1'); eq(none.nodeCount, null);
+  eq(m.clusterCard({ phase: 'validation', clusterResource: none }, 'validate').waiting, true);
+  eq(rowsOf(m.clusterCard({ phase: 'deployment', clusterResource: there }, 'deploy'))['Azure says'], 'ConnectedRecently, Connected');
+  var sample = m.demoDeploymentSample(Date.parse('2026-11-07T20:00:00Z'));
+  eq(sample.state.clusterResource.exists, true, 'the default demo carries the cluster resource');
+  eq(m.summaryFor(sample.state, 'deploy', sample.config).cluster.title, 'Cluster clus01');
+});
+
 process.stdout.write(JSON.stringify(cases));

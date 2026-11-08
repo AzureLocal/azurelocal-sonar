@@ -32,9 +32,9 @@
   var REPLAY_SPEEDS = [1, 30, 60, 240];
   var DEMO_ROUTE = (function () {
     if (typeof location === 'undefined') return '';
-    var m = /(?:^|[?&])route=(simplified|oem|oem-image|osconfig|arm|iso|discovery)(?:&|$)/i.exec(location.search);
+    var m = /(?:^|[?&])route=(simplified|oem|oem-image|osconfig|arm|iso|discovery|cluster)(?:&|$)/i.exec(location.search);
     var k = m ? m[1].toLowerCase() : '';
-    return k === 'simplified' || k === 'osconfig' || k === 'arm' || k === 'iso' || k === 'discovery' ? k : (m ? 'oem-image' : '');
+    return k === 'simplified' || k === 'osconfig' || k === 'arm' || k === 'iso' || k === 'discovery' || k === 'cluster' ? k : (m ? 'oem-image' : '');
   })();
 
   // ------------------------------------------------------------------ state
@@ -51,7 +51,7 @@
     store: null,                // log store (createLogStore), set below
     logGen: 0,                  // bumped on a back-end restart so late /api/logs answers are ignored
     counts: { all: 0, warning: 0, error: 0 },
-    filter: { level: 'all', q: '', file: '', stepKey: null, node: '', nodeBy: '', stage: '' },   // nodeBy: 'card' or 'step' (what chose the machine)
+    filter: { level: 'all', q: '', file: '', stepKey: null, node: '', nodeBy: '', stage: '', cluster: false },   // nodeBy: 'card' or 'step' (what chose the machine)
     ui: { mode: null, pickedAt: null, lastMode: null },   // mode the user clicked, and the active mode it was clicked in
     summary: null,              // the summary box model last rendered (summaryFor)
     about: null,                // /api/about: version and documentation links
@@ -738,6 +738,102 @@
     return out.concat(extra);
   }
 
+  // ------------------------------------------------------------------ the cluster card (pure; also run by tests under Node)
+  //
+  // Validate, Deployment, Update, Add node and Repair act on the cluster resource, not on one machine, so their summary has a
+  // cluster card above the machine cards: the cluster resource as Azure reports it (state.clusterResource: status, connectivity,
+  // provisioning state, solution version, machines), and what the mode's own section says at cluster level (validation result,
+  // deployment progress, update state and versions, the target of an add node or repair) and the last error. Selecting the card
+  // shows the cluster-level steps only (the machine rows of the Validate mode, the extensions, go away) and clears the machine filter.
+
+  var CLUSTER_MODES = ['validate', 'deploy', 'update', 'addnode', 'repair'];
+  function clusterOf(state) { return isObj(state) && isObj(state.clusterResource) ? state.clusterResource : null; }
+
+  // The leaf steps of a tree, failures first: [{ name, status, text }].
+  function clusterLeaves(tree) {
+    var out = [];
+    (function walk(list) {
+      arr(list).forEach(function (n) {
+        if (!isObj(n)) return;
+        var kids = arr(n.children).filter(isObj);
+        if (kids.length) { walk(kids); return; }
+        out.push({ name: str(n.name), status: normStatus(n.status), text: firstLine(arr(n.errors).map(str).filter(Boolean)[0] || '', 200) });
+      });
+    })(tree);
+    return out.sort(function (a, b) { return (a.status === 'error' ? 0 : 1) - (b.status === 'error' ? 0 : 1); });
+  }
+
+  var CLUSTER_UPDATE_PHASE = { idle: 'Up to date', available: 'Update available', preparing: 'Preparing', installing: 'Installing', failed: 'Failed', attention: 'Needs attention', unknown: 'Not known yet' };
+  var CLUSTER_STATUS_KIND = { success: 'ok', running: 'run', error: 'err', notstarted: 'idle', skipped: 'ok', unknown: 'idle' };
+
+  // The card of a mode: { name, title, kind, waiting, rows[{ k, v, warn }], failures[], lastError, tip } or null for a mode that is not cluster-level.
+  function clusterCard(state, modeId) {
+    if (CLUSTER_MODES.indexOf(modeId) < 0 || !isObj(state)) return null;
+    var c = clusterOf(state) || {}, name = str(c.name) || (typeof state.cluster === 'string' ? state.cluster : '');
+    var rows = [], failures = [], lastError = '', kind = 'idle';
+    function row(k, v, warn) { if (v !== '' && v !== null && v !== undefined) rows.push({ k: k, v: String(v), warn: !!warn }); }
+    var card = { name: name, title: 'Cluster' + (name ? ' ' + name : ''), kind: kind, waiting: false, rows: rows, failures: failures, lastError: '', tip: 'Click to show only the cluster-level steps; click again to clear.' };
+
+    if (c.exists === false) {
+      card.waiting = true;
+      row('Cluster resource', 'The cluster resource does not exist yet' + (modeId === 'validate' ? ': Validate creates it' : ''));
+      return card;
+    }
+    var azure = [str(c.status), str(c.connectivityStatus)].filter(Boolean).join(', ');
+    if (c.exists === true) row('Azure says', azure || 'the resource exists');
+    else if (c.read === true && str(c.error)) row('Azure says', 'not read: ' + firstLine(c.error, 160), true);
+    row('Provisioning state', str(c.provisioningState));
+    row('Solution version', str(c.solutionVersion));
+    var have = c.nodeCount !== null && c.nodeCount !== undefined ? Number(c.nodeCount) : NaN;
+    if (!isNaN(have) || Number(c.nodesConfigured)) row('Machines', (isNaN(have) ? '?' : have) + ' of ' + (Number(c.nodesConfigured) || 0) + ' reported by the cluster');
+
+    var sec = modeId === 'validate' ? state.validation : modeId === 'deploy' ? state.deployment : modeId === 'update' ? state.update : null;
+    var tree = isObj(sec) ? arr(sec.tree) : [];
+    var st = isObj(sec) ? sectionStatus(sec) : 'notstarted';
+    if (modeId === 'validate') {
+      var leaves = clusterLeaves(tree), bad = leaves.filter(function (x) { return x.status === 'error'; }), ok = leaves.filter(function (x) { return x.status === 'success' || x.status === 'skipped'; });
+      row('Validation', { success: 'Passed', running: 'Running', error: 'Failed', notstarted: 'Not started' }[st] || st);
+      if (leaves.length) row('Validation steps', ok.length + ' of ' + leaves.length + ' passed' + (bad.length ? ', ' + bad.length + ' failed' : ''), bad.length > 0);
+      var ph = armPhaseOf(state, 'validation'), cc = ph && isObj(ph.checkCounts) ? ph.checkCounts : null;
+      if (cc && Number(cc.total)) row('Toolkit checks', (Number(cc.passed) || 0) + ' passed' + (Number(cc.failed) ? ', ' + cc.failed + ' failed' : '') + (Number(cc.warning) ? ', ' + cc.warning + ' with a warning' : ''), Number(cc.failed) > 0);
+      bad.slice(0, 3).forEach(function (x) { failures.push(x.name + (x.text ? ': ' + x.text : '')); });
+    } else if (modeId === 'deploy') {
+      var pr = stepProgress(tree), a = treeStartMin(tree), b = treeEndMax(tree);
+      row('Deployment', { success: 'Done', running: 'Running', error: 'Failed', notstarted: 'Not started' }[st] || st);
+      if (pr.total) row('Progress', 'Step ' + (st === 'success' ? pr.total : pr.current) + ' of ' + pr.total + (pr.name && st === 'running' ? ' (' + pr.name + ')' : ''));
+      if (!isNaN(a)) row('Elapsed', fmtDuration(((st === 'running' || isNaN(b) ? nowMs() : b) - a) / 1000));
+      row('Deployment mode', str(c.deploymentMode));
+      row('Deployment settings', str(c.deploymentState));
+    } else if (modeId === 'update') {
+      var up = isObj(state.update) ? state.update : {}, sum = isObj(up.summary) ? up.summary : {}, act = isObj(up.active) ? up.active : {};
+      var phase = str(up.phase) || 'unknown';
+      row('Update', CLUSTER_UPDATE_PHASE[phase] || phase, phase === 'failed' || phase === 'attention');
+      row('Current version', str(sum.currentVersion));
+      row('Target version', str(act.version));
+      if (str(sum.healthState) && str(sum.healthState).toLowerCase() !== 'success') row('Update health', str(sum.healthState), true);
+      arr(sum.failedChecks).filter(isObj).slice(0, 3).forEach(function (x) { failures.push(str(x.title)); });
+      st = phase === 'failed' || phase === 'attention' ? 'error' : phase === 'installing' || phase === 'preparing' ? 'running' : st;
+    } else {
+      var key = modeId === 'addnode' ? 'add-node' : 'repair', on = str(state.track).toLowerCase() === key || str(state.activePhase).toLowerCase() === key || monitorOf(state) === modeId;
+      row('Operation', (modeId === 'addnode' ? 'Add node' : 'Repair') + (on ? '' : ' (not started)'));
+      row('Target', 'Azure does not report the target of this operation; each machine card below shows its Arc status');
+      var away = arr(state.nodes).filter(isObj).filter(function (n) { return str(n.arcStatus).toLowerCase() !== 'connected'; });
+      if (away.length) row('Not connected', away.map(function (n) { return str(n.name); }).join(', '), true);
+      st = on && str(state.activePhase).toLowerCase() === key ? 'running' : 'notstarted';
+    }
+    var err = firstError(tree);
+    lastError = err ? str(err.name) + (arr(err.errors)[0] ? ': ' + firstLine(arr(err.errors)[0], 200) : '') : (str(c.error) && c.exists !== true ? firstLine(c.error, 200) : '');
+    if (!lastError && isObj(state) && str(state.pollError)) lastError = firstLine(state.pollError, 200);
+    card.kind = failures.length || lastError && st === 'error' ? 'err' : (CLUSTER_STATUS_KIND[st] || 'idle');
+    card.lastError = lastError;
+    return card;
+  }
+
+  // The sections a mode shows, minus the machine rows of the Validate mode while the cluster card is selected.
+  function visibleSections(modeId, clusterSelected) {
+    return arr(MODE_SECTIONS[modeId]).filter(function (sec) { return !(clusterSelected && sec === 'extensions'); });
+  }
+
   // ------------------------------------------------------------------ Discovery (pure; also run by tests under Node)
   //
   // The first stage, before ZTP: the toolkit's Invoke-HardwareDiscovery.ps1 reads each iDRAC and writes one file per machine
@@ -1197,6 +1293,7 @@
     var out = { id: me.id, title: me.name, status: me.status, chip: { kind: me.status, text: chipText[me.status] }, headline: '',
       startedAt: NaN, endedAt: NaN, when: me.tip, cards: [] };
     var machines = machineList(s, config);
+    out.cluster = clusterCard(s, me.id);
 
     if (me.id === 'discovery') {
       var dd = discOf(s) || {}, dnodes = discNodes(s);
@@ -1988,6 +2085,13 @@
     return { iso: iso, step: step, M: 60000 };
   }
 
+  // The cluster resource of the demos (the shape of state.clusterResource): 'exists' or 'none' (Validate has not created it yet).
+  function demoClusterResource(kind, nodes, deploymentState, deploymentMode) {
+    var exists = kind === 'exists';
+    return { name: 'clus01', read: true, exists: exists, status: exists ? 'ConnectedRecently' : '', connectivityStatus: exists ? 'Connected' : '', provisioningState: exists ? 'Succeeded' : '',
+      solutionVersion: exists ? '12.2609.0.1' : '', nodeCount: exists ? nodes : null, nodesConfigured: 2, deploymentState: deploymentState || '', deploymentMode: deploymentMode || '', error: '' };
+  }
+
   // The ?demo=1 running deployment: state, config, guidance, tailer, files, log lines and the lines that keep coming.
   function demoDeploymentSample(now) {
     var f = demoFactory(now), iso = f.iso, step = f.step, M = f.M;
@@ -2018,6 +2122,7 @@
     ];
     var state = {
       cluster: 'clus01', mode: 'Deploy', provisioningState: 'Succeeded', phase: 'deployment',
+      clusterResource: demoClusterResource('exists', 2, 'Provisioning', 'Deploy'),
       validation: { status: 'Success', tree: validation, counts: {} },
       deployment: { status: 'InProgress', tree: deployment, counts: {} },
       nodes: [
@@ -2180,7 +2285,7 @@
       modeStates: modeStates, activeModeId: activeModeId, modeName: modeName, summaryFor: summaryFor, stepProgress: stepProgress,
       lifecyclePlain: lifecyclePlain, arcInfo: arcInfo, machineWaits: machineWaits, machineList: machineList,
       discOf: discOf, discNodes: discNodes, discHasData: discHasData, discoveryTreeOf: discoveryTreeOf, discCard: discCard, discHeadline: discHeadline,
-      levelSet: levelSet, levelPasses: levelPasses, toggleLevel: toggleLevel, levelCount: levelCount, demoDiscovery: demoDiscovery, laMonitorPhases: laMonitorPhases, monitorOf: monitorOf, manualInstall: manualInstall, MODE_IDS: MODE_IDS, MODE_TITLE: MODE_TITLE,
+      demoClusterResource: demoClusterResource, clusterCard: clusterCard, clusterLeaves: clusterLeaves, visibleSections: visibleSections, CLUSTER_MODES: CLUSTER_MODES, levelSet: levelSet, levelPasses: levelPasses, toggleLevel: toggleLevel, levelCount: levelCount, demoDiscovery: demoDiscovery, laMonitorPhases: laMonitorPhases, monitorOf: monitorOf, manualInstall: manualInstall, MODE_IDS: MODE_IDS, MODE_TITLE: MODE_TITLE,
       oscGuardedPanels: oscGuardedPanels, oscAddressChip: oscAddressChip, oscTimelineLines: oscTimelineLines, oscFacts: oscFacts,
       oscOf: oscOf, oscNodes: oscNodes, oscHasData: oscHasData, osConfigTreeOf: osConfigTreeOf, oscMethodChip: oscMethodChip, oscVersionLines: oscVersionLines,
       oscCard: oscCard, oscHeadline: oscHeadline, oscFacts: oscFacts, oscCountdown: oscCountdown, fmtCountdown: fmtCountdown,
@@ -2626,6 +2731,17 @@
       });
       host.appendChild(facts);
     }
+    if (sm.cluster) {
+      var cc = sm.cluster, csel = !!app.filter.cluster;
+      var cbox = el('button', { type: 'button', class: 'card cluster-card cluster-' + cc.kind + (csel ? ' sel' : ''), 'aria-pressed': String(csel), 'data-cluster': '1', title: cc.tip }, [
+        el('span', { class: 'nm' }, [el('span', { class: 'nm-name', text: cc.title }), chipEl(cc.kind, cc.waiting ? 'Waiting' : ({ ok: 'OK', run: 'Running', err: 'Needs attention', idle: 'Waiting' })[cc.kind] || '', cc.tip)])
+      ]);
+      cc.rows.forEach(function (r) { cbox.appendChild(el('span', { class: 'ln' + (r.warn ? ' warnk' : '') }, [el('span', { class: 'k', text: r.k + ': ' }), r.v])); });
+      cc.failures.forEach(function (t) { cbox.appendChild(el('span', { class: 'ln cluster-fail', text: 'Failed: ' + t })); });
+      if (cc.lastError) cbox.appendChild(el('span', { class: 'ln cluster-fail', text: 'Last error: ' + cc.lastError }));
+      cbox.addEventListener('click', function () { selectCluster(); });
+      host.appendChild(cbox);
+    }
     var cards = el('div', { class: 'cards', role: 'group', 'aria-label': 'Machines' });
     sm.cards.forEach(function (c) {
       var sel = app.filter.node && app.filter.node.toLowerCase() === c.name.toLowerCase();
@@ -2667,9 +2783,21 @@
     if (m && app.summary) m.textContent = summaryMeta(app.summary);
   }
 
+  // Clicking the cluster card shows the cluster-level steps only and clears the machine filter; clicking it again clears the choice.
+  function selectCluster() {
+    app.filter.cluster = !app.filter.cluster;
+    if (app.filter.cluster) { app.filter.node = ''; app.filter.nodeBy = ''; dropStepFilter(); app.selectedKey = null; }
+    renderSummary();
+    renderTree(false);
+    renderChips();
+    rerenderLogs();
+    announce(app.filter.cluster ? 'Showing the cluster-level steps.' : 'Cluster filter removed.');
+  }
+
   // Clicking a machine card selects it: the logs (and, in the provisioning mode, the steps) show only that machine.
   // Clicking it again clears the selection.
   function selectNode(name) {
+    app.filter.cluster = false;
     var same = app.filter.node && app.filter.node.toLowerCase() === name.toLowerCase();
     app.filter.node = same ? '' : name;
     app.filter.nodeBy = same ? '' : 'card';
@@ -2854,7 +2982,7 @@
 
   function renderTree(autoScroll) {
     var host = $('tree-host'), s = app.state || {};
-    var mode = currentModeId(), wanted = MODE_SECTIONS[mode] || [];
+    var mode = currentModeId(), wanted = visibleSections(mode, app.filter.cluster);
     var route = provRouteOf(s);
     $('steps-title').textContent = 'Steps \u00b7 ' + modeName(mode, route);
     var active = document.activeElement;
@@ -3344,6 +3472,7 @@
   }
 
   function clearScope() {
+    app.filter.cluster = false;
     app.filter.node = ''; app.filter.nodeBy = ''; app.filter.stepKey = null; app.filter.stage = ''; app.selectedKey = null;
   }
 
@@ -4252,6 +4381,9 @@
       b.addEventListener('click', onRemove);
       host.appendChild(el('span', { class: 'filter-chip', title: title }, [el('span', { class: 'chip-text', text: text }), b]));
     }
+    if (app.filter.cluster) {
+      chip('Cluster', 'Only the cluster-level steps: the machine rows are hidden.', function () { app.filter.cluster = false; renderSummary(); renderTree(false); renderChips(); rerenderLogs(); });
+    }
     if (app.filter.node) {
       chip('Machine: ' + app.filter.node, 'Only the lines of this machine: its ZTP events, and the node log when it is the machine Sonar reads.', function () {
         app.filter.node = ''; renderSummary(); renderChips(); rerenderLogs(); $('log-view').focus();
@@ -4693,6 +4825,36 @@
     app.demoExport = function () { return { config: app.config, timeline: [state], logs: app.store.lines.map(function (l) { return { seq: l.seq, time: l.time, received: l.received, timeSource: l.timeSource, file: l.file, level: l.level, text: l.text }; }) }; };
   }
 
+  // ?demo=1&route=cluster: the cluster card in three moments of one run (15 s apart): the cluster resource does not exist yet,
+  // Validate failed (failures first), Deployment running. Sample data only; no API calls.
+  function startClusterDemo(iso, M) {
+    var d = demoDeploymentSample(Date.now()), base = d.state, kinds = ['none', 'validate-failed', 'deploy-running'], i = 0;
+    function build() {
+      var s = JSON.parse(JSON.stringify(base)), k = kinds[i];
+      if (k === 'none') {
+        s.phase = 'validation'; s.activePhase = 'validation'; s.validation = { status: 'NotStarted', tree: [], counts: {} }; s.deployment = { status: 'NotStarted', tree: [], counts: {} };
+        s.clusterResource = demoClusterResource('none'); s.provisioningState = null; s.current = { phase: 'validation', stepPath: [], stepName: null };
+      } else if (k === 'validate-failed') {
+        var v = s.validation.tree[0];
+        v.status = 'error'; v.children.push({ id: '1.7', name: 'Validate DNS', description: '', status: 'error', start: iso(41 * M), end: iso(40 * M), durationSeconds: 60,
+          errors: ['The DNS server 192.0.2.53 did not answer for the name example.test.'], children: [] });
+        v.children.sort(function (a, b) { return 0; });
+        s.validation.status = 'Failed'; s.phase = 'failed'; s.activePhase = 'validation'; s.deployment = { status: 'NotStarted', tree: [], counts: {} };
+        s.clusterResource = demoClusterResource('exists', 2, '', 'Validate'); s.clusterResource.provisioningState = 'Failed';
+        s.current = { phase: 'validation', stepPath: [], stepName: 'Validate DNS' };
+      }
+      s.polledAt = new Date().toISOString();
+      return s;
+    }
+    applyConfig(d.config);
+    app.guidance = d.guidance;
+    applyState(build());
+    applyTailer(d.tailer);
+    applyFiles(d.files);
+    applyLogBatch(d.lines, { source: 'live' });
+    setInterval(function () { if (i < kinds.length - 1) i++; applyState(build()); }, 15000);
+  }
+
   // ?demo=1&route=simplified: a ZTP run of three machines (example names). Two are complete (Device, Azure's steps,
   // Network and Restore done); the third is installing the OS in Azure. The ZTP events show in the log pane tagged
   // with the machine and the stage, as the ZTP event file does on a real run. Sample data only; no API calls.
@@ -5116,6 +5278,7 @@
     if (route === 'osconfig') { startOsConfigDemo(iso, M); return; }
     if (route === 'arm') { startArmDemo(iso, M); return; }
     if (route === 'iso') { startOsConfigDemo(iso, M, true); return; }
+    if (route === 'cluster') { startClusterDemo(iso, M); return; }
     if (route === 'discovery') { startDiscoveryDemo(iso, M); return; }
     function steps(prefix, names, startAgo, per, cur, curStatus, errors) { return demoSteps(step, prefix, names, startAgo, per, cur, curStatus, errors); }
     // OEM image route: the three groups Arc registration shows per machine (OS image update, Bootstrap, Azure registration).
