@@ -263,7 +263,8 @@ function New-AzlSonarBreakerRecord {
         are the single probe slot (a lease: it is reclaimed after AzlSonarProbeLeaseSeconds). Verified: a connection with the
         current password has worked since the last reset; until then the account is given to ONE node at a time. InFlight lists
         the connection attempts that were handed the verified credential and have not reported yet (capped at MaxRejections).
-        OtherCount counts consecutive results Sonar could not classify. VersionCheckedAt is when the secret's version was last
+        OtherCount counts consecutive results Sonar could not classify, within 15 minutes of each other (OtherAt is the last one).
+        VersionCheckedAt is when the secret's version was last
         looked at while the account was in use.
     #>
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Builds an in-memory record only.')]
@@ -272,13 +273,13 @@ function New-AzlSonarBreakerRecord {
         [string]$Account = '', [string]$State = 'closed', [int]$Failures = 0, [int]$MaxRejections = 2, [object]$OpenedAt, [object]$NextProbeAt,
         [int]$BackoffMinutes = 0, [bool]$ProbeInFlight = $false, [object]$ProbeStartedAt, [string]$ProbeNode = '', [string]$ProbeId = '',
         [long]$Epoch = 0, [bool]$Verified = $false, [string]$LastClass = '', [string]$SecretVersion = '',
-        [object]$VersionCheckedAt, [object[]]$InFlight = @(), [int]$OtherCount = 0
+        [object]$VersionCheckedAt, [object[]]$InFlight = @(), [int]$OtherCount = 0, [object]$OtherAt
     )
     [pscustomobject]@{
         Account = $Account; State = $State; Failures = $Failures; MaxRejections = $MaxRejections; OpenedAt = $OpenedAt; NextProbeAt = $NextProbeAt
         BackoffMinutes = $BackoffMinutes; ProbeInFlight = $ProbeInFlight; ProbeStartedAt = $ProbeStartedAt; ProbeNode = $ProbeNode; ProbeId = $ProbeId
         Epoch = $Epoch; Verified = $Verified; LastClass = $LastClass; SecretVersion = $SecretVersion
-        VersionCheckedAt = $VersionCheckedAt; InFlight = @($InFlight); OtherCount = $OtherCount
+        VersionCheckedAt = $VersionCheckedAt; InFlight = @($InFlight); OtherCount = $OtherCount; OtherAt = $OtherAt
     }
 }
 
@@ -489,7 +490,7 @@ function Get-AzlSonarConnectionFailureClass {
         if ($Stage -eq 'open') { return & $result 'rejected' 'the node refused the account while the session was being opened (access denied)' }
         return & $result 'authorization' 'not an administrator of the node'
     }
-    if ($all -match '(?i)timed? ?out|time-out|cannot connect|cannot complete the operation|no such host|name could not be resolved|network path|unreachable|connection (refused|reset)|0x803381a2|0x80338126|turned off|firewall|is not reachable') { return & $result 'unreachable' 'the node did not answer' }
+    if ($all -match '(?i)timed? ?out|time-out|cannot connect|cannot complete the operation|no such host|name could not be resolved|cannot be resolved|name resolution|network path|unreachable|connection (refused|reset)|0x803381[0-9a-f]{2}|turned off|firewall|is not reachable') { return & $result 'unreachable' 'the node did not answer' }
     return & $result 'other' 'an error that says nothing about the account'
 }
 
@@ -660,8 +661,9 @@ function Register-AzlSonarAccountResult {
                     }
                     $table[$script:AzlSonarUnavailableKey] = $null
                 }
-                elseif (-not $stale -and $b.State -eq 'closed' -and $b.Verified -and [int]$b.OtherCount -gt 0) {
-                    $table[$script:AzlSonarBreakerKey] = Copy-AzlSonarBreakerRecord -Base $b -Change @{ OtherCount = 0 }
+                elseif (-not $stale -and $b.State -eq 'closed' -and [int]$b.OtherCount -gt 0) {
+                    # any success starts the count of unclassified results again
+                    $table[$script:AzlSonarBreakerKey] = Copy-AzlSonarBreakerRecord -Base $b -Change @{ OtherCount = 0; OtherAt = $null }
                 }
             }
             { $_ -in 'rejected', 'lockedOut', 'accountUnusable' } {
@@ -691,18 +693,20 @@ function Register-AzlSonarAccountResult {
             }
             'other' {
                 if (-not $stale) {
-                    $count = [int]$b.OtherCount + 1
+                    # consecutive means close together: results more than 15 minutes apart do not add up
+                    $count = if ($null -ne $b.OtherAt -and ($Now - [datetime]$b.OtherAt).TotalMinutes -lt $script:AzlSonarBreakerStartMinutes) { [int]$b.OtherCount + 1 } else { 1 }
                     if ($count -ge $script:AzlSonarMaxOtherResults) {
                         # Three results in a row that Sonar cannot classify: pause the account (a rejection worded unexpectedly
-                        # must not be retried for ever). A new secret version, or a restart, lets it back.
+                        # must not be retried for ever). The pause clears itself at its 15 minute check (one probe); a new secret
+                        # version also lets it back.
                         $table[$script:AzlSonarBreakerKey] = Copy-AzlSonarBreakerRecord -Base $b -Change @{
                             State = 'latched'; OpenedAt = $Now; NextProbeAt = $Now.AddMinutes($script:AzlSonarBreakerStartMinutes); BackoffMinutes = $script:AzlSonarBreakerStartMinutes
                             ProbeInFlight = $false; ProbeId = ''; ProbeNode = ''; ProbeStartedAt = $null; Epoch = [long]$b.Epoch + 1; Verified = $false; LastClass = 'other'
-                            Account = $account; MaxRejections = $max; InFlight = @(); OtherCount = $count
+                            Account = $account; MaxRejections = $max; InFlight = @(); OtherCount = $count; OtherAt = $Now
                         }
                     }
-                    elseif ($isProbe) { $table[$script:AzlSonarBreakerKey] = & $release (@{ OtherCount = $count } + $push) }
-                    else { $table[$script:AzlSonarBreakerKey] = Copy-AzlSonarBreakerRecord -Base $b -Change @{ OtherCount = $count } }
+                    elseif ($isProbe) { $table[$script:AzlSonarBreakerKey] = & $release (@{ OtherCount = $count; OtherAt = $Now } + $push) }
+                    else { $table[$script:AzlSonarBreakerKey] = Copy-AzlSonarBreakerRecord -Base $b -Change @{ OtherCount = $count; OtherAt = $Now } }
                 }
             }
             default {
@@ -750,6 +754,15 @@ function Request-AzlSonarDomainAccess {
         $b = Get-AzlSonarAccountBreaker -Table $table
         if (Test-AzlSonarProbeLeaseExpired -Breaker $b -Now $Now) {
             $b = Copy-AzlSonarBreakerRecord -Base $b -Change @{ ProbeInFlight = $false; ProbeId = ''; ProbeNode = ''; ProbeStartedAt = $null; Epoch = [long]$b.Epoch + 1 }
+            $table[$script:AzlSonarBreakerKey] = $b
+        }
+        # A pause that was caused by results Sonar could not classify (not by a rejection) clears itself at its 15 minute
+        # check: the breaker goes back to closed, not yet verified, so that ONE node is the probe.
+        if ($b.State -eq 'latched' -and $b.LastClass -eq 'other' -and -not $b.ProbeInFlight -and $null -ne $b.NextProbeAt -and $Now -ge [datetime]$b.NextProbeAt) {
+            $b = Copy-AzlSonarBreakerRecord -Base $b -Change @{
+                State = 'closed'; OpenedAt = $null; NextProbeAt = $null; BackoffMinutes = 0; Verified = $false; LastClass = ''; OtherCount = 0; OtherAt = $null
+                Epoch = [long]$b.Epoch + 1; InFlight = @()
+            }
             $table[$script:AzlSonarBreakerKey] = $b
         }
         $local = { param($pause) @{ Action = 'local'; Pause = $pause } }
@@ -819,6 +832,12 @@ function Complete-AzlSonarDomainRead {
         $b = Get-AzlSonarAccountBreaker -Table $table
         if ($Request.Action -eq 'recheck') {
             if ([long]$b.Epoch -ne [long]$Request.Epoch -or $b.State -ne 'closed' -or -not $b.Verified) {
+                # the node ends up on the local account: the attempt it was counted for will never be made, give its slot back
+                $ticketId = [string](Get-AzlSonarMember $Request.Ticket 'TicketId' '')
+                if ($ticketId -and @($b.InFlight | Where-Object { $_.Id -eq $ticketId }).Count -gt 0) {
+                    $b = Copy-AzlSonarBreakerRecord -Base $b -Change @{ InFlight = @($b.InFlight | Where-Object { $_.Id -ne $ticketId }) }
+                    $table[$script:AzlSonarBreakerKey] = $b
+                }
                 return @{ Action = 'local'; Pause = (Get-AzlSonarNodePauseFor -Table $table -Node $Node -Now $Now) }
             }
             $version = if ($Failure -or $null -eq $Resolved) { '' } else { [string]$Resolved.Version }
