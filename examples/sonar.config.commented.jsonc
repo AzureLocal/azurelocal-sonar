@@ -51,6 +51,13 @@
   // Optional. The event file azurelocal-ztp writes: <provisioning.simplified.evidence_path>/ztp-events.jsonl. Relative paths
   // are relative to this file. Without it the ZTP lines and per-machine ZTP steps are not shown.
   "ztpEvents": { "path": "D:\\Data\\azl-ztp\\example\\evidence\\ztp-events.jsonl" },
+  // Optional. The event file the toolkit's OS configuration writes: <provisioning.simplified.evidence_path>/os-configuration-events.jsonl
+  // (or the -EventLogPath of Invoke-AzureLocalOsConfiguration.ps1). Relative paths are relative to this file. Without it the
+  // OS configuration mode shows no steps and no [osconfig] log lines.
+  "osConfigEventsPath": "D:\\Data\\azl-ztp\\example\\evidence\\os-configuration-events.jsonl",
+  // Optional. Which account reads a node's logs: "local" while it is a workgroup machine, "domain" once the OS configuration has reported
+  // DomainJoined and DomainAdminsConfigured. Only names and a keyvault:// reference for the password; a password in the file is refused.
+  // "logAccounts": { "local": { "username": "azl-admin" }, "domain": { "netbios": "IIC", "username": "svc-join", "passwordRef": "keyvault://kv-example/svc-join-password" } },
   // Optional. Append the run to this recording (JSON Lines). Start-AzlSonar.ps1 -Record overrides it.
   // "recordPath": "./recordings/clus01.jsonl",
   // Optional. Where the deployment logs are read on the seed node. The defaults are shown.

@@ -124,6 +124,30 @@ function Test-AzlSonarConfig {
         }
     }
 
+    $osConfigEventsPath = Get-AzlSonarMember $Config 'osConfigEventsPath'
+    if ($null -ne $osConfigEventsPath -and ($osConfigEventsPath -isnot [string] -or [string]::IsNullOrWhiteSpace($osConfigEventsPath))) {
+        $problems.Add('osConfigEventsPath must be the path of the OS configuration event file (JSON Lines written by the toolkit''s Invoke-AzureLocalOsConfiguration.ps1), for example ./os-configuration-events.jsonl.')
+    }
+
+    # logAccounts: the accounts that read the node logs, by name; the passwords are never in the file (a keyvault:// reference only).
+    $logAccounts = Get-AzlSonarMember $Config 'logAccounts'
+    if ($null -ne $logAccounts) {
+        if ($logAccounts -isnot [System.Collections.IDictionary] -and $logAccounts -isnot [pscustomobject]) { $problems.Add('logAccounts must be an object with local and domain.') }
+        else {
+            foreach ($path in 'local.username', 'domain.netbios', 'domain.username') {
+                $value = Get-AzlSonarMember $logAccounts $path
+                if ($null -ne $value -and ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value))) { $problems.Add("logAccounts.$path must be text.") }
+            }
+            $ref = Get-AzlSonarMember $logAccounts 'domain.passwordRef'
+            if ($null -ne $ref -and ($ref -isnot [string] -or $null -eq (ConvertFrom-AzlSonarKeyVaultReference -Reference $ref))) {
+                $problems.Add('logAccounts.domain.passwordRef must be a keyvault://<vault>/<secret> reference; a password never goes in the file.')
+            }
+            foreach ($forbidden in 'password', 'secret', 'secretValue') {
+                if ($null -ne (Get-AzlSonarMember $logAccounts "domain.$forbidden") -or $null -ne (Get-AzlSonarMember $logAccounts "local.$forbidden")) { $problems.Add("logAccounts: '$forbidden' is refused; secrets never go in the file.") }
+            }
+        }
+    }
+
     $nodes = ConvertTo-AzlSonarArray (Get-AzlSonarMember $Config 'nodes')
     if ($nodes.Count -eq 0) {
         $problems.Add('nodes must list at least one node.')
@@ -370,6 +394,23 @@ function Read-AzlSonarConfig {
         $ztpEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $ztpEventsPath))
     }
 
+    $accountsRaw = Get-AzlSonarMember $raw 'logAccounts'
+    $logAccountsNormalised = [pscustomobject]@{
+        local  = [pscustomobject]@{ username = [string](Get-AzlSonarMember $accountsRaw 'local.username' '') }
+        domain = [pscustomobject]@{
+            netbios     = [string](Get-AzlSonarMember $accountsRaw 'domain.netbios' '')
+            username    = [string](Get-AzlSonarMember $accountsRaw 'domain.username' '')
+            passwordRef = [string](Get-AzlSonarMember $accountsRaw 'domain.passwordRef' '')
+            source      = [string](Get-AzlSonarMember $accountsRaw 'domain.source' '')
+        }
+    }
+
+    # osConfigEventsPath: the OS configuration event file; relative to the config file's folder.
+    $osConfigEventsPath = [string](Get-AzlSonarMember $raw 'osConfigEventsPath' '')
+    if ($osConfigEventsPath -and -not [System.IO.Path]::IsPathRooted($osConfigEventsPath) -and $baseDirectory) {
+        $osConfigEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $osConfigEventsPath))
+    }
+
     return [pscustomobject]@{
         subscriptionId = ([string]$raw.subscriptionId).ToLowerInvariant()
         resourceGroup  = [string]$raw.resourceGroup
@@ -397,6 +438,8 @@ function Read-AzlSonarConfig {
         credential     = $credentialNormalised
         recordPath     = $recordPath
         ztpEventsPath  = $ztpEventsPath
+        osConfigEventsPath = $osConfigEventsPath
+        logAccounts    = $logAccountsNormalised
         sourcePath     = $source
         # Where the settings came from: the master infrastructure.yml, a config file, or a JSON string (tests).
         sourceKind     = $sourceKind

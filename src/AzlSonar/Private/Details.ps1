@@ -22,7 +22,7 @@ function Get-AzlSonarAbout {
     return [ordered]@{
         name    = 'AzL Sonar'
         version = $Version
-        summary = 'Watches an Azure Local build from provisioning to deployment.'
+        summary = 'Watches an Azure Local build from provisioning and OS configuration through validation to deployment.'
         links   = @(
             [ordered]@{ id = 'docs'; label = 'Documentation'; url = $base }
             [ordered]@{ id = 'run'; label = 'Running Sonar, stage by stage'; url = $base + 'stages' }
@@ -42,7 +42,7 @@ function Get-AzlSonarConfigKeyName {
     [OutputType([string])]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('cluster', 'resourceGroup', 'subscription', 'location', 'route', 'identity', 'nodes', 'address', 'ztpEvents', 'credential', 'pollSeconds')]
+        [ValidateSet('cluster', 'resourceGroup', 'subscription', 'location', 'route', 'identity', 'nodes', 'address', 'ztpEvents', 'osConfigEvents', 'credential', 'pollSeconds')]
         [string]$Setting,
 
         [AllowEmptyString()]
@@ -52,12 +52,12 @@ function Get-AzlSonarConfigKeyName {
     $infrastructure = @{
         cluster = 'cluster.name'; resourceGroup = 'azure.resource_group'; subscription = 'azure.subscription_id'; location = 'azure.location'
         route = 'scenario.os_install'; identity = 'scenario.identity'; nodes = 'nodes[].name'; address = 'nodes[].network_adapters[]'
-        ztpEvents = 'provisioning.simplified.evidence_path'; credential = 'credential.source (Sonar config only)'; pollSeconds = '-PollSeconds'
+        ztpEvents = 'provisioning.simplified.evidence_path'; osConfigEvents = 'provisioning.simplified.evidence_path'; credential = 'credential.source (Sonar config only)'; pollSeconds = '-PollSeconds'
     }
     $configFile = @{
         cluster = 'clusterName'; resourceGroup = 'resourceGroup'; subscription = 'subscriptionId'; location = 'location'
         route = 'provisioningRoute'; identity = 'identityModel'; nodes = 'nodes[].name'; address = 'nodes[].address'
-        ztpEvents = 'ztpEvents.path'; credential = 'credential.source'; pollSeconds = 'pollSeconds'
+        ztpEvents = 'ztpEvents.path'; osConfigEvents = 'osConfigEventsPath'; credential = 'credential.source'; pollSeconds = 'pollSeconds'
     }
     if ($Kind -eq 'infrastructure') { return $infrastructure[$Setting] }
     return $configFile[$Setting]
@@ -99,6 +99,7 @@ function New-AzlSonarDetailFact {
     $route = [string](Get-AzlSonarMember $Config 'provisioningRoute' 'auto')
     $identity = [string](Get-AzlSonarMember $Config 'identityModel' 'LocalIdentity')
     $ztpPath = [string](Get-AzlSonarMember $Config 'ztpEventsPath' '')
+    $osConfigPath = [string](Get-AzlSonarMember $Config 'osConfigEventsPath' '')
 
     $nodes = foreach ($node in @($Config.nodes)) {
         [ordered]@{ name = [string]$node.name; address = [string](Get-AzlSonarMember $node 'address' ''); seed = [bool](Get-AzlSonarMember $node 'seed' $false) }
@@ -109,6 +110,9 @@ function New-AzlSonarDetailFact {
     }
     if ($route -ne 'oem-image' -and -not $ztpPath) {
         $notSet.Add([ordered]@{ setting = 'ztpEvents'; label = 'ZTP event file'; key = (& $key 'ztpEvents'); effect = 'The machine steps the nodes report (Device, Network, Restore) are not shown; Azure''s provisioning steps still are.' })
+    }
+    if (-not $osConfigPath) {
+        $notSet.Add([ordered]@{ setting = 'osConfigEvents'; label = 'OS configuration event file'; key = (& $key 'osConfigEvents'); effect = 'The OS configuration mode shows no steps from the toolkit run; the machines show only what Azure reports.' })
     }
     $missingAddress = @($nodes | Where-Object { -not $_.address })
     if ($missingAddress.Count -gt 0) {
@@ -127,6 +131,8 @@ function New-AzlSonarDetailFact {
         nodes             = @($nodes)
         ztpEventsFile     = $(if ($ztpPath) { [System.IO.Path]::GetFileName($ztpPath) } else { '' })
         ztpEventsPath     = $ztpPath
+        osConfigEventsFile = $(if ($osConfigPath) { [System.IO.Path]::GetFileName($osConfigPath) } else { '' })
+        osConfigEventsPath = $osConfigPath
         sourceKind        = $kind
         readFrom          = $readFrom
         fileName          = $fileName
@@ -226,6 +232,10 @@ function Get-AzlSonarDetail {
     $ztpEvents = if ($null -ne $ztpInfo -and $null -ne $ztpInfo['Count']) { [long]$ztpInfo['Count'] } else { 0 }
     $ztpFileFound = $false
     if ($null -ne $facts -and $facts.ztpEventsPath) { $ztpFileFound = Test-Path -LiteralPath $facts.ztpEventsPath -PathType Leaf }
+    $osInfo = $shared['OsConfigInfo']
+    $osEvents = if ($null -ne $osInfo -and $null -ne $osInfo['Count']) { [long]$osInfo['Count'] } else { 0 }
+    $osFileFound = $false
+    if ($null -ne $facts -and $facts.osConfigEventsPath) { $osFileFound = Test-Path -LiteralPath $facts.osConfigEventsPath -PathType Leaf }
     $lastLine = $null
     if (-not $replaying) {
         $window = Get-AzlSonarLogWindow -Shared $shared -Since ([Math]::Max([long]0, [long]$shared.LogSeq - 1))
@@ -258,6 +268,13 @@ function Get-AzlSonarDetail {
                 fileFound   = [bool]$ztpFileFound
                 events      = $ztpEvents
                 lastEventAt = $(if ($null -ne $ztpInfo -and $ztpInfo['LastEventAt']) { [string]$ztpInfo['LastEventAt'] } else { $null })
+            }
+            osConfigEvents = [ordered]@{
+                configured  = [bool]($null -ne $facts -and $facts.osConfigEventsFile)
+                file        = $(if ($null -ne $facts) { [string]$facts.osConfigEventsFile } else { '' })
+                fileFound   = [bool]$osFileFound
+                events      = $osEvents
+                lastEventAt = $(if ($null -ne $osInfo -and $osInfo['LastEventAt']) { [string]$osInfo['LastEventAt'] } else { $null })
             }
             nodeLogs  = [ordered]@{
                 state       = [string](Get-AzlSonarMember $tailer 'state' 'unknown')
@@ -322,6 +339,7 @@ function New-AzlSonarReplayDetailFact {
         nodes             = @($nodes)
         logs              = [pscustomobject]@{ transport = '' }
         ztpEventsPath     = ''
+        osConfigEventsPath = ''
         sourceKind        = 'config'
         sourcePath        = ''
     }

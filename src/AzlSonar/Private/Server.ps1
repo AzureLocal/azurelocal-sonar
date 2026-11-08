@@ -57,6 +57,10 @@ function Initialize-AzlSonarSharedState {
             NodeProbe     = [hashtable]::Synchronized(@{})   # OEM image route: per-node bootstrap/update status (Invoke-AzlSonarNodeProbeLoop)
             ZtpStages     = [hashtable]::Synchronized(@{})   # simplified route: per-node azurelocal-ztp Device and Network events (Invoke-AzlSonarZtpEventLoop)
             ZtpInfo       = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the ZTP event file: events read and the newest event time (/api/details)
+            OsConfigEvents = [hashtable]::Synchronized(@{})   # per-node OS configuration events of the latest attempt, and the run entry '*' (Invoke-AzlSonarOsConfigEventLoop)
+            LogAccount    = [hashtable]::Synchronized(@{})   # per node: did it reject the domain account, and the account log access uses (never a password)
+            LocalUserName = ''   # the local log account's user name (-Credential or the prompt), for the account shown per node
+            OsConfigInfo  = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the OS configuration event file: events read and the newest event time (/api/details)
             ConfigInfo    = [hashtable]::Synchronized(@{ ReadAt = $null; CheckedAt = $null; ChangedAt = $null; Note = $null })   # when the config source was read, checked and last changed (/api/details)
         })
 }
@@ -1000,6 +1004,7 @@ function Start-AzlSonarServer {
 
         $shared = Initialize-AzlSonarSharedState
         if ($logCredential) { $shared.Redact = @($logCredential.GetNetworkCredential().Password) | Where-Object { $_ } }
+        if ($logCredential) { $shared.LocalUserName = $logCredential.UserName }
         $initial = Get-AzlSonarInitialState -Config $config
         $shared.State = $initial
         $shared.StateJson = ConvertTo-AzlSonarJson $initial
@@ -1034,6 +1039,10 @@ function Start-AzlSonarServer {
         if ($config.ztpEventsPath) {
             # azurelocal-ztp event file (JSON Lines): provisioning states of the machines, shown in the log pane.
             $workerSpecs.Add(@{ Name = 'ZtpEvents'; Command = 'Invoke-AzlSonarZtpEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
+        }
+        if ($config.osConfigEventsPath) {
+            # The toolkit's OS configuration event file (JSON Lines): the OS configuration mode and its log lines.
+            $workerSpecs.Add(@{ Name = 'OsConfigEvents'; Command = 'Invoke-AzlSonarOsConfigEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
         }
         if ($InfrastructureFile) {
             # Logs a notice when the master file's node set changes (restart Sonar to track it).

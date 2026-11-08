@@ -1,6 +1,6 @@
 # AzL Sonar
 
-**Real-time monitor for Azure Local deployments.** Follow a deployment while it runs: how each machine gets ready (simplified machine provisioning or OEM image + Arc registration), every validation and deployment step and its status, and the live deployment logs from the seed node, in a modern local web view. PowerShell back end; nothing to install. Read-only towards Azure and the nodes. Record a run to a local file and replay it later, time-scrubbed, through the same page.
+**Real-time monitor for Azure Local deployments.** Follow a deployment while it runs: how each machine gets ready (simplified machine provisioning or OEM image + Arc registration), how its operating system is configured (method, steps, retries, the guarded network change, the domain join), every validation and deployment step and its status, and the live deployment logs from the seed node, in a modern local web view. PowerShell back end; nothing to install. Read-only towards Azure and the nodes. Record a run to a local file and replay it later, time-scrubbed, through the same page.
 
 Beacon checks the environment before deployment. Sonar listens to the deployment as it happens.
 
@@ -45,7 +45,7 @@ Then pick what you want to do:
 | --- | --- |
 | Watch a ZTP run, per machine | [docs/run.md](docs/run.md#watch-a-ztp-run) |
 | Watch the OEM image or ISO route | [docs/run.md](docs/run.md#watch-the-oem-image-or-iso-route) |
-| Watch OS configuration and Validate | [docs/run.md](docs/run.md#watch-os-configuration-and-validate) |
+| Watch OS configuration and Validate | [docs/run.md](docs/run.md#watch-os-configuration) |
 | Watch a deployment (steps, logs, WinRM or SSH) | [docs/run.md](docs/run.md#watch-a-deployment) |
 | Understand each ZTP stage (Boot, Bootstrap, Vouchers and claim, Install OS, Device, Network, Restore, Handoff) | [docs/stages.md](docs/stages.md) |
 | Which account and folders read the logs in each phase (the Log access window) | [docs/log-access.md](docs/log-access.md) |
@@ -148,7 +148,7 @@ There is nothing to install: no service, no database, no build step.
 | `-Publishable` | off | With `-Record`: also replace every identifier with a stable pseudonym, so the recording can be shared. Needs a new file. See [Share a recording](#share-a-recording-publishable). |
 | `-ExtraTerm` | (none) | With `-Publishable`: extra strings that must never appear (a company or site name). |
 
-Add `?demo=1` to the page URL to see the page with built-in sample data (a running deployment). `?demo=1&route=simplified` is a ZTP run of three machines (example names `iic-azl-n01` to `n03`): two are done, the third is installing the OS, and the ZTP events are in the logs. `?demo=1&route=oem` shows two machines registering on the OEM image route (one updating its OS image, in `Download`; one bootstrapping, in `ArcConfiguration > ArcRegistration`). `?demo=1&replay=1` plays the demo deployment as a built-in recording, so you can try the replay controls without a file. Add `#details`, `#logaccess` or `#help` to open the Details pop-down, the Log access window or the Help box. Demo mode makes no API call of its own; when a Sonar back end serves the page it reads `/api/about` and `/api/guidance` only, to show the real version, links and phase guidance.
+Add `?demo=1` to the page URL to see the page with built-in sample data (a running deployment). `?demo=1&route=simplified` is a ZTP run of three machines (example names `iic-azl-n01` to `n03`): two are done, the third is installing the OS, and the ZTP events are in the logs. `?demo=1&route=osconfig` is an OS configuration run of three machines: a ZTP machine that converged after one retry, an ISO machine whose drivers step failed, and a ZTP machine still applying. `?demo=1&route=oem` shows two machines registering on the OEM image route (one updating its OS image, in `Download`; one bootstrapping, in `ArcConfiguration > ArcRegistration`). `?demo=1&replay=1` plays the demo deployment as a built-in recording, so you can try the replay controls without a file. Add `#details`, `#logaccess` or `#help` to open the Details pop-down, the Log access window or the Help box. Demo mode makes no API call of its own; when a Sonar back end serves the page it reads `/api/about` and `/api/guidance` only, to show the real version, links and phase guidance.
 
 ## Record and replay
 
@@ -239,6 +239,7 @@ Unknown fields are ignored. Sonar validates the file at start and lists every pr
 | `credential.usernameSecret` | for `keyvault` | | Secret that holds the user name. |
 | `credential.passwordSecret` | for `keyvault` | | Secret that holds the password. |
 | `credential.password`, `.secret`, `.secretValue` | never | | Rejected: secrets never go in the config file. |
+| `osConfigEventsPath` | no | (none) | The event file of the toolkit's OS configuration run (`Invoke-AzureLocalOsConfiguration.ps1`; JSON Lines with `timestamp`, `node`, `stage`, `step`, `state`, `evidence`, `level`, `nextAction`, `method`, `transport`). Sonar follows it and builds the **OS configuration** mode from it. Relative to the config file. See [OS configuration](docs/stages.md#os-configuration). |
 | `recordPath` | no | (none) | Record every run to this file, as with `-Record` (which overrides it). Relative to the config file. See [Record and replay](#record-and-replay). |
 | `ztpEvents.path` | no | (none) | The event file of the [azurelocal-ztp](https://github.com/AzureLocal/azurelocal-ztp) provisioning scripts (JSON Lines: `timestamp`, `node`, `state`, `evidence`, `nextAction`, `level`, `stage`). Sonar follows it and shows each event in the log pane. Relative to the config file. See [Follow ZTP provisioning](#follow-ztp-provisioning). |
 

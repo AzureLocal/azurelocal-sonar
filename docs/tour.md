@@ -2,7 +2,7 @@
 
 What is on the page, top to bottom. The screenshots are Sonar's own demo data (`?demo=1&route=simplified`: three machines of a ZTP run, example names only). Everything on the page is read-only.
 
-![The page during a ZTP run: top bar, the five modes, the summary with a card per machine, the steps and the live logs](images/tour-main.png)
+![The page during a ZTP run: top bar, the six modes, the summary with a card per machine, the steps and the live logs](images/tour-main.png)
 
 ## The top bar
 
@@ -30,13 +30,14 @@ The **ⓘ Details** button opens a pop-down that answers "what is Sonar actually
 
 Secrets are never shown: a credential appears only as *set* or *not set*, and the subscription id only as its first 8 characters. The same data is served at `/api/details` (read-only, this machine only).
 
-## The five modes
+## The six modes
 
-The row under the top bar has one tile per mode: **Provisioning (ZTP)**, **Validate**, **Deployment**, **Update**, **Health**. Each has a status icon (✓ done, a pulsing ● running, ○ waiting, ✕ failed), the name and a state line such as *2 of 3 machines ready*, *Step 3 of 7*, *Done* or *Passed*.
+The row under the top bar has one tile per mode: **Provisioning (ZTP)**, **OS configuration**, **Validate**, **Deployment**, **Update**, **Health**, six equal tiles. Each has a status icon (✓ done, a pulsing ● running, ○ waiting, ✕ failed), the name and a state line such as *2 of 3 machines ready*, *Step 3 of 7*, *Done* or *Passed*.
 
 - The tile of the mode that is happening now is selected when the page opens. Click any tile to look at another mode: the summary box and the Steps box switch to it.
 - A tile that has not started is grey and has no state line. Hover it to see when it starts (*Starts after validation passes*).
-- There are always five tiles. On the OEM image route the first tile reads **Provisioning (OS image)** instead of *Provisioning (ZTP)*. A run Sonar joined after provisioning has no machine data: the first tile is grey and its hover text says so (Sonar cannot tell whether provisioning was done, so it does not tick it).
+- **OS configuration** sits between Provisioning and Validate. It shows *2 of 3 converged* (and *1 retrying*) while the toolkit's run works, turns red when a machine fails, and is green only when every machine has converged; a finished plan with changes pending reads *Plan ready* and stays grey. Without `osConfigEventsPath` it is grey and the hover text says how to get its data. The page opens on it once ZTP is complete and an OS configuration run has started. [What it shows](stages.md#os-configuration)
+- There are always six tiles. On the OEM image route the first tile reads **Provisioning (OS image)** instead of *Provisioning (ZTP)*. A run Sonar joined after provisioning has no machine data: the first tile is grey and its hover text says so (Sonar cannot tell whether provisioning was done, so it does not tick it).
 
 ## The summary box
 
@@ -67,6 +68,12 @@ When a filter shows nothing, the pane says why. A step that has produced no line
 ![The Log access window](images/tour-log-access.png)
 
 The **Log access** button opens a window with everything about reading the node logs: the identity, the status line (*Log access: Tailing node …, as supplied, last line 4 s ago*), and one tab per phase (Provisioning, Validation, Deployment, Post-deployment, Update, Add node, Repair, with *(current phase)* on the active one). For each phase: **Account**, **Where** (every folder), **When**, **How**, **This deployment**, **Confidence** and **Source**. Confidence says whether the entry was confirmed on a live deployment; if the logs are not where an unconfirmed entry says, please open an issue on GitHub. Close it with **Close**, `Esc` or a click outside.
+
+## The OS configuration mode
+
+![The OS configuration mode](images/tour-osconfig.png)
+
+Between Provisioning and Validate. The summary has a card per machine: the method chip (**ZTP** or **ISO**, *expected* until the run resolves it, *differs from the file* with a warning when the master file says otherwise), the transport, the step it is on, *Retried* and *Restarted* counts, the account that reads its logs, and, during a guarded network change, the time left to confirm. The Steps box has the machine's steps with a stage chip each (*Planned*, *OK*, *Changing*, *Applied*, *Verified*, *Failed*, *Blocked*, *Not applicable*) and the toolkit's text; the **Azure** badge marks a step that runs as an Arc Run Command. **Details** lists the method, transport and versions of every machine. The full description is [here](stages.md#os-configuration). The screenshot is the demo (`?demo=1&route=osconfig`).
 
 ## Help box
 

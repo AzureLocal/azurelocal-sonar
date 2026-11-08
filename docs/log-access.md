@@ -19,6 +19,20 @@ Reading the node logs needs an account that is allowed to, and the folders chang
 
 The line under the title reads, for example, `Log access: Tailing node node01 · as supplied · last line 4 s ago`. *Tailing node ...* means connected; *Tailer unavailable (node ...)* or *Tailer error* says it is not. *as supplied* is the account you gave (`-Credential`, a prompt, or Key Vault names); without a credential Sonar says the account the guidance names for the phase. The identity model (`LocalIdentity` or `ActiveDirectory`) is the chip next to the title; it comes from `scenario.identity` or `identityModel` and decides which guidance you see.
 
+## Which account reads which node: local first, then the domain account
+
+In an Active Directory design the nodes are workgroup machines until the OS configuration joins them to the domain (its `DomainJoin` step, after the name, network, DNS and time) and then adds the domain account to the node's local Administrators group (the event `DomainAdminsConfigured`). A domain account is not an administrator of the node before that, so it cannot read the logs. Sonar follows both events, node by node, and tells you which account it uses and why.
+
+| The node | Account used for its logs | What the window and **Details** say |
+| --- | --- | --- |
+| Not joined yet, or the identity design is local | The local account: the one you gave with `-Credential` or at the prompt, else `identity.local_admin.username` from the master file (for example `azl-admin`). | `workgroup: using azl-admin` |
+| Has reported `DomainJoined` (or a `DomainJoin` plan that found it already joined), but not yet `DomainAdminsConfigured` | Still the local account. | `joined, waiting for domain administrators: using azl-admin` |
+| Has reported both `DomainJoined` and `DomainAdminsConfigured` | The domain account built from the master file: `NETBIOS\username`, from `identity.active_directory.netbios_name` and the LCM user `identity.active_directory.lcm_user.username`, or `domain_join_account.username` when that optional override is present. The password is read from the Key Vault reference of the same account (`keyvault://<vault>/<secret>`) with Az.KeyVault, held as a secure string and masked in everything Sonar stores, serves or records. | `domain-joined: using IIC\svc-lcm` |
+| Both reported, but the node refuses the domain account (or the Key Vault cannot be read) | The local account again, for that node, until Sonar restarts. | A warning: `domain-joined, but IIC\svc-lcm was rejected: using azl-admin` |
+| Both reported, but the master file names neither `lcm_user` nor `domain_join_account` | The local account. | A warning that names the keys to set. |
+
+Sonar reads the logs of the seed node (and, on the OEM image route, probes every node); the **Account in use** row of the Log access window lists the account of every machine, so you see the switch before it happens to the node you read. When the seed node is ready for the domain account, the open connection is closed and opened again with it. The password never appears on the page, in the logs, in the recording or in the export; the account's **name** does, because that is what you need to know. The master file is read defensively: a file with neither `lcm_user` nor `domain_join_account` works as before, with the local account only. There is no mandatory `domain_join_account`: it is an override for the case where another account joins the nodes. A plain password where the reference belongs is ignored, never used.
+
 ## The seven modes of the window
 
 Each tab has the same rows: **Account** (who can read), **Where** (every folder), **When** (when the logs exist), **How** (how to reach the node), **This deployment** (a note for your cluster's shape, from `clusterPattern`, `architecture`, `internalDns` and the identity model), **Confidence** and **Source**. Some phases add **How long** and **Commands** (the node commands that check the phase).

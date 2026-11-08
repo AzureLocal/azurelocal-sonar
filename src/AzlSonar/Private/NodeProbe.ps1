@@ -350,7 +350,14 @@ function Invoke-AzlSonarNodeProbeLoop {
                 $alive = $null -ne $connection -and (($null -ne $connection.Session -and $connection.Session.State -eq 'Opened') -or ($null -ne $connection.Ssh -and $connection.Ssh.Connected))
                 if (-not $alive) {
                     if ($null -ne $connection) { Close-AzlSonarNodeConnection $connection }
-                    $connection = Open-AzlSonarNodeConnection -Address $node.address -Credential $Credential -Transport $transport
+                    # The local account until the node reports DomainJoined, then the domain account (back to the local one if it is refused).
+                    $pick = Select-AzlSonarNodeAccount -Shared $Shared -Config $Config -Node $node.name -Local $Credential
+                    $connection = Open-AzlSonarNodeConnection -Address $node.address -Credential $pick.Credential -Transport $transport
+                    if ($pick.Account.kind -eq 'domain' -and $null -eq $connection.Session -and $null -eq $connection.Ssh -and (Test-AzlSonarAuthenticationFailure -Message ([string]$connection.Reason))) {
+                        Set-AzlSonarLogAccountRejected -Shared $Shared -Node $node.name -Message (Protect-AzlSonarText -Text ([string]$connection.Reason) -Secret $Shared.Redact)
+                        $pick = Select-AzlSonarNodeAccount -Shared $Shared -Config $Config -Node $node.name -Local $Credential
+                        $connection = Open-AzlSonarNodeConnection -Address $node.address -Credential $pick.Credential -Transport $transport
+                    }
                     $connections[$node.name] = $connection
                 }
                 $kind = if ($null -ne $connection.Session) { 'winrm' } elseif ($null -ne $connection.Ssh) { 'ssh' } else { $null }
