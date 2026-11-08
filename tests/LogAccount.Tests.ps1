@@ -1410,3 +1410,92 @@ Describe 'N4: the probe lease starts when the Key Vault read is over' {
         InModuleScope AzlSonar { $script:AzlSonarProbeLeaseSeconds } | Should -BeGreaterOrEqual 180
     }
 }
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Fourth review (D1 to D3)
+# ---------------------------------------------------------------------------------------------------------------------
+
+Describe 'D1: results Sonar cannot classify must not latch a healthy account for every node' {
+    BeforeEach {
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force); Version = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' } }
+    }
+    It 'a name that cannot be resolved (WinRM''s own wording, a DNS blip) is unreachable, not unclassified' {
+        InModuleScope AzlSonar {
+            foreach ($m in 'WinRM cannot process the request because the server name cannot be resolved.', 'The name resolution failed for node-02', 'Connecting to remote server node-02 failed with the following error message : 0x803381ab', 'The host name cannot be resolved') {
+                (Get-AzlSonarConnectionFailureClass -Transport winrm -Message $m).Class | Should -Be 'unreachable' -Because $m
+            }
+        }
+    }
+    It 'three unclassified results spread over more than 15 minutes do not add up' {
+        $shared = New-AccountShared 'both'
+        $null = Confirm-AccountDomain $shared 'node-01'
+        foreach ($m in 1, 20, 40) {
+            $p = Invoke-AccountPick $shared 'node-02' $m
+            Register-AccountResult $shared 'node-02' other ($m + 0.1) 'odd' (New-AccountConfig) $p.Ticket
+        }
+        $b = Get-AccountBreaker $shared
+        $b.State | Should -Be 'closed'
+        $b.OtherCount | Should -Be 1
+        (Invoke-AccountPick $shared 'node-03' 41).Kind | Should -Be 'domain'
+    }
+    It 'any success starts the count again, wherever the ok comes from' {
+        $shared = New-AccountShared 'both'
+        $null = Confirm-AccountDomain $shared 'node-01'
+        foreach ($m in 1, 2) {
+            $p = Invoke-AccountPick $shared 'node-02' $m
+            Register-AccountResult $shared 'node-02' other ($m + 0.1) 'odd' (New-AccountConfig) $p.Ticket
+        }
+        Register-AccountResult $shared 'node-03' ok 3
+        (Get-AccountBreaker $shared).OtherCount | Should -Be 0
+    }
+    It 'a latch caused by unclassified results clears itself at the 15 minute check with ONE probe; a rejection latch does not' {
+        $shared = New-AccountShared 'both'
+        $null = Confirm-AccountDomain $shared 'node-01'
+        foreach ($m in 1, 2, 3) {
+            $p = Invoke-AccountPick $shared 'node-02' $m
+            Register-AccountResult $shared 'node-02' other ($m + 0.1) 'odd' (New-AccountConfig) $p.Ticket
+        }
+        (Get-AccountBreaker $shared).State | Should -Be 'latched'
+        (Invoke-AccountPick $shared 'node-03' 10).Kind | Should -Be 'local'
+        $probe = Invoke-AccountPick $shared 'node-03' 19
+        $probe.Kind | Should -Be 'domain'
+        $probe.Probe | Should -BeTrue
+        (Invoke-AccountPick $shared 'node-01' 19.1).Kind | Should -Be 'local' -Because 'one probe at a time'
+        Register-AccountResult $shared 'node-03' ok 19.2 '' (New-AccountConfig) $probe.Ticket
+        $b = Get-AccountBreaker $shared
+        $b.State | Should -Be 'closed'
+        $b.Verified | Should -BeTrue
+        $b.OtherCount | Should -Be 0
+        # a latch caused by rejections stays
+        $shared2 = New-AccountShared 'both'
+        $null = Confirm-AccountDomain $shared2 'node-01'
+        $a = Invoke-AccountPick $shared2 'node-02' 1
+        Register-AccountResult $shared2 'node-02' rejected 2 '' (New-AccountConfig) $a.Ticket
+        $p2 = Invoke-AccountPick $shared2 'node-03' 20
+        Register-AccountResult $shared2 'node-03' rejected 20.1 '' (New-AccountConfig) $p2.Ticket
+        (Get-AccountBreaker $shared2).State | Should -Be 'latched'
+        (Invoke-AccountPick $shared2 'node-01' 600).Kind | Should -Be 'local'
+    }
+}
+
+Describe 'D3: an attempt that ends in local gives its in-flight slot back' {
+    It 'a recheck that finds the breaker changed releases its ticket' {
+        Mock Get-AzKeyVaultSecret -ModuleName AzlSonar { [pscustomobject]@{ SecretValue = (ConvertTo-SecureString 'D0main-Pa55-not-real' -AsPlainText -Force); Version = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' } }
+        $shared = New-AccountShared 'both'
+        $null = Confirm-AccountDomain $shared 'node-01'
+        $inFlight = InModuleScope AzlSonar -Parameters @{ S = $shared; C = (New-AccountConfig); Now = $script:T0.AddMinutes(2) } {
+            param($S, $C, $Now)
+            $request = Request-AzlSonarDomainAccess -Shared $S -Config $C -Node 'node-02' -Now $Now
+            $request.Action | Should -Be 'recheck'
+            @((Get-AzlSonarAccountBreaker -Table $S['LogAccount']).InFlight).Count | Should -Be 1
+            # the breaker changes while the node reads Key Vault (epoch moves on, the entry is kept)
+            $b = Get-AzlSonarAccountBreaker -Table $S['LogAccount']
+            $S['LogAccount']['*breaker'] = Copy-AzlSonarBreakerRecord -Base $b -Change @{ Epoch = [long]$b.Epoch + 1 }
+            $done = Complete-AzlSonarDomainRead -Shared $S -Node 'node-02' -Request $request -Resolved $null -Failure 'Forbidden' -Now $Now
+            $done.Action | Should -Be 'local'
+            @((Get-AzlSonarAccountBreaker -Table $S['LogAccount']).InFlight).Count
+        }
+        $inFlight | Should -Be 0
+    }
+}

@@ -893,6 +893,35 @@ Describe 'Invoke-AzlSonarTailerLoop (mocked New-PSSession / Invoke-Command)' {
         @($script:PollCalls) | Should -Be @($true, $false, $true)
     }
 
+    It 'D2: when the attempt cap is saturated a working local session is kept; it is not torn down and rebuilt on every poll' {
+        $script:WaitCalls = 0
+        Mock -ModuleName AzlSonar -CommandName Wait-AzlSonarInterval -MockWith { $script:WaitCalls++; if ($script:WaitCalls -ge 3) { $Shared.Stop = $true } }
+        Mock -ModuleName AzlSonar -CommandName New-PSSession -MockWith { [pscustomobject]@{ State = 'Opened'; Name = 'AzlSonar' } }
+        Mock -ModuleName AzlSonar -CommandName Invoke-Command -RemoveParameterType Session -MockWith {
+            [pscustomobject]@{ utcOffsetMinutes = 0; discovered = $true; files = @(); lines = @(); state = @{}; missingPaths = @(); errors = @(); renamed = @(); vanished = 0 }
+        }
+        $config = Read-AzlSonarConfig -Path $script:SonarExampleConfig
+        $config | Add-Member -NotePropertyName identityModel -NotePropertyValue 'ActiveDirectory' -Force
+        $config | Add-Member -NotePropertyName logAccounts -NotePropertyValue ([pscustomobject]@{ local = [pscustomobject]@{ username = 'azl-admin' }; domain = [pscustomobject]@{ netbios = 'IIC'; username = 'svc-join'; passwordRef = 'keyvault://kv-example/svc-join-password'; maxRejections = 2 } }) -Force
+        $local = [pscredential]::new('azl-admin', (ConvertTo-SecureString -String 'not-a-real-password' -AsPlainText -Force))
+        InModuleScope AzlSonar -Parameters @{ Config = $config; Credential = $local } {
+            param($Config, $Credential)
+            $shared = Initialize-AzlSonarSharedState
+            Add-AzlSonarOsConfigEvent -Store $shared.OsConfigEvents -Line '{"timestamp":"2026-11-07T19:00:00Z","node":"node01","step":"DomainJoin","state":"DomainJoined"}'
+            Add-AzlSonarOsConfigEvent -Store $shared.OsConfigEvents -Line '{"timestamp":"2026-11-07T19:01:00Z","node":"node01","step":"DomainJoin","state":"DomainAdminsConfigured"}'
+            $pw = [securestring]::new()
+            foreach ($ch in 'D0main-Pa55-not-real'.ToCharArray()) { $pw.AppendChar($ch) }
+            $shared.DomainCredential = [pscredential]::new('IIC\svc-join', $pw)
+            # the domain account is verified, and two other nodes are connecting with it right now (the cap is 2)
+            $busy = @(1, 2) | ForEach-Object { [pscustomobject]@{ Id = "busy$_"; Node = "other$_"; StartedAt = [datetime]::UtcNow } }
+            $shared.LogAccount['*breaker'] = New-AzlSonarBreakerRecord -Account 'IIC\svc-join' -Verified $true -SecretVersion 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' -VersionCheckedAt ([datetime]::UtcNow) -InFlight $busy
+            Invoke-AzlSonarTailerLoop -Shared $shared -Config $Config -Credential $Credential
+        }
+        Should -Invoke -ModuleName AzlSonar -CommandName New-PSSession -Times 1 -Exactly -Because 'one connection, kept over three polls'
+        Should -Invoke -ModuleName AzlSonar -CommandName New-PSSession -Times 1 -Exactly -ParameterFilter { $Credential.UserName -eq 'azl-admin' }
+        Should -Invoke -ModuleName AzlSonar -CommandName Remove-PSSession -Times 1 -Exactly -Because 'only the final clean-up'
+    }
+
     It 'reports unavailable and drops the session when a poll fails' {
         Mock -ModuleName AzlSonar -CommandName New-PSSession -MockWith { [pscustomobject]@{ State = 'Opened'; Name = 'AzlSonar' } }
         Mock -ModuleName AzlSonar -CommandName Invoke-Command -RemoveParameterType Session -MockWith { throw 'The session state is Broken.' }
