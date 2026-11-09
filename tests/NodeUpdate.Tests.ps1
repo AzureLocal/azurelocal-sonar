@@ -1,4 +1,5 @@
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0.0' }
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingConvertToSecureStringWithPlainText', '', Justification = 'Test credentials are made-up values held only in memory; no real secret.')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'The Get-AzKeyVaultSecret stub mirrors the real parameters.')]
 param()
 Set-StrictMode -Version Latest
