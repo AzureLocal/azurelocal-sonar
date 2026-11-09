@@ -928,6 +928,11 @@ function Start-AzlSonarServer {
         Replay: start playing at once instead of paused.
     .PARAMETER NoBrowser
         Do not open the browser.
+    .PARAMETER TokenFile
+        Write the per-start access token (just the token) to this file, readable by the current user only, and remove it when
+        Sonar stops. The launch output then shows the path and no token. Overrides tokenFile in the config. Needs the access token on.
+    .PARAMETER Force
+        With -TokenFile or tokenFile: replace an existing file that is not a Sonar token file (without it such a file is refused).
     .EXAMPLE
         Start-AzlSonarServer -ConfigPath ./config/clus01.json -Record ./recordings/clus01.jsonl
     .EXAMPLE
@@ -984,14 +989,26 @@ function Start-AzlSonarServer {
         [switch]$NoBrowser,
 
         # For a single-user machine only: without the access token any local account (and any local program) can read the page.
-        [switch]$NoAccessToken
+        [switch]$NoAccessToken,
+
+        # A file the access token is written to (user-only) so automation need not read the launch output; removed at stop.
+        [string]$TokenFile,
+
+        # Replace an existing file at -TokenFile that is not a Sonar token file.
+        [switch]$Force
     )
 
     $ErrorActionPreference = 'Stop'
     $moduleVersion = [string]$MyInvocation.MyCommand.Module.Version
     $workerSpecs = [System.Collections.Generic.List[hashtable]]::new()
+    $tokenFilePath = ''
 
     if ($PSCmdlet.ParameterSetName -eq 'Replay') {
+        # Fail before anything starts: the token file path is checked first.
+        if ($PSBoundParameters.ContainsKey('TokenFile') -and $TokenFile) {
+            if ($NoAccessToken) { throw '-TokenFile needs the access token: remove -NoAccessToken.' }
+            $tokenFilePath = Assert-AzlSonarTokenFilePath -Path $TokenFile -Force:$Force
+        }
         $server = New-AzlSonarReplayServer -Path $Replay -Speed $Speed -StartAt $StartAt -Autoplay:$Autoplay -Version $moduleVersion
         $recording = $server.Recording
         $from = $recording.Start.ToLocalTime().ToString('yyyy-MM-dd HH:mm')
@@ -1006,6 +1023,12 @@ function Start-AzlSonarServer {
         if ($PSBoundParameters.ContainsKey('PollSeconds')) { $readArguments.PollSeconds = $PollSeconds }
         $config = if ($InfrastructureFile) { Read-AzlSonarConfig -InfrastructureFile $InfrastructureFile @readArguments } else { Read-AzlSonarConfig -Path $ConfigPath @readArguments }
         if ($PSBoundParameters.ContainsKey('Monitor')) { $config | Add-Member -NotePropertyName monitor -NotePropertyValue $Monitor -Force }
+        # The token file (-TokenFile wins over tokenFile) is checked before Azure is touched.
+        $tokenFileSetting = if ($PSBoundParameters.ContainsKey('TokenFile') -and $TokenFile) { $TokenFile } else { [string](Get-AzlSonarMember $config 'tokenFile' '') }
+        if ($tokenFileSetting) {
+            if ($NoAccessToken -or -not [bool](Get-AzlSonarMember $config 'accessToken' $true)) { throw 'A token file needs the access token: remove -NoAccessToken or set accessToken to true (or drop -TokenFile / tokenFile).' }
+            $tokenFilePath = Assert-AzlSonarTokenFilePath -Path $tokenFileSetting -Force:$Force
+        }
         $plan = Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $config 'monitor' 'Auto'))
         if ($plan.azure) { Assert-AzlSonarAzContext }
         $recordPath = if ($PSBoundParameters.ContainsKey('Record') -and $Record) { $Record } else { [string](Get-AzlSonarMember $config 'recordPath' '') }
@@ -1099,6 +1122,9 @@ function Start-AzlSonarServer {
 
     $url = "http://localhost:$Port/"
     $openUrl = if ($accessToken) { $url + '?t=' + $accessToken } else { $url }
+    # With a token file the launch output carries the path and not the token; the browser still gets the token in its address.
+    $shownUrl = if ($tokenFilePath) { $url } else { $openUrl }
+    $tokenFileWritten = $false
     $listener = [System.Net.HttpListener]::new()
     $listener.Prefixes.Add($url)
     $listener.Prefixes.Add("http://127.0.0.1:$Port/")
@@ -1112,14 +1138,19 @@ function Start-AzlSonarServer {
 
     $workers = [System.Collections.Generic.List[hashtable]]::new()
     try {
+        if ($tokenFilePath) {
+            $null = New-AzlSonarTokenFile -Path $tokenFilePath -Token $accessToken -Force:$Force
+            $tokenFileWritten = $true
+        }
         foreach ($spec in $workerSpecs) {
             $workers.Add((Start-AzlSonarWorker -Name $spec.Name -Command $spec.Command -Arguments $spec.Arguments))
         }
 
-        Write-Information -MessageData ($startMessage -f $openUrl) -InformationAction Continue
+        Write-Information -MessageData ($startMessage -f $shownUrl) -InformationAction Continue
+        if ($tokenFileWritten) { Write-Information -MessageData ('Access token file: {0} (readable by the current user only; removed when Sonar stops).' -f $tokenFilePath) -InformationAction Continue }
         if (-not $accessToken) { Write-Warning 'The access token is off: any account on this machine can read this page. Use that on a single-user machine only.' }
         if (-not $NoBrowser) {
-            try { Start-Process -FilePath $openUrl } catch { Write-Warning "Could not open the browser: $($_.Exception.Message). Open $openUrl yourself." }
+            try { Start-Process -FilePath $openUrl } catch { Write-Warning "Could not open the browser: $($_.Exception.Message). Open $shownUrl yourself$(if ($tokenFileWritten) { " (the token is in the token file)" })." }
         }
 
         $pending = $listener.GetContextAsync()
@@ -1155,6 +1186,7 @@ function Start-AzlSonarServer {
         try { $listener.Stop() } catch { Write-Verbose 'Listener already stopped.' }
         $listener.Close()
         foreach ($worker in $workers) { Stop-AzlSonarWorker -Worker $worker }
+        if ($tokenFileWritten) { $null = Remove-AzlSonarTokenFile -Path $tokenFilePath -Token $accessToken }
         Write-Information -MessageData 'AzL Sonar stopped.' -InformationAction Continue
     }
 }

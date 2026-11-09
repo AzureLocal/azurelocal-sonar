@@ -23,7 +23,8 @@
         'ConvertTo-AzlSonarConfig',
     'Export-AzlSonarPublishableRecording',
     'Test-AzlSonarPublishableRecording',
-    'Export-AzlSonarBundle'
+    'Export-AzlSonarBundle',
+    'Invoke-AzlSonarApi'
     )
     CmdletsToExport      = @()
     VariablesToExport    = @()

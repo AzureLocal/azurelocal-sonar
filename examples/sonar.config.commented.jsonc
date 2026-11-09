@@ -20,6 +20,10 @@
   // Optional, default true. The page needs a per-start access token (the URL Sonar prints carries it). false turns that off:
   // any account on this machine can then read the page. For a single-user machine only. -NoAccessToken does the same.
   "accessToken": true,
+  // Optional, default none. A file Sonar writes the access token to at start (only the token; readable by the current user only;
+  // removed when Sonar stops), so a script or an agent can read it instead of scraping the launch output. Relative to this file.
+  // Start-AzlSonar.ps1 -TokenFile overrides it. Not with accessToken false. Left out here: the example runs unchanged.
+  // "tokenFile": "./sonar.token",
   // Optional, default 4 (1 to 50). Live browser streams served at once; more get 429 and the page polls instead.
   "maxEventStreams": 4,
   // Optional, default 20. Seconds between Azure polls, 5 to 3600. Start-AzlSonar.ps1 -PollSeconds overrides it.

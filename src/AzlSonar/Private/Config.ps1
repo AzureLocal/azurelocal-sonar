@@ -247,6 +247,15 @@ function Test-AzlSonarConfig {
     if ($null -ne $accessToken -and $accessToken -isnot [bool]) {
         $problems.Add('accessToken must be true or false (false is for a single-user machine only).')
     }
+    $tokenFile = Get-AzlSonarMember $Config 'tokenFile'
+    if ($null -ne $tokenFile) {
+        if ($tokenFile -isnot [string] -or [string]::IsNullOrWhiteSpace($tokenFile) -or $tokenFile.IndexOf([char]0) -ge 0) {
+            $problems.Add('tokenFile must be the path of the file Sonar writes the access token to (readable by the current user only, removed at stop), for example ./sonar.token.')
+        }
+        elseif ($accessToken -eq $false) {
+            $problems.Add('tokenFile needs the access token: it cannot be set together with accessToken false.')
+        }
+    }
     $maxStreams = Get-AzlSonarMember $Config 'maxEventStreams'
     if ($null -ne $maxStreams) {
         $number = 0
@@ -446,6 +455,11 @@ function Read-AzlSonarConfig {
     if ($verificationEventsPath -and -not [System.IO.Path]::IsPathRooted($verificationEventsPath) -and $baseDirectory) {
         $verificationEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $verificationEventsPath))
     }
+    # tokenFile: where the access token is written at start; relative to the config file's folder.
+    $tokenFile = [string](Get-AzlSonarMember $raw 'tokenFile' '')
+    if ($tokenFile -and -not [System.IO.Path]::IsPathRooted($tokenFile) -and $tokenFile -notmatch '^~[\/]' -and $baseDirectory) {
+        $tokenFile = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $tokenFile))
+    }
     # discoveryPath: the hardware discovery output (a folder or a file); relative to the config file's folder.
     $discoveryPath = [string](Get-AzlSonarMember $raw 'discoveryPath' '')
     if ($discoveryPath -and -not [System.IO.Path]::IsPathRooted($discoveryPath) -and $baseDirectory) {
@@ -495,6 +509,7 @@ function Read-AzlSonarConfig {
         sourceKind     = $sourceKind
         # The per-start access token (on by default; false is for a single-user machine only) and the live streams served at once.
         accessToken    = [bool](Get-AzlSonarMember $raw 'accessToken' $true)
+        tokenFile      = $tokenFile
         maxEventStreams = [int](Get-AzlSonarMember $raw 'maxEventStreams' 4)
     }
 }
