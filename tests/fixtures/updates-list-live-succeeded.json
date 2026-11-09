@@ -1,0 +1,7 @@
+{
+  "value": [
+    { "name": "Solution12.2611.1002.10", "properties": { "state": "Installed", "version": "12.2611.1002.10", "displayName": "Azure Local solution update 12.2611.1002.10", "packageType": "Solution", "installedDate": "2026-12-09T19:20:00Z" } },
+    { "name": "SBE5.0.2609.1611", "properties": { "state": "Installed", "version": "5.0.2609.1611", "displayName": "SBE5.0.2609.1611", "packageType": "SBE", "description": "Premier SBE for Example 16G AX Servers", "installedDate": "2026-12-09T19:20:00Z" } },
+    { "name": "Solution12.2610.1004.50", "properties": { "state": "Obsolete", "version": "12.2610.1004.50", "displayName": "Azure Local solution update 12.2610.1004.50", "packageType": "Solution" } }
+  ]
+}

@@ -166,6 +166,7 @@ Describe 'Get-AzlSonarRunningArmDeployment and the poller (mocked ARM)' {
         Add-Route 'HybridCompute/machines/' (New-SonarArmResponse 200 ([pscustomobject]@{ properties = [pscustomobject]@{ status = 'Connected'; lastStatusChange = '2026-10-11T17:00:00Z'; agentVersion = '1.50' } }))
         Add-Route 'edgeMachines\?' (New-SonarArmResponse 404 $null)
         Add-Route 'updateSummaries' (New-SonarArmResponse 200 (Get-Fx 'update-summary-idle.json'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 @{ value = @() })
         $state = Get-AzlSonarDeploymentState -Config $script:Cfg -Now $script:Now
         $state.lag.detected | Should -BeFalse
         @($script:ArmCalls | Where-Object { $_ -match 'Microsoft.Resources/deployments' }).Count | Should -Be 0
@@ -227,11 +228,14 @@ Describe 'The update track (updateSummaries, updates, updateRuns)' {
 
     It 'is idle (and makes one call) when there is no update activity or no update data yet' {
         Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 (Get-Fx 'update-summary-idle.json'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 @{ value = @() })
         $u = InModuleScope AzlSonar -Parameters @{ C = $script:Cfg; N = $script:Now } { param($C, $N) Get-AzlSonarUpdateState -Config $C -Now $N }
         $u.phase | Should -Be 'idle'
-        $u.status | Should -Be 'success'
+        $u.status | Should -Be 'notstarted' -Because 'AppliedSuccessfully with a lastUpdated but no installed update and no run is not an update that ran'
+        $u.level | Should -Be 'neutral'
+        $u.label | Should -Be 'No update has run'
         @($u.tree).Count | Should -Be 0
-        $script:ArmCalls.Count | Should -Be 1
+        $script:ArmCalls.Count | Should -Be 2 -Because 'the summary and the update list; no run is read when no update installs'
         $script:ArmRoutes.Clear()
         Add-Route 'updateSummaries/default' (New-SonarArmResponse 404 $null)
         $none = InModuleScope AzlSonar -Parameters @{ C = $script:Cfg; N = $script:Now } { param($C, $N) Get-AzlSonarUpdateState -Config $C -Now $N }
@@ -319,5 +323,351 @@ Describe 'Guidance: 12.2609 timing and the update, add-node and repair cards' {
         $g = Get-AzlSonarPhaseGuidance -IdentityModel $Model
         $g.phases.update.verified | Should -BeFalse
         $g.phases.update.commands | Should -Contain 'Get-CauReport (Cluster-Aware Updating run details)'
+    }
+}
+
+Describe 'The update verdict: a summary that says AppliedSuccessfully is not an update that ran' {
+    BeforeEach {
+        $script:ArmRoutes.Clear()
+        $script:ArmCalls.Clear()
+        Mock -ModuleName AzlSonar -CommandName Invoke-AzRestMethod -MockWith {
+            $script:ArmCalls.Add($Path)
+            foreach ($route in $script:ArmRoutes) { if ($Path -match $route.Match) { return $route.Response } }
+            throw "Unrouted ARM call in test: $Path"
+        }
+        $script:Cfg = Read-AzlSonarConfig -Path $script:SonarExampleConfig
+        function script:Get-UpdateTrack {
+            InModuleScope AzlSonar -Parameters @{ C = $script:Cfg; N = $script:Now } { param($C, $N) Get-AzlSonarUpdateState -Config $C -Now $N }
+        }
+    }
+
+    Context 'the live payload of a cluster that just finished its deployment' {
+        BeforeEach {
+            Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 (Get-Fx 'update-summary-live-no-update-yet.json'))
+            Add-Route '/updates\?' (New-SonarArmResponse 200 (Get-Fx 'updates-list-live-sbe-content.json'))
+        }
+
+        It 'is not green: no run, no installing update, the SBE update waits for content' {
+            $u = Get-UpdateTrack
+            $u.status | Should -Be 'notstarted'
+            $u.ran | Should -BeFalse
+            $u.run | Should -BeNullOrEmpty
+            $u.active | Should -BeNullOrEmpty
+            @($u.tree).Count | Should -Be 0
+            $u.phase | Should -Be 'waiting'
+            $u.level | Should -Be 'warn' -Because 'an available update that cannot start yet is amber'
+            $u.label | Should -Be 'Waiting for content'
+            @($script:ArmCalls).Count | Should -Be 2 -Because 'the summary and the update list; no run exists to read'
+        }
+
+        It 'shows the offered update with its name, version, package type, description and next action' {
+            $u = Get-UpdateTrack
+            @($u.updates).Count | Should -Be 1
+            $u.updates[0].name | Should -Be 'SBE5.0.2609.1611'
+            $u.updates[0].version | Should -Be '5.0.2609.1611'
+            $u.updates[0].packageType | Should -Be 'SBE'
+            $u.updates[0].description | Should -Be 'Premier SBE for Example 16G AX Servers'
+            $u.updates[0].state | Should -Be 'AdditionalContentRequired'
+            $u.updates[0].stateWord | Should -Be 'Waiting for content'
+            $u.nextAction.text | Should -Match 'SBE side-load'
+            $u.nextAction.guide | Should -Match '^https://learn\.microsoft\.com/azure/azure-local/update/solution-builder-extension.*additionalcontentrequired'
+        }
+
+        It 'lists the Informational readiness checks and counts them without colouring the tab by themselves' {
+            $u = Get-UpdateTrack
+            $u.summary.state | Should -Be 'AppliedSuccessfully'
+            $u.summary.lastUpdated | Should -BeNullOrEmpty
+            $u.summary.currentVersion | Should -Be '12.2610.1004.50'
+            $u.summary.checkCounts.informational | Should -Be 2
+            $u.summary.checkCounts.critical | Should -Be 0
+            $u.summary.checkCounts.total | Should -Be 3
+            @($u.summary.failedChecks).Count | Should -Be 2 -Because 'the check that succeeded is not listed, even with severity Critical'
+            $u.summary.failedChecks[0].title | Should -Match 'machine proxy on each failover cluster node'
+            $u.summary.failedChecks[0].remediation | Should -Match '^https://learn\.microsoft\.com/'
+            $u.summary.failedChecks[1].title | Should -Match 'CAU clustered role'
+        }
+    }
+
+    It 'is neutral with the label "No update has run" when only Informational checks exist and nothing is offered' {
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 (Get-Fx 'update-summary-live-no-update-yet.json'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 @{ value = @() })
+        $u = Get-UpdateTrack
+        $u.status | Should -Be 'notstarted'
+        $u.phase | Should -Be 'idle'
+        $u.level | Should -Be 'neutral'
+        $u.label | Should -Be 'No update has run'
+        $u.summary.checkCounts.informational | Should -Be 2
+    }
+
+    It 'the tab colour is the worst non-informational severity: <Severity> -> <Level>' -TestCases @(
+        @{ Severity = 'Informational'; Level = 'neutral' }
+        @{ Severity = 'Warning'; Level = 'warn' }
+        @{ Severity = 'Error'; Level = 'error' }
+        @{ Severity = 'Critical'; Level = 'error' }
+    ) {
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 ((Get-Fx 'update-summary-live-no-update-yet.json') -replace '"severity": "Informational"', ('"severity": "' + $Severity + '"')))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 @{ value = @() })
+        $u = Get-UpdateTrack
+        $u.level | Should -Be $Level
+        $u.status | Should -Be 'notstarted' -Because 'a failed check is not an update run'
+        $u.summary.checkCounts[$Severity.ToLowerInvariant()] | Should -Be 2
+    }
+
+    It 'a mix of severities counts each and lists the worst first' {
+        $mixed = (Get-Fx 'update-summary-live-no-update-yet.json') -replace '"severity": "Informational",(\s*)"status": "Failed",(\s*)"description": "The Cluster', '"severity": "Critical",$1"status": "Failed",$2"description": "The Cluster'
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 $mixed)
+        Add-Route '/updates\?' (New-SonarArmResponse 200 (Get-Fx 'updates-list-live-sbe-content.json'))
+        $u = Get-UpdateTrack
+        $u.summary.checkCounts.critical | Should -Be 1
+        $u.summary.checkCounts.informational | Should -Be 1
+        $u.summary.failedChecks[0].severity | Should -Be 'Critical'
+        $u.level | Should -Be 'error'
+        $u.status | Should -Be 'notstarted'
+    }
+
+    It 'is green only after a real run succeeded and the summary is back to AppliedSuccessfully with lastUpdated set' {
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 (Get-Fx 'update-summary-live-succeeded.json'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 (Get-Fx 'updates-list-live-succeeded.json'))
+        Add-Route 'updates/Solution12.2611.1002.10/updateRuns' (New-SonarArmResponse 200 (Get-Fx 'updateruns-succeeded.json'))
+        Add-Route 'updates/SBE5.0.2609.1611/updateRuns' (New-SonarArmResponse 200 @{ value = @() })
+        $u = Get-UpdateTrack
+        $u.status | Should -Be 'success'
+        $u.level | Should -Be 'ok'
+        $u.ran | Should -BeTrue
+        $u.label | Should -Be 'Update succeeded (12.2611.1002.10)'
+        $u.run.name | Should -Be '20261209-1840-run'
+        $u.run.status | Should -Be 'success'
+        $u.summary.lastUpdated | Should -Be '2026-12-09T19:20:00Z'
+        @($u.tree).Count | Should -Be 2
+        @($u.runs).Count | Should -Be 2 -Because 'the history keeps the earlier run'
+        $u.runs[1].name | Should -Be '20261105-1000-old'
+        ($u.updates | Where-Object { $_.state -eq 'Obsolete' }).stateWord | Should -Be 'Superseded by a newer version'
+    }
+
+    It 'is green from lastUpdated and an installed update when Azure keeps no run, and not otherwise' {
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 (Get-Fx 'update-summary-live-succeeded.json'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 (Get-Fx 'updates-list-live-succeeded.json'))
+        Add-Route 'updateRuns' (New-SonarArmResponse 404 $null)
+        (Get-UpdateTrack).status | Should -Be 'success'
+        $script:ArmRoutes.Clear()
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 ((Get-Fx 'update-summary-live-succeeded.json') -replace '"lastUpdated": "[^"]+"', '"lastUpdated": null'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 (Get-Fx 'updates-list-live-succeeded.json'))
+        Add-Route 'updateRuns' (New-SonarArmResponse 404 $null)
+        (Get-UpdateTrack).status | Should -Be 'notstarted'
+    }
+
+    It 'a new update that is available again after a successful run is not green' {
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 ((Get-Fx 'update-summary-live-succeeded.json') -replace '"AppliedSuccessfully"', '"UpdateAvailable"'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 (Get-Fx 'updates-list-live-succeeded.json'))
+        Add-Route 'updates/Solution12.2611.1002.10/updateRuns' (New-SonarArmResponse 200 (Get-Fx 'updateruns-succeeded.json'))
+        Add-Route 'updates/SBE5.0.2609.1611/updateRuns' (New-SonarArmResponse 200 @{ value = @() })
+        $u = Get-UpdateTrack
+        $u.status | Should -Be 'notstarted'
+        $u.phase | Should -Be 'available'
+        $u.level | Should -Be 'neutral'
+        $u.run.status | Should -Be 'success' -Because 'the history still shows the last run'
+    }
+
+    It 'a failed newest run is an error even when the summary says AppliedSuccessfully' {
+        $failedRuns = (Get-Fx 'updateruns-succeeded.json') -replace '"status": "Success"', '"status": "Error"'
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 (Get-Fx 'update-summary-live-succeeded.json'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 (Get-Fx 'updates-list-live-succeeded.json'))
+        Add-Route 'updates/Solution12.2611.1002.10/updateRuns' (New-SonarArmResponse 200 $failedRuns)
+        Add-Route 'updates/SBE5.0.2609.1611/updateRuns' (New-SonarArmResponse 200 @{ value = @() })
+        $u = Get-UpdateTrack
+        $u.status | Should -Be 'error'
+        $u.level | Should -Be 'error'
+        $u.phase | Should -Be 'failed'
+    }
+
+    Context 'every update state means something plain' {
+        It '<State> -> kind <Kind>, phase <Phase>, level <Level>, word <Word>' -TestCases @(
+            @{ State = 'AdditionalContentRequired'; Kind = 'waiting'; Phase = 'waiting'; Level = 'warn'; Word = 'Waiting for content' }
+            @{ State = 'HasPrerequisite'; Kind = 'waiting'; Phase = 'waiting'; Level = 'warn'; Word = 'Needs another update first' }
+            @{ State = 'Ready'; Kind = 'ready'; Phase = 'available'; Level = 'neutral'; Word = 'Ready to install' }
+            @{ State = 'ReadyToInstall'; Kind = 'ready'; Phase = 'available'; Level = 'neutral'; Word = 'Ready to install' }
+            @{ State = 'Downloading'; Kind = 'running'; Phase = 'preparing'; Level = 'run'; Word = 'Downloading' }
+            @{ State = 'Preparing'; Kind = 'running'; Phase = 'preparing'; Level = 'run'; Word = 'Preparing' }
+            @{ State = 'Installing'; Kind = 'running'; Phase = 'installing'; Level = 'run'; Word = 'Installing' }
+            @{ State = 'InstallationFailed'; Kind = 'failed'; Phase = 'failed'; Level = 'error'; Word = 'Installation failed' }
+            @{ State = 'PreparationFailed'; Kind = 'failed'; Phase = 'failed'; Level = 'error'; Word = 'Preparation failed' }
+            @{ State = 'HealthCheckFailed'; Kind = 'failed'; Phase = 'failed'; Level = 'error'; Word = 'Health check failed' }
+            @{ State = 'Obsolete'; Kind = 'ignored'; Phase = 'idle'; Level = 'neutral'; Word = 'Superseded by a newer version' }
+            @{ State = 'Installed'; Kind = 'installed'; Phase = 'idle'; Level = 'ok'; Word = 'Installed' }
+            @{ State = 'SomethingNew'; Kind = 'unknown'; Phase = 'idle'; Level = 'neutral'; Word = 'SomethingNew' }
+        ) {
+            $info = InModuleScope AzlSonar -Parameters @{ S = $State } { param($S) Get-AzlSonarUpdateStateInfo -State $S }
+            $info.kind | Should -Be $Kind
+            $info.phase | Should -Be $Phase
+            $info.level | Should -Be $Level
+            $info.word | Should -Be $Word
+        }
+
+        It 'an unknown update state is shown as the raw word, neutral, never green' {
+            $weird = (Get-Fx 'updates-list-live-sbe-content.json') -replace 'AdditionalContentRequired', 'SomethingNew'
+            Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 (Get-Fx 'update-summary-live-no-update-yet.json'))
+            Add-Route '/updates\?' (New-SonarArmResponse 200 $weird)
+            $u = Get-UpdateTrack
+            $u.updates[0].stateWord | Should -Be 'SomethingNew'
+            $u.updates[0].level | Should -Be 'neutral'
+            $u.status | Should -Not -Be 'success'
+            $u.level | Should -Be 'neutral'
+        }
+
+        It 'a failed update reads the failing run and keeps the failure guide as the next action' {
+            Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 ((Get-Fx 'update-summary-installing.json') -replace '"UpdateInProgress"', '"UpdateFailed"'))
+            Add-Route 'updateRuns' (New-SonarArmResponse 200 (Get-Fx 'updateruns-failed.json'))
+            Add-Route '/updates\?' (New-SonarArmResponse 200 ((Get-Fx 'updates-list-installing.json') -replace '"Installing"', '"InstallationFailed"'))
+            $u = Get-UpdateTrack
+            $u.level | Should -Be 'error'
+            $u.nextAction.guide | Should -Match 'update-troubleshooting'
+        }
+    }
+
+    It 'the roll-up of one state: AppliedSuccessfully is not success, Installed is' {
+        InModuleScope AzlSonar { Get-AzlSonarUpdateStatusFromState 'AppliedSuccessfully' } | Should -Be 'notstarted'
+        InModuleScope AzlSonar { Get-AzlSonarUpdateStatusFromState 'Installed' } | Should -Be 'success'
+        InModuleScope AzlSonar { Get-AzlSonarUpdateStatusFromState 'InstallationFailed' } | Should -Be 'error'
+        InModuleScope AzlSonar { Get-AzlSonarUpdateStatusFromState 'Installing' } | Should -Be 'running'
+        InModuleScope AzlSonar { Get-AzlSonarUpdateStatusFromState 'AdditionalContentRequired' } | Should -Be 'notstarted'
+    }
+}
+
+Describe 'Monitoring a monthly update: standalone (-Monitor Update) and Auto against an old deployment' {
+    BeforeEach {
+        $script:ArmRoutes.Clear()
+        $script:ArmCalls.Clear()
+        Mock -ModuleName AzlSonar -CommandName Invoke-AzRestMethod -MockWith {
+            $script:ArmCalls.Add($Path)
+            foreach ($route in $script:ArmRoutes) { if ($Path -match $route.Match) { return $route.Response } }
+            throw "Unrouted ARM call in test: $Path"
+        }
+        $script:Connected = New-SonarArmResponse 200 ([pscustomobject]@{ properties = [pscustomobject]@{ status = 'Connected'; lastStatusChange = '2026-10-11T17:00:00Z'; agentVersion = '1.50' } })
+        $script:MinimalJson = @'
+{
+  "subscriptionId": "00000000-0000-0000-0000-000000000001",
+  "resourceGroup": "rg-example-azl",
+  "clusterName": "clus01",
+  "identityModel": "ActiveDirectory",
+  "nodes": [ { "name": "node01", "address": "192.0.2.11", "seed": true } ],
+  "credential": { "source": "prompt" },
+  "monitor": "Update"
+}
+'@
+    }
+
+    It 'a minimal config (subscription, resource group, cluster, seed node, credential) is valid and needs no deployment keys' {
+        (Test-AzlSonarConfig -Config ($script:MinimalJson | ConvertFrom-Json)) | Should -BeNullOrEmpty
+        $cfg = Read-AzlSonarConfig -Json $script:MinimalJson
+        $cfg.monitor | Should -Be 'Update'
+        $cfg.ztpEventsPath | Should -BeNullOrEmpty
+        $cfg.osConfigEventsPath | Should -BeNullOrEmpty
+        $cfg.armEventsPath | Should -BeNullOrEmpty
+        $cfg.seedNode.name | Should -Be 'node01'
+        $plan = InModuleScope AzlSonar -Parameters @{ M = $cfg.monitor } { param($M) Get-AzlSonarMonitorPlan -Monitor $M }
+        $plan.armEvents | Should -BeFalse
+        $plan.ztpEvents | Should -BeFalse
+        $plan.osConfigEvents | Should -BeFalse
+        $plan.tailer | Should -BeTrue -Because 'the update logs on the seed node are tailed'
+        $plan.phases | Should -Be @('update')
+    }
+
+    It 'reads no deployment settings, edge machines or ARM deployments and lands on the update, waiting for content' {
+        $cfg = Read-AzlSonarConfig -Json $script:MinimalJson
+        Add-Route 'clusters/clus01\?api-version' (New-SonarArmResponse 200 ([pscustomobject]@{ properties = [pscustomobject]@{ status = 'ConnectedRecently'; connectivityStatus = 'Connected'; provisioningState = 'Succeeded'; reportedProperties = [pscustomobject]@{ clusterVersion = '12.2610.1004.50'; nodes = @([pscustomobject]@{ name = 'node01' }) } } }))
+        Add-Route 'HybridCompute/machines/' $script:Connected
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 (Get-Fx 'update-summary-live-no-update-yet.json'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 (Get-Fx 'updates-list-live-sbe-content.json'))
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now
+        @($script:ArmCalls | Where-Object { $_ -match 'deploymentSettings|edgeMachines|Microsoft.Resources/deployments' }).Count | Should -Be 0
+        $state.phase | Should -Be 'update'
+        $state.activePhase | Should -Be 'update'
+        $state.monitor | Should -Be 'Update'
+        @($state.deployment.tree).Count | Should -Be 0
+        @($state.validation.tree).Count | Should -Be 0
+        $state.update.phase | Should -Be 'waiting'
+        $state.update.status | Should -Be 'notstarted'
+        $state.update.level | Should -Be 'warn'
+        $state.update.updates[0].name | Should -Be 'SBE5.0.2609.1611'
+        $state.nodes[0].arcStatus | Should -Be 'Connected'
+        $state.clusterResource.exists | Should -BeTrue
+        $state.pollError | Should -BeNullOrEmpty
+        @($state.warnings) | Should -BeNullOrEmpty
+    }
+
+    It 'follows an installing update: step tree, the running step as the current step, per-node steps' {
+        $cfg = Read-AzlSonarConfig -Json $script:MinimalJson
+        Add-Route 'clusters/clus01\?api-version' (New-SonarArmResponse 404 $null)
+        Add-Route 'HybridCompute/machines/' $script:Connected
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 (Get-Fx 'update-summary-installing.json'))
+        Add-Route 'updates/Solution12.2610.1002.4/updateRuns' (New-SonarArmResponse 200 (Get-Fx 'updateruns-installing.json'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 (Get-Fx 'updates-list-installing.json'))
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now
+        $state.phase | Should -Be 'update'
+        $state.update.status | Should -Be 'running'
+        $state.update.level | Should -Be 'run'
+        $state.current.stepName | Should -Be 'Update node 2'
+        $state.update.tree[1].children[1].name | Should -Be 'Update node 2'
+    }
+
+    It 'a failed update in the standalone monitor is the failed phase on the update' {
+        $cfg = Read-AzlSonarConfig -Json $script:MinimalJson
+        Add-Route 'clusters/clus01\?api-version' (New-SonarArmResponse 404 $null)
+        Add-Route 'HybridCompute/machines/' $script:Connected
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 ((Get-Fx 'update-summary-installing.json') -replace '"UpdateInProgress"', '"UpdateFailed"'))
+        Add-Route 'updateRuns' (New-SonarArmResponse 200 (Get-Fx 'updateruns-failed.json'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 ((Get-Fx 'updates-list-installing.json') -replace '"Installing"', '"InstallationFailed"'))
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now
+        $state.phase | Should -Be 'failed'
+        $state.activePhase | Should -Be 'update'
+    }
+
+    It 'the standalone state has the same keys as the initial state, so the page needs no special case' {
+        $cfg = Read-AzlSonarConfig -Json $script:MinimalJson
+        Add-Route 'clusters/clus01\?api-version' (New-SonarArmResponse 404 $null)
+        Add-Route 'HybridCompute/machines/' $script:Connected
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 404 $null)
+        $state = Get-AzlSonarDeploymentState -Config $cfg -Now $script:Now
+        $full = InModuleScope AzlSonar -Parameters @{ C = $cfg } { param($C) Get-AzlSonarInitialState -Config $C }
+        foreach ($key in $full.Keys) { $state.Contains($key) | Should -BeTrue -Because "state.$key" }
+        $state.Contains('update') | Should -BeTrue
+        $state.update.label | Should -Be 'No update data from Azure yet'
+    }
+
+    Context 'Auto with a deployment that finished a while ago' {
+        BeforeEach {
+            $script:Cfg = Read-AzlSonarConfig -Path $script:SonarExampleConfig
+            function script:Set-AutoRoutes {
+                param([string]$DeploymentEnd, [string]$Updates = 'updates-list-live-sbe-content.json')
+                $dep = [pscustomobject]@{ status = 'Success'; steps = @([pscustomobject]@{ name = 'All'; fullStepIndex = '0'; status = 'Success'; startTimeUtc = '2026-09-01T10:00:00Z'; endTimeUtc = $DeploymentEnd }) }
+                $settings = [pscustomobject]@{ properties = [pscustomobject]@{ deploymentMode = 'Deploy'; provisioningState = 'Succeeded'; reportedProperties = [pscustomobject]@{ validationStatus = (Get-SonarValidationSuccessFixture); deploymentStatus = $dep } } }
+                Add-Route 'deploymentSettings/default' (New-SonarArmResponse 200 $settings)
+                Add-Route 'HybridCompute/machines/' $script:Connected
+                Add-Route 'edgeMachines\?' (New-SonarArmResponse 404 $null)
+                Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 (Get-Fx 'update-summary-live-no-update-yet.json'))
+                if ($Updates) { Add-Route '/updates\?' (New-SonarArmResponse 200 (Get-Fx $Updates)) } else { Add-Route '/updates\?' (New-SonarArmResponse 200 @{ value = @() }) }
+            }
+        }
+
+        It 'lands on the Update view when the finished deployment is old and an update waits' {
+            Set-AutoRoutes -DeploymentEnd '2026-09-01T12:00:00Z'
+            $state = Get-AzlSonarDeploymentState -Config $script:Cfg -Now $script:Now
+            $state.phase | Should -Be 'update'
+            $state.activePhase | Should -Be 'update'
+            $state.update.phase | Should -Be 'waiting'
+        }
+
+        It 'stays on Deployment (done) right after the deployment finished' {
+            Set-AutoRoutes -DeploymentEnd '2026-10-11T12:00:00Z'
+            $state = Get-AzlSonarDeploymentState -Config $script:Cfg -Now $script:Now
+            $state.phase | Should -Be 'done'
+            $state.update.phase | Should -Be 'waiting' -Because 'the Update tile still shows the waiting update'
+        }
+
+        It 'stays on Deployment when the old deployment has nothing waiting' {
+            Set-AutoRoutes -DeploymentEnd '2026-09-01T12:00:00Z' -Updates ''
+            $state = Get-AzlSonarDeploymentState -Config $script:Cfg -Now $script:Now
+            $state.phase | Should -Be 'done'
+        }
     }
 }

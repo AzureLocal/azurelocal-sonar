@@ -1,0 +1,19 @@
+{
+  "value": [
+    {
+      "name": "SBE5.0.2609.1611",
+      "type": "microsoft.azurestackhci/clusters/updates",
+      "properties": {
+        "state": "AdditionalContentRequired",
+        "version": "5.0.2609.1611",
+        "displayName": "SBE5.0.2609.1611",
+        "description": "Premier SBE for Example 16G AX Servers",
+        "packageType": "SBE",
+        "publisher": "Example",
+        "rebootRequired": "Unknown",
+        "availabilityType": "Online",
+        "minSbeVersionRequired": "4.1.2609.5"
+      }
+    }
+  ]
+}

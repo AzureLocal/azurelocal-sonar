@@ -1,0 +1,44 @@
+{
+  "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example-azl/providers/Microsoft.AzureStackHCI/clusters/clus01/updateSummaries/default",
+  "name": "default",
+  "type": "microsoft.azurestackhci/clusters/updatesummaries",
+  "properties": {
+    "state": "AppliedSuccessfully",
+    "healthState": "Success",
+    "currentVersion": "12.2610.1004.50",
+    "currentSbeVersion": "",
+    "hardwareModel": "Example Server R1",
+    "oemFamily": "Example",
+    "lastChecked": "2026-11-06T09:14:00Z",
+    "lastUpdated": null,
+    "healthCheckResult": [
+      {
+        "name": "AzStackHci_UpdateReadiness_ProxyLocal",
+        "title": "The machine proxy on each failover cluster node should be set to a local proxy server",
+        "displayName": "Machine proxy",
+        "severity": "Informational",
+        "status": "Failed",
+        "description": "The machine proxy is not set to a local proxy server.",
+        "remediation": "https://learn.microsoft.com/azure/azure-local/manage/configure-proxy-settings-23h2"
+      },
+      {
+        "name": "AzStackHci_UpdateReadiness_CauRole",
+        "title": "The CAU clustered role should be installed on the cluster",
+        "displayName": "CAU clustered role",
+        "severity": "Informational",
+        "status": "Failed",
+        "description": "The Cluster-Aware Updating clustered role is not installed.",
+        "remediation": "Install the Cluster-Aware Updating clustered role."
+      },
+      {
+        "name": "AzStackHci_UpdateReadiness_TimeSync",
+        "title": "Time synchronisation",
+        "displayName": "Time sync",
+        "severity": "Critical",
+        "status": "Succeeded",
+        "description": "Time is in sync.",
+        "remediation": ""
+      }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "value": [
+    {
+      "name": "20261209-1840-run",
+      "properties": {
+        "timeStarted": "2026-12-09T18:40:00Z",
+        "duration": "PT0H40M",
+        "lastUpdatedTime": "2026-12-09T19:20:00Z",
+        "progress": {
+          "name": "Update the solution",
+          "status": "Success",
+          "startTimeUtc": "2026-12-09T18:40:00Z",
+          "endTimeUtc": "2026-12-09T19:20:00Z",
+          "steps": [
+            { "name": "Prepare", "status": "Success", "startTimeUtc": "2026-12-09T18:40:00Z", "endTimeUtc": "2026-12-09T18:50:00Z" },
+            { "name": "Install the solution update", "status": "Success", "startTimeUtc": "2026-12-09T18:50:00Z", "endTimeUtc": "2026-12-09T19:20:00Z", "steps": [
+                { "name": "Update node 1", "status": "Success", "startTimeUtc": "2026-12-09T18:50:00Z", "endTimeUtc": "2026-12-09T19:05:00Z" },
+                { "name": "Update node 2", "status": "Success", "startTimeUtc": "2026-12-09T19:05:00Z", "endTimeUtc": "2026-12-09T19:20:00Z" }
+            ] }
+          ]
+        }
+      }
+    },
+    {
+      "name": "20261105-1000-old",
+      "properties": {
+        "timeStarted": "2026-11-05T10:00:00Z",
+        "duration": "PT1H",
+        "progress": { "name": "Update", "status": "Success", "startTimeUtc": "2026-11-05T10:00:00Z", "endTimeUtc": "2026-11-05T11:00:00Z", "steps": [ { "name": "Install", "status": "Success" } ] }
+      }
+    }
+  ]
+}

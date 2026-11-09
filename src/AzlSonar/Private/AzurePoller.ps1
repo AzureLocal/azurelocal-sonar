@@ -1252,6 +1252,11 @@ function Get-AzlSonarDeploymentState {
     $warnings = [System.Collections.Generic.List[string]]::new()
     $rgPath = Get-AzlSonarResourceGroupPath -Config $Config
 
+    # A standalone Update monitor (-Monitor Update) follows a cluster that is already running: no deployment, provisioning or event file is read.
+    if ((Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))).monitor -eq 'Update') {
+        return Get-AzlSonarUpdateMonitorState -Config $Config -Now $Now
+    }
+
     $settingsPath = '{0}/providers/Microsoft.AzureStackHCI/clusters/{1}/deploymentSettings/default?api-version={2}' -f $rgPath, [uri]::EscapeDataString($Config.clusterName), $Config.apiVersion
     $settings = Invoke-AzlSonarArmGet -Path $settingsPath
     $fallback = [string](Get-AzlSonarMember $Config 'apiVersionFallback' '')
@@ -1408,14 +1413,10 @@ function Get-AzlSonarDeploymentState {
     $activeOut = $active
     if ($updateSetting -ne 'off' -and ($phaseInfo.phase -eq 'done' -or $trackSetting -eq 'update')) {
         $update = Get-AzlSonarUpdateState -Config $Config -Now $Now -Warnings $warnings
-        if ($update.status -eq 'running' -and $update.phase -in 'installing', 'preparing') {
-            $phaseOut = 'update'
-            $activeOut = 'update'
-            $current = Get-AzlSonarCurrentStep -Tree @($update.tree) -Phase 'update'
-        }
-        elseif ($update.status -eq 'error' -and $update.phase -in 'failed', 'attention') {
-            $phaseOut = 'failed'
-            $activeOut = 'update'
+        $move = Resolve-AzlSonarUpdatePhase -Update $update -Phase $phaseOut -ActivePhase $activeOut -DeploymentEnd (Get-AzlSonarTreeEnd -Tree $deploymentTree) -Now $Now
+        if ($move.follow) {
+            $phaseOut = $move.phase
+            $activeOut = $move.activePhase
             $current = Get-AzlSonarCurrentStep -Tree @($update.tree) -Phase 'update'
         }
     }

@@ -1,0 +1,14 @@
+{
+  "name": "default",
+  "properties": {
+    "state": "AppliedSuccessfully",
+    "healthState": "Success",
+    "currentVersion": "12.2611.1002.10",
+    "currentSbeVersion": "5.0.2609.1611",
+    "hardwareModel": "Example Server R1",
+    "oemFamily": "Example",
+    "lastChecked": "2026-12-09T20:00:00Z",
+    "lastUpdated": "2026-12-09T19:20:00Z",
+    "healthCheckResult": []
+  }
+}
