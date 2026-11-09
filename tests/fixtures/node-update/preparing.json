@@ -1,0 +1,143 @@
+{
+  "computer": "iic-azl-n01",
+  "module": true,
+  "updates": [
+    {
+      "id": "redmond/SBE5.0.2609.1611",
+      "displayName": "SBE_Example_16G-Intel_5.0.2609.1611",
+      "version": "5.0.2609.1611",
+      "sbeVersion": "5.0.2609.1611",
+      "state": "Preparing",
+      "packageType": "SBE",
+      "publisher": "Example",
+      "description": "Premier SBE for Example 16G AX Servers",
+      "rebootRequired": "Unknown",
+      "healthState": "Success",
+      "installedDate": "",
+      "availabilityType": "Online",
+      "progressPercentage": 0,
+      "notifyMessage": ""
+    }
+  ],
+  "runs": [
+    {
+      "id": "redmond/SBE5.0.2609.1611/b15c4b7f-0000-4000-8000-000000000001",
+      "updateId": "redmond/SBE5.0.2609.1611",
+      "state": "InProgress",
+      "type": "Install",
+      "started": "2026-11-09T05:03:34Z",
+      "lastUpdated": "2026-11-09T05:04:34Z",
+      "durationSeconds": null,
+      "progress": {
+        "name": "Unnamed step",
+        "description": "Update Azure Stack HCI with Solution Builder Extension package",
+        "status": "InProgress",
+        "start": "2026-11-09T05:03:34Z",
+        "end": "",
+        "error": "",
+        "steps": [
+          {
+            "name": "[SBE] Initialize SBE Update",
+            "description": "",
+            "status": "InProgress",
+            "start": "2026-11-09T05:03:34Z",
+            "end": "",
+            "error": "",
+            "steps": [
+              {
+                "name": "Perform initialization for update using SBE",
+                "description": "",
+                "status": "InProgress",
+                "start": "2026-11-09T05:03:34Z",
+                "end": "",
+                "error": "",
+                "steps": [
+                  {
+                    "name": "Prepare SBE for use",
+                    "description": "",
+                    "status": "InProgress",
+                    "start": "2026-11-09T05:03:34Z",
+                    "end": "",
+                    "error": "",
+                    "steps": [
+                      {
+                        "name": "Stage hardware update files",
+                        "description": "",
+                        "status": "InProgress",
+                        "start": "2026-11-09T05:03:34Z",
+                        "end": "",
+                        "error": "",
+                        "steps": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "environment": {
+    "state": "PreparationInProgress",
+    "healthState": "Success",
+    "currentVersion": "12.2610.1004.50",
+    "currentSbeVersion": "4.1.2609.5",
+    "lastUpdated": "",
+    "lastChecked": "2026-11-09T04:43:34Z",
+    "healthCheckDate": "2026-11-09T04:43:34Z",
+    "hardwareModel": "AX-760",
+    "sbeFamily": "16G-Intel",
+    "packageVersions": [
+      {
+        "type": "Solution",
+        "version": "12.2610.1004.50",
+        "lastUpdated": ""
+      },
+      {
+        "type": "SBE",
+        "version": "4.1.2609.5",
+        "lastUpdated": ""
+      }
+    ],
+    "healthCheckResult": [
+      {
+        "title": "The machine proxy on each failover cluster node should be set to a local proxy server",
+        "status": "FAILURE",
+        "severity": "INFORMATIONAL",
+        "description": "Validating cluster setup for update.",
+        "remediation": "https://learn.microsoft.com/windows-server/failover-clustering/cluster-aware-updating-requirements"
+      },
+      {
+        "title": "The CAU clustered role should be installed on the failover cluster to enable self-updating mode",
+        "status": "FAILURE",
+        "severity": "INFORMATIONAL",
+        "description": "Validating cluster setup for update.",
+        "remediation": "https://learn.microsoft.com/windows-server/failover-clustering/cluster-aware-updating-requirements"
+      },
+      {
+        "title": "Storage Subsystems Check",
+        "status": "SUCCESS",
+        "severity": "CRITICAL",
+        "description": "",
+        "remediation": ""
+      }
+    ]
+  },
+  "clusterNodes": [
+    {
+      "name": "iic-azl-n01",
+      "state": "Up"
+    },
+    {
+      "name": "iic-azl-n02",
+      "state": "Up"
+    },
+    {
+      "name": "iic-azl-n03",
+      "state": "Up"
+    }
+  ],
+  "errors": []
+}

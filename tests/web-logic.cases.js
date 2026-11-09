@@ -2547,4 +2547,181 @@ test('Update view in the page: hostile check titles, remediation links and offer
   });
 });
 
+// ---------------------------------------------------------------- the cluster's own update service (update.local, update.sources)
+
+function localUpdate(extra) {
+  var l = {
+    enabled: true, read: true, stale: false, reason: '', reasonKind: '', node: 'iic-azl-n01', nodeNote: '', readAt: '2026-11-09T05:21:00Z', attempts: [],
+    status: 'running', phase: 'preparing', level: 'run', label: 'Checking update health', state: 'HealthChecking', stateWord: 'Checking health',
+    run: { id: 'run-1', update: 'SBE5.0.2609.1611', version: '5.0.2609.1611', packageType: 'SBE', state: 'InProgress', status: 'running', started: '2026-11-09T05:03:34Z', lastUpdated: '2026-11-09T05:20:00Z', ended: null, durationSeconds: 1046, duration: '00:17:26' },
+    progress: { done: 3, total: 9, running: 1, current: 'Finalize SBE preparation', elapsedSeconds: 1046 },
+    failed: null, history: [],
+    nodes: [
+      { name: 'iic-azl-n01', state: 'Up', role: 'done', word: 'Up: finished its steps', step: '', stepStatus: 'success', started: '2026-11-09T05:18:34Z', ended: '2026-11-09T06:18:34Z', steps: 3, timeline: [] },
+      { name: 'iic-azl-n02', state: 'Paused', role: 'patching', word: 'Paused: drained and being patched', step: 'Install CAU Updates', stepStatus: 'running', started: '2026-11-09T06:18:34Z', ended: null, steps: 2, timeline: [] },
+      { name: 'iic-azl-n03', state: 'Up', role: 'waiting', word: 'Up: waiting its turn', step: '', stepStatus: 'notstarted', started: null, ended: null, steps: 0, timeline: [] }],
+    versions: { current: { solution: '12.2610.1004.50', sbe: '4.1.2609.5' }, before: { solution: '12.2610.1004.50', sbe: '4.1.2609.5', known: true }, after: { solution: '', sbe: '5.0.2609.1611', known: false }, target: { solution: '', sbe: '5.0.2609.1611', packageType: 'SBE' } },
+    events: [{ at: '2026-11-09T05:03:34Z', kind: 'started', text: 'Update SBE5.0.2609.1611 started on the cluster.' }]
+  };
+  Object.keys(extra || {}).forEach(function (k) { l[k] = extra[k]; });
+  return l;
+}
+function behindSources(minutes) {
+  return { azure: { read: true, state: 'UpdateAvailable', status: 'notstarted', phase: 'available', label: 'Update available' }, cluster: { enabled: true, read: true, status: 'running', phase: 'preparing', label: 'Checking update health' },
+    winner: 'cluster', agree: false, lagMinutes: minutes, lagSince: '2026-11-09T05:03:34Z', lagBasis: 'run',
+    message: 'Azure is behind the cluster by ' + minutes + ' minutes. The cluster says: Checking update health. Azure still says: Update available. Sonar shows the cluster’s state.' };
+}
+function clusterWinsUpdate(extra) {
+  return liveUpdate(Object.assign({ status: 'running', phase: 'preparing', level: 'run', label: 'Checking update health', ran: true, nextAction: null, updates: [], local: localUpdate(), sources: behindSources(17),
+    tree: [{ id: '1', name: 'SBE Package Update', status: 'running', children: [] }, { id: '2', name: 'Finish', status: 'notstarted', children: [] }] }, extra || {}));
+}
+
+test('update notices: Azure behind the cluster says so, with the minutes, and keeps the cluster’s words', function () {
+  var n = m.updateNotices(clusterWinsUpdate());
+  eq(n.length, 1); eq(n[0].kind, 'source');
+  eq(/^Azure is behind the cluster by 17 minutes\./.test(n[0].text), true);
+  eq(/The cluster says: Checking update health\. Azure still says: Update available\./.test(n[0].text), true);
+  eq(m.updateLag(clusterWinsUpdate()), 17);
+  eq(m.updateLag(liveUpdate()), null, 'no sources, no lag');
+});
+
+test('update notices: node-side reading off says plainly why; a failing read says so; a node switch is information, not an error', function () {
+  var off = m.updateNotices(liveUpdate({ local: { enabled: false, read: false, reasonKind: 'off', reason: 'Node-side update reading is off. Sonar shows only what Azure reports, and Azure can be many minutes behind the cluster.' }, sources: { winner: 'azure', agree: true, message: '' } }));
+  eq(off.length, 1); eq(off[0].kind, 'source-off'); eq(/Node-side update reading is off/.test(off[0].text), true);
+  var bad = m.updateNotices(liveUpdate({ local: { enabled: true, read: false, reasonKind: 'credential', reason: 'Node-side update reading is paused: a node refused the update account.' } }));
+  eq(bad[0].kind, 'source-off'); eq(/paused/.test(bad[0].text), true);
+  var sw = m.updateNotices(clusterWinsUpdate({ local: localUpdate({ nodeNote: 'iic-azl-n01 did not answer, so iic-azl-n02 was read. A node restarts during an update; this is normal.' }), sources: { winner: 'cluster', agree: true, lagMinutes: null, message: '' } }));
+  eq(sw.length, 1); eq(sw[0].kind, 'source-info'); eq(/did not answer, so iic-azl-n02 was read/.test(sw[0].text), true);
+  var stale = m.updateNotices(clusterWinsUpdate({ local: localUpdate({ stale: true, reasonKind: 'unreachable', reason: 'No node answered just now (iic-azl-n01 did not answer). The node being read is probably restarting.' }) }));
+  eq(stale.map(function (x) { return x.kind; }), ['source', 'source-info']);
+  eq(m.updateNotices(liveUpdate()), [], 'an old state without local says nothing');
+});
+
+test('liveNotes: the Update view carries the sources note; no note while the page is on the deployment', function () {
+  var s = doneState(clusterWinsUpdate(), { phase: 'update', activePhase: 'update' });
+  var notes = m.liveNotes(s);
+  eq(notes.filter(function (x) { return x.kind === 'source'; }).length, 1);
+  eq(/Read from the cluster itself/.test(notes.filter(function (x) { return x.kind === 'update'; })[0].text), true, 'the unverified wording only covers the Azure side');
+  var quiet = m.liveNotes(doneState(liveUpdate({ local: { enabled: false, read: false, reason: 'off' } })));
+  eq(quiet.filter(function (x) { return x.kind === 'source-off'; }).length, 0);
+});
+
+test('Update tile: the cluster’s answer wins over Azure’s, and the tip says Azure is behind', function () {
+  var t = tileOf(m.modeStates(doneState(clusterWinsUpdate())), 'update');
+  eq(t.status, 'run'); eq(t.line, 'Step 1 of 2');
+  eq(/Azure is behind the cluster by 17 minutes/.test(t.tip), true);
+});
+
+test('updatePanels: where the verdict comes from, the run, the machines, what happened, then what is offered', function () {
+  var p = m.updatePanels(clusterWinsUpdate({ updates: [{ name: 'SBE5.0.2609.1611', version: '5.0.2609.1611', packageType: 'SBE', state: 'HealthChecking', stateWord: 'Checking health', phase: 'preparing', level: 'run' }] }));
+  eq(p.map(function (x) { return x.title; }), ['Where this comes from', 'The update run on the cluster', 'Machines in the update (from the cluster)', 'What happened', 'Updates (from the cluster)', 'Readiness checks that failed: 2 informational']);
+  var src = p[0].rows;
+  eq(src[0].k, 'The cluster says'); eq(/^Checking update health · read on iic-azl-n01/.test(src[0].v), true);
+  eq(src[1].k, 'Azure says'); eq(src[1].v, 'Update available (UpdateAvailable)');
+  eq(src[2].k, 'Azure is behind'); eq(src[2].warn, true); eq(/^17 minutes/.test(src[2].v), true);
+  eq(p[0].kind, 'warn');
+  var run = p[1].rows.reduce(function (o, r) { o[r.k] = r.v; return o; }, {});
+  eq(run['Update'], 'SBE5.0.2609.1611 (SBE)'); eq(run['Steps'], '3 of 9 so far (more appear as the update goes on)'); eq(run['Now'], 'Finalize SBE preparation');
+  eq(typeof run['Running for'], 'string');
+  eq(run['SBE version'], '4.1.2609.5 to 5.0.2609.1611'); eq(run['Solution version'], '12.2610.1004.50 (unchanged)');
+  var nodes = p[2].rows;
+  eq(nodes.map(function (r) { return r.k; }), ['iic-azl-n01', 'iic-azl-n02', 'iic-azl-n03']);
+  eq(/^Paused: drained and being patched · Install CAU Updates · from /.test(nodes[1].v), true);
+  eq(p[2].kind, 'run');
+});
+
+test('updatePanels: a failed step is named with its node and the error text; the run says it stopped', function () {
+  var loc = localUpdate({ status: 'error', phase: 'failed', level: 'error', label: 'Update failed',
+    run: { id: 'run-1', update: 'SBE5.0.2609.1611', version: '5.0.2609.1611', packageType: 'SBE', state: 'Failed', status: 'error', started: '2026-11-09T05:03:34Z', lastUpdated: '2026-11-09T06:38:00Z', ended: '2026-11-09T06:38:34Z', durationSeconds: 5700, duration: '01:35:00' },
+    failed: { name: '[SBE Partner] Install CAU Updates iic-azl-n02', node: 'iic-azl-n02', error: 'Install failed on iic-azl-n02: the hardware update package returned exit code 1603.' } });
+  var rows = m.updateLocalPanels(clusterWinsUpdate({ local: loc }))[1].rows.reduce(function (o, r) { o[r.k] = r; return o; }, {});
+  eq(rows['Stopped'].v.length > 0, true); eq(rows['Duration'].v, '1h 35m 0s');
+  eq(rows['Failed step'].warn, true);
+  eq(rows['Failed step'].v, '[SBE Partner] Install CAU Updates iic-azl-n02 on iic-azl-n02: Install failed on iic-azl-n02: the hardware update package returned exit code 1603.');
+});
+
+test('updatePanels: with node-side reading off the extra panel says so and why; Azure’s list keeps its Azure title', function () {
+  var u = liveUpdate({ local: { enabled: false, read: false, reasonKind: 'off', reason: 'Node-side update reading is off. Sonar shows only what Azure reports.' }, sources: { winner: 'azure', agree: true, message: 'x' } });
+  var p = m.updatePanels(u);
+  eq(p[0].title, 'Where this comes from');
+  eq(p[0].rows[0].v, 'Node-side reading is off'); eq(p[0].rows[0].warn, true);
+  var titles = p.map(function (x) { return x.title; });
+  eq(titles.indexOf('The update run on the cluster'), -1);
+  eq(titles.indexOf('Updates Azure offers') >= 0, true);
+});
+
+test('updatePanels: Installed on the cluster while Azure still says Ready: success, and the version change is before to after', function () {
+  var loc = localUpdate({ status: 'success', phase: 'idle', level: 'ok', label: 'Update succeeded (12.2610.1004.50)', stateWord: 'Installed',
+    run: { id: 'run-1', update: 'SBE5.0.2609.1611', version: '5.0.2609.1611', packageType: 'SBE', state: 'Succeeded', status: 'success', started: '2026-11-09T05:03:34Z', lastUpdated: '2026-11-09T08:19:46Z', ended: '2026-11-09T08:19:53Z', durationSeconds: 11779, duration: '03:16:19' },
+    progress: { done: 5, total: 5, running: 0, current: '' },
+    versions: { current: { solution: '12.2610.1004.50', sbe: '5.0.2609.1611' }, before: { solution: '12.2610.1004.50', sbe: '4.1.2609.5', known: true }, after: { solution: '12.2610.1004.50', sbe: '5.0.2609.1611', known: true }, target: { solution: '', sbe: '5.0.2609.1611', packageType: 'SBE' } } });
+  var u = clusterWinsUpdate({ status: 'success', phase: 'idle', level: 'ok', label: 'Update succeeded (12.2610.1004.50)', local: loc, sources: behindSources(5) });
+  var rows = m.updateLocalPanels(u)[1].rows.reduce(function (o, r) { o[r.k] = r.v; return o; }, {});
+  eq(rows['SBE version'], '4.1.2609.5 to 5.0.2609.1611'); eq(rows['Solution version'], '12.2610.1004.50 (unchanged)');
+  eq(rows['Duration'], '3h 16m 19s'); eq(rows['Steps'], '5 of 5 finished');
+  eq(m.updateTile(u).status, 'ok'); eq(m.updateTile(u).line, 'Done');
+});
+
+test('versionChange: unchanged, changed, and not known before the run', function () {
+  eq(m.versionChange('4.1', '5.0', '4.1', true), '4.1 to 5.0');
+  eq(m.versionChange('5.0', '5.0', '5.0', true), '5.0 (unchanged)');
+  eq(m.versionChange('', '5.0', '5.0', false), '5.0');
+  eq(m.versionChange('4.1', '', '5.0', true), '4.1 to 5.0');
+  eq(m.versionChange('', '', '', false), '');
+});
+
+test('updateFacts: the reading source and the lag; Azure with no summary yet still shows the cluster’s reading', function () {
+  var f = m.updateFacts(clusterWinsUpdate());
+  eq(f.filter(function (x) { return x.k === 'Reading'; })[0].v, 'The cluster and Azure (cluster read on iic-azl-n01)');
+  eq(f.filter(function (x) { return x.k === 'Azure is behind'; })[0].v, '17 minutes');
+  var off = m.updateFacts(liveUpdate({ local: { enabled: false, read: false } }));
+  eq(off.filter(function (x) { return x.k === 'Reading'; })[0].v, 'Azure only'); eq(off.filter(function (x) { return x.k === 'Reading'; })[0].warn, true);
+  var noAzure = m.updateFacts({ summary: null, local: localUpdate() });
+  eq(noAzure.length, 1); eq(/^The cluster \(read on iic-azl-n01\); Azure has no update data yet/.test(noAzure[0].v), true);
+});
+
+test('summaryFor (Update): the machine cards show the cluster’s view of each machine: drained and patched, updated, waiting', function () {
+  var s = doneState(clusterWinsUpdate(), { phase: 'update', activePhase: 'update', nodes: [{ name: 'iic-azl-n01', arcStatus: 'Connected', seed: true }, { name: 'iic-azl-n02', arcStatus: 'Connected' }, { name: 'iic-azl-n03.example.test', arcStatus: 'Connected' }] });
+  var sm = m.summaryFor(s, 'update', { nodes: [{ name: 'iic-azl-n01', seed: true }, { name: 'iic-azl-n02' }, { name: 'iic-azl-n03.example.test' }] });
+  var by = {}; sm.cards.forEach(function (c) { by[c.name] = c; });
+  eq(by['iic-azl-n01'].state, 'Updated'); eq(by['iic-azl-n01'].progress, 100);
+  eq(by['iic-azl-n02'].state, 'Being patched'); eq(by['iic-azl-n02'].waits, 'Now: Install CAU Updates'); eq(by['iic-azl-n02'].kind, 'run');
+  eq(/Cluster node state: Paused/.test(by['iic-azl-n02'].tip), true);
+  eq(by['iic-azl-n03.example.test'].state, 'Waiting', 'a machine named with a domain still matches the cluster node by its short name');
+});
+
+test('cluster card (Update): Azure behind is a warning row; a failed step of the cluster is a failure line; reading off is a row', function () {
+  var c = m.clusterCard(doneState(clusterWinsUpdate()), 'update');
+  var rows = c.rows.reduce(function (o, r) { o[r.k] = r; return o; }, {});
+  eq(rows['Azure is behind'].v, '17 minutes'); eq(rows['Azure is behind'].warn, true);
+  var failed = m.clusterCard(doneState(clusterWinsUpdate({ status: 'error', phase: 'failed', level: 'error', label: 'Update failed', local: localUpdate({ failed: { name: 'Install CAU Updates', node: 'n2', error: 'exit code 1603' } }) })), 'update');
+  eq(failed.failures, ['Install CAU Updates: exit code 1603']);
+  var off = m.clusterCard(doneState(liveUpdate({ local: { enabled: false, read: false, reason: 'off' } })), 'update');
+  eq(off.rows.filter(function (r) { return r.k === 'Node-side reading'; })[0].v, 'Off: Azure only');
+});
+
+test('localNodeFor: exact name, then short name; nothing for an unknown machine', function () {
+  var loc = localUpdate();
+  eq(m.localNodeFor(loc, 'IIC-AZL-N02').name, 'iic-azl-n02');
+  eq(m.localNodeFor(loc, 'iic-azl-n03.example.test').name, 'iic-azl-n03');
+  eq(m.localNodeFor(loc, 'other'), null);
+  eq(m.localNodeFor(null, 'iic-azl-n02'), null);
+});
+
+test('Update view in the page: hostile text in the cluster’s step error, node note and message renders as text only', function () {
+  withDom(function (dom, h) {
+    var u = clusterWinsUpdate({ local: localUpdate({ nodeNote: HOSTILE[0], failed: { name: HOSTILE[1], node: 'iic-azl-n02', error: HOSTILE[0] }, reason: '' }) });
+    u.sources.message = HOSTILE[0];
+    h.app.config = { cluster: 'clus01', nodes: [{ name: 'iic-azl-n01', seed: true }] };
+    h.app.state = { cluster: 'clus01', phase: 'update', activePhase: 'update', monitor: 'Update', nodes: [{ name: 'iic-azl-n01', arcStatus: 'Connected' }], update: u };
+    h.renderSummary();
+    h.renderLiveNotes();
+    assertInert(dom.byId.summary, 'update summary with the cluster’s reading');
+    assertInert(dom.byId['live-notes'], 'update notes');
+    eq(textOf(dom.byId.summary).indexOf('Where this comes from') >= 0, true);
+    eq(textOf(dom.byId['live-notes']).indexOf(HOSTILE[0]) >= 0, true, 'the hostile text shows as text');
+    staticIcons(dom, 'update summary with the cluster’s reading');
+  });
+});
+
 process.stdout.write(JSON.stringify(cases));

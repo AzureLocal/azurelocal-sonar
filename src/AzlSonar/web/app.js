@@ -831,7 +831,8 @@
     else if (lv === 'error' && str(upd.status) === 'error') line = 'Failed';
     else if (lv === 'error' && !label) line = 'Failed';
     else line = label;
-    var tip = [label, isObj(upd.nextAction) ? str(upd.nextAction.text) : '', chk.text ? 'Readiness checks that failed: ' + chk.text + '.' : ''].filter(Boolean).join(' ');
+    var srcNote = updateNotices(upd).filter(function (x) { return x.kind === 'source'; })[0];
+    var tip = [label, isObj(upd.nextAction) ? str(upd.nextAction.text) : '', chk.text ? 'Readiness checks that failed: ' + chk.text + '.' : '', srcNote ? srcNote.text : ''].filter(Boolean).join(' ');
     return { status: status, line: line, tip: tip };
   }
 
@@ -847,7 +848,7 @@
   // The panels of the Update view: what Azure offers (with the next action), the readiness checks, the history of runs.
   function updatePanels(upd) {
     if (!isObj(upd)) return [];
-    var out = [], offers = arr(upd.updates).filter(isObj);
+    var out = updateLocalPanels(upd), offers = arr(upd.updates).filter(isObj);
     if (offers.length) {
       var rows = offers.slice(0, 6).map(updateOfferRow);
       if (offers.length > 6) rows.push({ k: 'More', v: (offers.length - 6) + ' more updates are listed by Azure' });
@@ -859,7 +860,7 @@
       }
       var worst = offers.map(function (u) { return UPDATE_TILE_STATUS[str(u.level)] || 'idle'; });
       var kind = worst.indexOf('err') >= 0 ? 'err' : worst.indexOf('warn') >= 0 ? 'warn' : worst.indexOf('run') >= 0 ? 'run' : 'idle';
-      out.push({ node: '', title: 'Updates Azure offers', kind: kind, rows: rows, until: '' });
+      out.push({ node: '', title: localOf(upd) && localOf(upd).read && sourcesOf(upd) && sourcesOf(upd).agree === false ? 'Updates (from the cluster)' : 'Updates Azure offers', kind: kind, rows: rows, until: '' });
     }
     var chk = updateChecks(upd);
     if (chk.failed) {
@@ -886,13 +887,138 @@
   // The facts line of the Update view.
   function updateFacts(upd) {
     var sum = isObj(upd) && isObj(upd.summary) ? upd.summary : null;
-    if (!sum) return [];
+    if (!sum) {
+      // Azure has no update data yet: the cluster's reading still shows.
+      var only = localOf(upd);
+      return only ? [{ k: 'Reading', v: only.enabled && only.read ? 'The cluster' + (str(only.node) ? ' (read on ' + str(only.node) + ')' : '') + '; Azure has no update data yet' : 'Azure only', warn: !(only.enabled && only.read) }] : [];
+    }
     var out = [], t = parseTime(sum.lastChecked), u = parseTime(sum.lastUpdated);
     if (str(sum.currentVersion)) out.push({ k: 'Current version', v: str(sum.currentVersion) });
     if (str(sum.currentSbeVersion)) out.push({ k: 'Current SBE', v: str(sum.currentSbeVersion) });
     if (!isNaN(t)) out.push({ k: 'Last checked', v: fmtDateTime(t) });
     out.push({ k: 'Last updated', v: isNaN(u) ? 'never: no update has run' : fmtDateTime(u) });
     if (str(sum.healthState) && str(sum.healthState).toLowerCase() !== 'success') out.push({ k: 'Update health', v: str(sum.healthState), warn: true });
+    var loc = localOf(upd);
+    if (loc) {
+      out.push({ k: 'Reading', v: loc.enabled && loc.read ? 'The cluster and Azure' + (str(loc.node) ? ' (cluster read on ' + str(loc.node) + ')' : '') : 'Azure only', warn: !(loc.enabled && loc.read) });
+      var lag = updateLag(upd);
+      if (lag !== null) out.push({ k: 'Azure is behind', v: lag < 1 ? 'less than a minute' : minutesText(lag), warn: true });
+    }
+    return out;
+  }
+
+  // ---- What the cluster itself says (update.local) and how it compares with Azure (update.sources).
+  //
+  // Azure's update status lags the cluster by many minutes, so the back end also reads the cluster's own update service on one
+  // node (read-only, as the deployment account). update.local is that reading; update.sources says who wins, and by how many
+  // minutes Azure is behind. Without an update account local.enabled is false and local.reason says why: Azure only.
+  var LOCAL_ROLE_WORD = { patching: 'Being patched', draining: 'Drained', restarting: 'Restarting', rejoining: 'Rejoining', done: 'Updated', failed: 'Failed', waiting: 'Waiting', up: 'Up', down: 'Down', unknown: '' };
+  var LOCAL_ROLE_KIND = { patching: 'run', draining: 'run', restarting: 'warn', rejoining: 'run', done: 'ok', failed: 'err', waiting: 'idle', up: 'idle', down: 'err', unknown: 'idle' };
+
+  function localOf(upd) { return isObj(upd) && isObj(upd.local) ? upd.local : null; }
+  function sourcesOf(upd) { return isObj(upd) && isObj(upd.sources) ? upd.sources : null; }
+  function clock(v) { var t = parseTime(v); return isNaN(t) ? '' : fmtDateTime(t); }
+  function minutesText(n) { return n === 1 ? '1 minute' : n + ' minutes'; }
+
+  // How many minutes Azure is behind the cluster, or null.
+  function updateLag(upd) {
+    var src = sourcesOf(upd);
+    if (!src || src.lagMinutes === null || src.lagMinutes === undefined || src.lagMinutes === '') return null;
+    var n = Number(src.lagMinutes);
+    return isNaN(n) ? null : n;
+  }
+
+  // The notes above the steps for the Update view: Azure behind the cluster, node-side reading off or failing, a node switch.
+  // Each is { kind: source | source-off | source-info, text }.
+  function updateNotices(upd) {
+    var out = [], loc = localOf(upd), src = sourcesOf(upd);
+    if (!loc) return out;
+    if (!loc.enabled) {
+      out.push({ kind: 'source-off', text: str(loc.reason) || 'Node-side update reading is off. Sonar shows only what Azure reports, which can be many minutes behind the cluster.' });
+      return out;
+    }
+    if (!loc.read) {
+      out.push({ kind: 'source-off', text: str(loc.reason) || 'The cluster was not read; this is what Azure reports.' });
+      return out;
+    }
+    if (src && str(src.message) && (src.agree === false || updateLag(upd) !== null)) out.push({ kind: 'source', text: str(src.message) });
+    if (loc.stale && str(loc.reason)) out.push({ kind: 'source-info', text: str(loc.reason) });
+    else if (str(loc.nodeNote)) out.push({ kind: 'source-info', text: str(loc.nodeNote) });
+    return out;
+  }
+
+  // The node a machine card belongs to in update.local.nodes (exact name, then case-insensitive, then the short name).
+  function localNodeFor(loc, name) {
+    if (!isObj(loc)) return null;
+    var list = arr(loc.nodes).filter(isObj), n = str(name).toLowerCase();
+    var short = function (v) { return str(v).toLowerCase().split('.')[0]; };
+    return list.filter(function (x) { return str(x.name).toLowerCase() === n; })[0] || list.filter(function (x) { return short(x.name) === short(name); })[0] || null;
+  }
+
+  // A version change as one line: "5.0.2609.1611" when it did not change, "4.1.2609.5 to 5.0.2609.1611" when it did.
+  function versionChange(before, after, current, known) {
+    var b = str(before), a = str(after), c = str(current);
+    if (b && a && b !== a) return b + ' to ' + a;
+    if (a) return a + (known ? ' (unchanged)' : '');
+    if (b) return b + (c && c !== b ? ' to ' + c : ' (unchanged)');
+    return c;
+  }
+
+  // Panels for what the cluster says: where the verdict comes from, the run, the machines, the events.
+  function updateLocalPanels(upd) {
+    var out = [], loc = localOf(upd), src = sourcesOf(upd);
+    if (!loc) return out;
+    var lag = updateLag(upd), srows = [];
+    if (loc.enabled && loc.read) {
+      var cl = isObj(src) && isObj(src.cluster) ? src.cluster : {};
+      srows.push({ k: 'The cluster says', v: [str(cl.label) || str(loc.label), str(loc.node) ? 'read on ' + str(loc.node) : '', clock(loc.readAt) ? 'at ' + clock(loc.readAt) : ''].filter(Boolean).join(' · ') });
+    } else {
+      srows.push({ k: 'The cluster', v: loc.enabled ? 'Not read: ' + (str(loc.reason) || 'no answer') : 'Node-side reading is off', warn: true });
+    }
+    if (isObj(src) && isObj(src.azure)) srows.push({ k: 'Azure says', v: (str(src.azure.label) || str(src.azure.phase)) + (str(src.azure.state) ? ' (' + str(src.azure.state) + ')' : '') });
+    if (lag !== null) srows.push({ k: 'Azure is behind', v: lag < 1 ? 'less than a minute' : minutesText(lag) + (clock(src.lagSince) ? ' (since ' + clock(src.lagSince) + (src.lagBasis === 'observed' ? ', as Sonar saw it' : '') + ')' : ''), warn: true });
+    if (loc.read && str(loc.nodeNote)) srows.push({ k: 'Node read', v: str(loc.nodeNote) });
+    if (!loc.enabled && str(loc.reason)) srows.push({ k: 'Why', v: str(loc.reason) });
+    out.push({ node: '', title: 'Where this comes from', kind: lag !== null ? 'warn' : (loc.enabled && loc.read ? 'idle' : 'warn'), rows: srows, until: '' });
+    if (!loc.read) return out;
+
+    var run = isObj(loc.run) ? loc.run : null, prog = isObj(loc.progress) ? loc.progress : {}, rrows = [];
+    if (run) {
+      rrows.push({ k: 'Update', v: [str(run.update), str(run.version) && str(run.update).indexOf(str(run.version)) < 0 ? str(run.version) : ''].filter(Boolean).join(' ') + (str(run.packageType) ? ' (' + str(run.packageType) + ')' : '') });
+      rrows.push({ k: 'Started', v: clock(run.started) || 'not known' });
+      var finished = str(run.status) === 'success' || str(run.status) === 'error';
+      if (finished) rrows.push({ k: str(run.status) === 'success' ? 'Finished' : 'Stopped', v: clock(run.ended) || clock(run.lastUpdated) || 'not known' });
+      if (run.durationSeconds !== null && run.durationSeconds !== undefined && Number(run.durationSeconds) >= 0) rrows.push({ k: finished ? 'Duration' : 'Running for', v: fmtDuration(Number(run.durationSeconds)) });
+      if (Number(prog.total)) rrows.push({ k: 'Steps', v: (Number(prog.done) || 0) + ' of ' + Number(prog.total) + (str(run.status) === 'running' ? ' so far (more appear as the update goes on)' : ' finished') });
+      if (str(prog.current) && str(run.status) === 'running') rrows.push({ k: 'Now', v: str(prog.current) });
+      if (isObj(loc.failed)) rrows.push({ k: 'Failed step', v: str(loc.failed.name) + (str(loc.failed.node) ? ' on ' + str(loc.failed.node) : '') + (str(loc.failed.error) ? ': ' + firstLine(loc.failed.error, 400) : ''), warn: true });
+    }
+    var ver = isObj(loc.versions) ? loc.versions : null;
+    if (ver) {
+      var cur = isObj(ver.current) ? ver.current : {}, bef = isObj(ver.before) ? ver.before : {}, aft = isObj(ver.after) ? ver.after : {}, tgt = isObj(ver.target) ? ver.target : {};
+      var sol = versionChange(bef.solution, aft.solution || tgt.solution, cur.solution, bef.known === true);
+      var sbe = versionChange(bef.sbe, aft.sbe || tgt.sbe, cur.sbe, bef.known === true);
+      if (sol) rrows.push({ k: 'Solution version', v: sol });
+      if (sbe) rrows.push({ k: 'SBE version', v: sbe });
+      if (run && bef.known !== true && str(run.status) !== 'notstarted') rrows.push({ k: 'Before the run', v: 'Not seen: Sonar was not watching when this run started' });
+    }
+    if (rrows.length) out.push({ node: '', title: 'The update run on the cluster', kind: run && str(run.status) === 'error' ? 'err' : (run && str(run.status) === 'running' ? 'run' : 'idle'), rows: rrows, until: '' });
+
+    var nodes = arr(loc.nodes).filter(isObj);
+    if (nodes.length) {
+      var nrows = nodes.map(function (n) {
+        var parts = [str(n.word) || LOCAL_ROLE_WORD[str(n.role)] || str(n.state)];
+        if (str(n.step)) parts.push(str(n.step));
+        if (clock(n.started)) parts.push('from ' + clock(n.started) + (clock(n.ended) ? ' to ' + clock(n.ended) : ''));
+        return { k: str(n.name), v: parts.filter(Boolean).join(' · ') };
+      });
+      var worst = nodes.map(function (n) { return LOCAL_ROLE_KIND[str(n.role)] || 'idle'; });
+      out.push({ node: '', title: 'Machines in the update (from the cluster)', kind: worst.indexOf('err') >= 0 ? 'err' : worst.indexOf('warn') >= 0 ? 'warn' : worst.indexOf('run') >= 0 ? 'run' : 'idle', rows: nrows, until: '' });
+    }
+    var events = arr(loc.events).filter(isObj);
+    if (events.length) {
+      out.push({ node: '', title: 'What happened', kind: 'idle', rows: events.slice(-8).map(function (e) { return { k: clock(e.at) || str(e.kind), v: str(e.text) }; }), until: '' });
+    }
     return out;
   }
 
@@ -962,6 +1088,11 @@
       row('Current version', str(sum.currentVersion));
       row('Target version', str(act.version) || str(offered.version));
       row('Last updated', str(sum.lastUpdated) ? str(sum.lastUpdated) : (isObj(up.summary) ? 'never: no update has run' : ''));
+      var cLag = updateLag(up);
+      if (cLag !== null) row('Azure is behind', cLag < 1 ? 'less than a minute' : minutesText(cLag), true);
+      var cLoc = localOf(up);
+      if (cLoc && !cLoc.read) row('Node-side reading', cLoc.enabled ? 'Not read: ' + firstLine(cLoc.reason, 120) : 'Off: Azure only', true);
+      if (cLoc && cLoc.read && isObj(cLoc.failed) && str(cLoc.failed.error)) failures.push(str(cLoc.failed.name) + ': ' + firstLine(cLoc.failed.error, 160));
       if (str(sum.healthState) && str(sum.healthState).toLowerCase() !== 'success') row('Update health', str(sum.healthState), true);
       // Critical and Error checks are failures (red); Warning checks are amber rows; Informational checks are only listed in the Update view.
       chk.items.filter(function (x) { return x.key === 'critical' || x.key === 'error'; }).slice(0, 3).forEach(function (x) { failures.push(x.title); });
@@ -1692,6 +1823,16 @@
       card.state = me.status === 'ok' ? verb[0] : me.status === 'run' ? verb[1] : me.status === 'err' ? 'Stopped' : verb[2];
       card.waits = me.status === 'run' && cur ? 'Now: ' + cur : (me.status === 'idle' ? 'Waits for ' + waitsFor : '');
       if (me.status === 'run') card.progress = pct;
+      var ln = me.id === 'update' ? localNodeFor(localOf(s.update), m.name) : null;
+      if (ln) {
+        // The cluster knows which machine is drained, patched or restarting; Azure does not say.
+        var role = str(ln.role);
+        card.state = LOCAL_ROLE_WORD[role] || card.state;
+        card.kind = LOCAL_ROLE_KIND[role] || card.kind;
+        card.waits = str(ln.step) ? 'Now: ' + str(ln.step) : (role === 'done' ? 'Finished its steps' : (role === 'waiting' ? 'Waits its turn' : card.waits));
+        card.tip = [str(ln.word), 'Cluster node state: ' + str(ln.state), clock(ln.started) ? 'From ' + clock(ln.started) + (clock(ln.ended) ? ' to ' + clock(ln.ended) : '') : ''].filter(Boolean).join('. ');
+        card.progress = role === 'done' ? 100 : (role === 'patching' || role === 'draining' || role === 'restarting' ? card.progress : null);
+      }
       return card;
     });
     if (me.id === 'validate' || me.id === 'deploy') {
@@ -1887,9 +2028,13 @@
       out.push({ kind: 'checker', text: str(ec.label) + (ec.source ? ' (' + (ec.source === 'node log' ? 'from the node log' : str(ec.source)) + ')' : '') });
     }
     var up = isObj(s.update) ? s.update : null;
+    var fromCluster = !!(up && localOf(up) && localOf(up).enabled && localOf(up).read);
     if (up && ['installing', 'preparing', 'failed', 'attention'].indexOf(str(up.phase)) >= 0) {
       var what = up.active && up.active.version ? ' ' + str(up.active.version) : '';
-      out.push({ kind: 'update', text: 'Update' + what + ': ' + str(up.phase) + '. This track is built from the Microsoft Learn REST reference and is unverified against a live run.' });
+      out.push({ kind: 'update', text: 'Update' + what + ': ' + str(up.phase) + '. ' + (fromCluster ? 'Read from the cluster itself. The Azure side of this track is built from the Microsoft Learn REST reference and is unverified against a live run.' : 'This track is built from the Microsoft Learn REST reference and is unverified against a live run.') });
+    }
+    if (up && (normPhase(s.phase) === 'update' || normPhase(s.activePhase) === 'update' || ['installing', 'preparing', 'failed', 'attention'].indexOf(str(up.phase)) >= 0)) {
+      updateNotices(up).forEach(function (n) { out.push(n); });
     }
     if (normPhase(s.phase) === 'provisioning' && ztpComplete(s)) {
       // The guide's URL comes from the back end (provisioning.nextStep.guide): the web files carry no URL.
@@ -2576,7 +2721,7 @@
       createLogStore: createLogStore, logStoreReset: logStoreReset, logStoreIngest: logStoreIngest,
       logStoreStreamOpened: logStoreStreamOpened, logStoreStreamClosed: logStoreStreamClosed,
       stepWindowOf: stepWindowOf, windowSignature: windowSignature, lineInWindow: lineInWindow, stepFilterChange: stepFilterChange,
-      safeLink: safeLink, updateLevel: updateLevel, updateChecks: updateChecks, updateTile: updateTile, updatePanels: updatePanels, updateFacts: updateFacts, updateActive: updateActive, tailerView: tailerView, updOf: updOf, __dom: function () {
+      safeLink: safeLink, updateLevel: updateLevel, updateChecks: updateChecks, updateTile: updateTile, updatePanels: updatePanels, updateFacts: updateFacts, updateActive: updateActive, tailerView: tailerView, updOf: updOf, updateNotices: updateNotices, updateLag: updateLag, updateLocalPanels: updateLocalPanels, localNodeFor: localNodeFor, versionChange: versionChange, __dom: function () {
         return { app: app, el: el, renderSummary: renderSummary, renderDetails: renderDetails, renderHelp: renderHelp, buildLine: buildLine,
           renderLiveNotes: renderLiveNotes, renderChips: renderChips, renderLogAccessWindow: renderLogAccessWindow, renderTree: renderTree, buildItem: buildItem };
       },

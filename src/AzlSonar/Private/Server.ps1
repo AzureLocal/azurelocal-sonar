@@ -67,6 +67,7 @@ function Initialize-AzlSonarSharedState {
             LocalUserName = ''   # the local log account's user name (-Credential or the prompt), for the account shown per node
             OsConfigInfo  = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the OS configuration event file: events read and the newest event time (/api/details)
             DiscoveryCache = [hashtable]::Synchronized(@{})   # hardware discovery files already read, by path (Get-AzlSonarDiscoveryState)
+            UpdateLocal   = (New-AzlSonarUpdateContext)   # the update account (a SecureString inside), the last good read of the cluster's update service and its breaker (NodeUpdate.ps1)
             ConfigInfo    = [hashtable]::Synchronized(@{ ReadAt = $null; CheckedAt = $null; ChangedAt = $null; Note = $null })   # when the config source was read, checked and last changed (/api/details)
         })
 }
@@ -328,10 +329,47 @@ function Get-AzlSonarLogsJson {
         ',"tailer":' + $Shared.TailerJson + ',"files":' + $files + ',"lines":' + $linesJson + '}'
 }
 
+function Get-AzlSonarExportUpdateJson {
+    <#
+    .SYNOPSIS
+        The "update" section of the /api/export bundle: what the cluster itself said about the update, and how it compared with Azure.
+    .DESCRIPTION
+        { sources, local, history, events } from the latest state's update object, or null when the state has no update object.
+        local is the latest reading without its step tree (the tree is in "state" and in every snapshot of "timeline"), so the
+        section stays small. history is the runs the cluster listed; events are the started, finished, failed and node events.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowNull()][string]$StateJson)
+
+    if ([string]::IsNullOrWhiteSpace($StateJson) -or $StateJson -notmatch '"sources":') { return 'null' }
+    try {
+        $state = [System.Text.Json.Nodes.JsonNode]::Parse($StateJson)
+        if ($state -isnot [System.Text.Json.Nodes.JsonObject]) { return 'null' }
+        $update = $state['update']
+        if ($update -isnot [System.Text.Json.Nodes.JsonObject]) { return 'null' }
+        $local = $update['local']
+        $sources = $update['sources']
+        if ($local -isnot [System.Text.Json.Nodes.JsonObject]) { return 'null' }
+        $history = $local['history']
+        $events = $local['events']
+        $copy = [System.Text.Json.Nodes.JsonNode]::Parse($local.ToJsonString())
+        $null = $copy.AsObject().Remove('tree')
+        $null = $copy.AsObject().Remove('history')
+        $null = $copy.AsObject().Remove('events')
+        return '{"sources":' + $(if ($null -ne $sources) { $sources.ToJsonString() } else { 'null' }) +
+            ',"local":' + $copy.ToJsonString() +
+            ',"history":' + $(if ($null -ne $history) { $history.ToJsonString() } else { '[]' }) +
+            ',"events":' + $(if ($null -ne $events) { $events.ToJsonString() } else { '[]' }) + '}'
+    }
+    catch { return 'null' }
+}
+
 function Get-AzlSonarExportJson {
     <#
     .SYNOPSIS
-        The /api/export bundle: config (no secrets), the state timeline, the latest state and the log ring buffer.
+        The /api/export bundle: config (no secrets), the state timeline, the latest state, the update section (the cluster's own
+        reading against Azure's) and the log ring buffer.
     .DESCRIPTION
         The timeline is change-only and capped: a snapshot is kept only when the state changed (polledAt and running
         durations ignored), at most TimelineMax (5000); older snapshots are dropped first. The latest state is always
@@ -378,6 +416,7 @@ function Get-AzlSonarExportJson {
         ',"config":' + $Server.ConfigJson +
         ',"guidance":' + $Server.GuidanceJson +
         ',"state":' + $stateJson +
+        ',"update":' + (Get-AzlSonarExportUpdateJson -StateJson $stateJson) +
         ',"timeline":[' + ($timeline -join ',') + ']' +
         ',"logs":' + (Get-AzlSonarLogsJson -Shared $shared -Since 0 -NoLimit) + '}'
 }
@@ -917,6 +956,9 @@ function Start-AzlSonarServer {
         Local port. Default 8642.
     .PARAMETER Credential
         Account that reads the logs on the seed node. Overrides credential.source.
+    .PARAMETER UpdateCredential
+        The deployment account that reads the cluster's own update service on one node (Get-SolutionUpdate and the other Get- cmdlets, read-only).
+        Overrides updateAccount.source. Without it and without updateAccount in the config, node-side update reading is off and the Update tab says so.
     .PARAMETER Record
         Append everything the page is sent to this recording file (JSON Lines). Overrides recordPath in the config.
     .PARAMETER Speed
@@ -966,6 +1008,10 @@ function Start-AzlSonarServer {
         [Parameter(ParameterSetName = 'Live')]
         [AllowNull()]
         [pscredential]$Credential,
+
+        [Parameter(ParameterSetName = 'Live')]
+        [AllowNull()]
+        [pscredential]$UpdateCredential,
 
         [Parameter(ParameterSetName = 'Live')]
         [string]$Record,
@@ -1043,6 +1089,11 @@ function Start-AzlSonarServer {
         # The log account's password is masked by a fingerprint: no plaintext copy of it is kept in Shared.
         if ($logCredential) { Add-AzlSonarRedaction -Shared $shared -Secret $logCredential.Password }
         if ($logCredential) { $shared.LocalUserName = $logCredential.UserName }
+        # The update account (the deployment account) reads the cluster's own update service; its password is masked like the log account's.
+        if ($PSBoundParameters.ContainsKey('UpdateCredential') -and $null -ne $UpdateCredential -and $UpdateCredential -ne [pscredential]::Empty) {
+            $shared.UpdateLocal['ParameterCredential'] = $UpdateCredential
+            Add-AzlSonarRedaction -Shared $shared -Secret $UpdateCredential.Password
+        }
         $initial = Get-AzlSonarInitialState -Config $config
         $shared.State = $initial
         $shared.StateJson = ConvertTo-AzlSonarJson $initial
@@ -1073,6 +1124,10 @@ function Start-AzlSonarServer {
             $workerSpecs.Add(@{ Name = 'Recorder'; Command = 'Invoke-AzlSonarRecorderLoop'; Arguments = @{ Shared = $shared; Path = $recordPath; SessionJson = $sessionJson; Config = $config; Publishable = [bool]$Publishable; ExtraTerm = @($ExtraTerm) } })
         }
         $workerSpecs.Add(@{ Name = 'Poller'; Command = 'Invoke-AzlSonarPollerLoop'; Arguments = @{ Shared = $shared; Config = $config } })
+        if ($plan.azure -and ([string](Get-AzlSonarMember $config 'updateTrack' 'auto')) -ne 'off') {
+            # Reads the cluster's own update service on one node (read-only, as the update account) apart from the Azure poll; it reads only when the poller asks for the update track.
+            $workerSpecs.Add(@{ Name = 'UpdateReader'; Command = 'Invoke-AzlSonarUpdateReaderLoop'; Arguments = @{ Shared = $shared; Config = $config } })
+        }
         if ($plan.tailer) { $workerSpecs.Add(@{ Name = 'Tailer'; Command = 'Invoke-AzlSonarTailerLoop'; Arguments = @{ Shared = $shared; Config = $config; Credential = $logCredential } }) }
         if ($config.ztpEventsPath -and $plan.ztpEvents) {
             # azurelocal-ztp event file (JSON Lines): provisioning states of the machines, shown in the log pane.

@@ -45,6 +45,10 @@
     Do not open the browser.
 .PARAMETER Credential
     Account that reads the deployment logs on the seed node. Overrides credential.source in the config.
+.PARAMETER UpdateCredential
+    The deployment account (a domain user) that reads the cluster's own update service on one node, read-only. It is not the
+    account that reads the logs. Overrides updateAccount.source in the config. Without it and without updateAccount, Sonar shows
+    only what Azure reports for updates and the Update tab says that node-side reading is off.
 .PARAMETER Record
     Append the run to this recording file (JSON Lines; created if missing, appended to after a restart). Overrides
     recordPath in the config.
@@ -117,6 +121,9 @@ param(
     [pscredential]$Credential,
 
     [Parameter(ParameterSetName = 'Live')]
+    [pscredential]$UpdateCredential,
+
+    [Parameter(ParameterSetName = 'Live')]
     [string]$Record,
 
     [Parameter(ParameterSetName = 'Live')]
@@ -170,6 +177,7 @@ else {
     if ($PSBoundParameters.ContainsKey('PollSeconds')) { $serverParameters.PollSeconds = $PollSeconds }
     if ($PSBoundParameters.ContainsKey('Monitor')) { $serverParameters.Monitor = $Monitor }
     if ($PSBoundParameters.ContainsKey('Credential')) { $serverParameters.Credential = $Credential }
+    if ($PSBoundParameters.ContainsKey('UpdateCredential')) { $serverParameters.UpdateCredential = $UpdateCredential }
     if ($PSBoundParameters.ContainsKey('Record')) { $serverParameters.Record = $Record }
     if ($Publishable) { $serverParameters.Publishable = $true }
     if ($PSBoundParameters.ContainsKey('ExtraTerm')) { $serverParameters.ExtraTerm = $ExtraTerm }

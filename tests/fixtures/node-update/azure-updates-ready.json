@@ -1,0 +1,17 @@
+{
+  "value": [
+    {
+      "properties": {
+        "state": "Ready",
+        "version": "5.0.2609.1611",
+        "displayName": "SBE_Example_16G-Intel_5.0.2609.1611",
+        "description": "Premier SBE for Example 16G AX Servers",
+        "packageType": "SBE",
+        "publisher": "Example",
+        "rebootRequired": "Unknown",
+        "availabilityType": "Online"
+      },
+      "name": "SBE5.0.2609.1611"
+    }
+  ]
+}

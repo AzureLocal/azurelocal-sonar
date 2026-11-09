@@ -1,0 +1,11 @@
+{
+  "computer": "iic-azl-n01",
+  "module": false,
+  "updates": [],
+  "runs": [],
+  "environment": null,
+  "clusterNodes": [],
+  "errors": [
+    "Get-SolutionUpdate is not available on this node (the Azure Local update module did not load)."
+  ]
+}

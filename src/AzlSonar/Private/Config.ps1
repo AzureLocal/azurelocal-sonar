@@ -170,6 +170,9 @@ function Test-AzlSonarConfig {
         }
     }
 
+    # updateAccount: the deployment account that reads the cluster's own update service on one node; names only (NodeUpdate.ps1).
+    foreach ($updateProblem in @(Get-AzlSonarUpdateAccountProblem -Account (Get-AzlSonarMember $Config 'updateAccount'))) { $problems.Add([string]$updateProblem) }
+
     $nodes = ConvertTo-AzlSonarArray (Get-AzlSonarMember $Config 'nodes')
     if ($nodes.Count -eq 0) {
         $problems.Add('nodes must list at least one node.')
@@ -439,6 +442,9 @@ function Read-AzlSonarConfig {
         }
     }
 
+    # updateAccount: names only; configured is false when the section is absent (node-side update reading is then off).
+    $updateAccountNormalised = ConvertTo-AzlSonarUpdateAccountSetting -Account (Get-AzlSonarMember $raw 'updateAccount')
+
     # osConfigEventsPath: the OS configuration event file; relative to the config file's folder.
     $osConfigEventsPath = [string](Get-AzlSonarMember $raw 'osConfigEventsPath' '')
     if ($osConfigEventsPath -and -not [System.IO.Path]::IsPathRooted($osConfigEventsPath) -and $baseDirectory) {
@@ -504,6 +510,7 @@ function Read-AzlSonarConfig {
         verificationEventsPath = $verificationEventsPath
         discoveryPath  = $discoveryPath
         logAccounts    = $logAccountsNormalised
+        updateAccount  = $updateAccountNormalised
         sourcePath     = $source
         # Where the settings came from: the master infrastructure.yml, a config file, or a JSON string (tests).
         sourceKind     = $sourceKind

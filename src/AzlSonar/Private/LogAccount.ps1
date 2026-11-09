@@ -6,8 +6,8 @@ Set-StrictMode -Version Latest
 # identity.local_admin from the master file, or the account given with -Credential or the prompt. After both events the
 # domain account the operator supplies is used for that node: NETBIOS\user from identity.active_directory (netbios_name and
 # domain_join_account.username), its password read from the Key Vault reference identity.active_directory.domain_join_account.password
-# (keyvault://<vault>/<secret>[/<version>]). Sonar never uses the LCM user (identity.active_directory.lcm_user), for this or
-# for anything else: that account belongs to the deployment.
+# (keyvault://<vault>/<secret>[/<version>]). Sonar never reads the LCM user (identity.active_directory.lcm_user), for this or
+# for the logs: that account belongs to the deployment. (The optional update account, which the operator supplies and which only reads the
 #
 # The domain account is a service account that other things depend on, so Sonar guards it:
 #  - ONE circuit breaker for the account, shared by every node, decided under the lock. The first use of the account (and

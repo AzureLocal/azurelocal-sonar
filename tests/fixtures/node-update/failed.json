@@ -1,0 +1,249 @@
+{
+  "computer": "iic-azl-n01",
+  "module": true,
+  "updates": [
+    {
+      "id": "redmond/SBE5.0.2609.1611",
+      "displayName": "SBE_Example_16G-Intel_5.0.2609.1611",
+      "version": "5.0.2609.1611",
+      "sbeVersion": "5.0.2609.1611",
+      "state": "InstallationFailed",
+      "packageType": "SBE",
+      "publisher": "Example",
+      "description": "Premier SBE for Example 16G AX Servers",
+      "rebootRequired": "Unknown",
+      "healthState": "Success",
+      "installedDate": "",
+      "availabilityType": "Online",
+      "progressPercentage": 0,
+      "notifyMessage": ""
+    }
+  ],
+  "runs": [
+    {
+      "id": "redmond/SBE5.0.2609.1611/b15c4b7f-0000-4000-8000-000000000001",
+      "updateId": "redmond/SBE5.0.2609.1611",
+      "state": "Failed",
+      "type": "Install",
+      "started": "2026-11-09T05:03:34Z",
+      "lastUpdated": "2026-11-09T06:38:34Z",
+      "durationSeconds": 5700,
+      "progress": {
+        "name": "Unnamed step",
+        "description": "Update Azure Stack HCI with Solution Builder Extension package",
+        "status": "Error",
+        "start": "2026-11-09T05:03:34Z",
+        "end": "2026-11-09T06:38:34Z",
+        "error": "",
+        "steps": [
+          {
+            "name": "SBE Package Update",
+            "description": "",
+            "status": "Error",
+            "start": "2026-11-09T05:08:34Z",
+            "end": "2026-11-09T06:38:34Z",
+            "error": "",
+            "steps": [
+              {
+                "name": "Perform CAU hardware update run via SBE",
+                "description": "",
+                "status": "Error",
+                "start": "2026-11-09T05:13:34Z",
+                "end": "2026-11-09T06:38:34Z",
+                "error": "",
+                "steps": [
+                  {
+                    "name": "Perform SBE CAU run if needed",
+                    "description": "",
+                    "status": "Error",
+                    "start": "2026-11-09T05:17:34Z",
+                    "end": "2026-11-09T06:38:34Z",
+                    "error": "",
+                    "steps": [
+                      {
+                        "name": "Wait for SBE CAU run to complete",
+                        "description": "",
+                        "status": "Error",
+                        "start": "2026-11-09T05:18:34Z",
+                        "end": "2026-11-09T06:38:34Z",
+                        "error": "",
+                        "steps": [
+                          {
+                            "name": "Track CAU run stages",
+                            "description": "",
+                            "status": "Error",
+                            "start": "2026-11-09T05:18:34Z",
+                            "end": "2026-11-09T06:38:34Z",
+                            "error": "",
+                            "steps": [
+                              {
+                                "name": "[SBE Partner] Wait for CAU Updates iic-azl-n01",
+                                "description": "Wait for SBE Partner update to Wait for CAU Updates / node:iic-azl-n01",
+                                "status": "Success",
+                                "start": "2026-11-09T05:18:34Z",
+                                "end": "2026-11-09T05:18:34Z",
+                                "error": "",
+                                "steps": [
+                                  {
+                                    "name": "Track individual CAU step",
+                                    "description": "",
+                                    "status": "Success",
+                                    "start": "2026-11-09T05:18:34Z",
+                                    "end": "2026-11-09T05:18:34Z",
+                                    "error": "",
+                                    "steps": []
+                                  }
+                                ]
+                              },
+                              {
+                                "name": "[SBE Partner] Install CAU Updates iic-azl-n01",
+                                "description": "Wait for SBE Partner update to Install CAU Updates / node:iic-azl-n01",
+                                "status": "Success",
+                                "start": "2026-11-09T05:19:34Z",
+                                "end": "2026-11-09T06:13:34Z",
+                                "error": "",
+                                "steps": [
+                                  {
+                                    "name": "Track individual CAU step",
+                                    "description": "",
+                                    "status": "Success",
+                                    "start": "2026-11-09T05:19:34Z",
+                                    "end": "2026-11-09T06:13:34Z",
+                                    "error": "",
+                                    "steps": []
+                                  }
+                                ]
+                              },
+                              {
+                                "name": "[SBE Partner] Run PostUpdateScript iic-azl-n01",
+                                "description": "Wait for SBE Partner update to Run PostUpdateScript / node:iic-azl-n01",
+                                "status": "Success",
+                                "start": "2026-11-09T06:13:34Z",
+                                "end": "2026-11-09T06:18:34Z",
+                                "error": "",
+                                "steps": [
+                                  {
+                                    "name": "Track individual CAU step",
+                                    "description": "",
+                                    "status": "Success",
+                                    "start": "2026-11-09T06:13:34Z",
+                                    "end": "2026-11-09T06:18:34Z",
+                                    "error": "",
+                                    "steps": []
+                                  }
+                                ]
+                              },
+                              {
+                                "name": "[SBE Partner] Wait for CAU Updates iic-azl-n02",
+                                "description": "Wait for SBE Partner update to Wait for CAU Updates / node:iic-azl-n02",
+                                "status": "Success",
+                                "start": "2026-11-09T06:18:34Z",
+                                "end": "2026-11-09T06:19:34Z",
+                                "error": "",
+                                "steps": [
+                                  {
+                                    "name": "Track individual CAU step",
+                                    "description": "",
+                                    "status": "Success",
+                                    "start": "2026-11-09T06:18:34Z",
+                                    "end": "2026-11-09T06:19:34Z",
+                                    "error": "",
+                                    "steps": []
+                                  }
+                                ]
+                              },
+                              {
+                                "name": "[SBE Partner] Install CAU Updates iic-azl-n02",
+                                "description": "Wait for SBE Partner update to Install CAU Updates / node:iic-azl-n02",
+                                "status": "Error",
+                                "start": "2026-11-09T06:20:34Z",
+                                "end": "2026-11-09T06:38:34Z",
+                                "error": "Install failed on iic-azl-n02: the hardware update package returned exit code 1603.",
+                                "steps": [
+                                  {
+                                    "name": "Track individual CAU step",
+                                    "description": "",
+                                    "status": "Error",
+                                    "start": "2026-11-09T06:20:34Z",
+                                    "end": "2026-11-09T06:38:34Z",
+                                    "error": "Install failed on iic-azl-n02: the hardware update package returned exit code 1603.",
+                                    "steps": []
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "environment": {
+    "state": "UpdateFailed",
+    "healthState": "Success",
+    "currentVersion": "12.2610.1004.50",
+    "currentSbeVersion": "4.1.2609.5",
+    "lastUpdated": "",
+    "lastChecked": "2026-11-09T04:43:34Z",
+    "healthCheckDate": "2026-11-09T04:43:34Z",
+    "hardwareModel": "AX-760",
+    "sbeFamily": "16G-Intel",
+    "packageVersions": [
+      {
+        "type": "Solution",
+        "version": "12.2610.1004.50",
+        "lastUpdated": ""
+      },
+      {
+        "type": "SBE",
+        "version": "4.1.2609.5",
+        "lastUpdated": ""
+      }
+    ],
+    "healthCheckResult": [
+      {
+        "title": "The machine proxy on each failover cluster node should be set to a local proxy server",
+        "status": "FAILURE",
+        "severity": "INFORMATIONAL",
+        "description": "Validating cluster setup for update.",
+        "remediation": "https://learn.microsoft.com/windows-server/failover-clustering/cluster-aware-updating-requirements"
+      },
+      {
+        "title": "The CAU clustered role should be installed on the failover cluster to enable self-updating mode",
+        "status": "FAILURE",
+        "severity": "INFORMATIONAL",
+        "description": "Validating cluster setup for update.",
+        "remediation": "https://learn.microsoft.com/windows-server/failover-clustering/cluster-aware-updating-requirements"
+      },
+      {
+        "title": "Storage Subsystems Check",
+        "status": "SUCCESS",
+        "severity": "CRITICAL",
+        "description": "",
+        "remediation": ""
+      }
+    ]
+  },
+  "clusterNodes": [
+    {
+      "name": "iic-azl-n01",
+      "state": "Up"
+    },
+    {
+      "name": "iic-azl-n02",
+      "state": "Up"
+    },
+    {
+      "name": "iic-azl-n03",
+      "state": "Up"
+    }
+  ],
+  "errors": []
+}

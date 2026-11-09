@@ -1,0 +1,12 @@
+{
+  "properties": {
+    "state": "UpdateAvailable",
+    "healthState": "Success",
+    "currentVersion": "12.2610.1004.50",
+    "currentSbeVersion": "4.1.2609.5",
+    "lastChecked": "2026-11-09T04:43:34Z",
+    "lastUpdated": null,
+    "healthCheckResult": []
+  },
+  "name": "default"
+}

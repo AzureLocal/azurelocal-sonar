@@ -262,6 +262,8 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
         $e.export.server | Should -Be $script:Server.Shared.ServerId
         $e.config.cluster | Should -Be 'clus01'
         $e.state.phase | Should -Be 'validation'
+        $e.PSObject.Properties.Name | Should -Contain 'update'
+        $e.update | Should -BeNullOrEmpty -Because 'no update reading in this state'
         @($e.timeline).Count | Should -Be 1
         @($e.logs.lines).Count | Should -Be 3
     }

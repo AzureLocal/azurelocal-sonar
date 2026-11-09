@@ -293,8 +293,8 @@ function Get-AzlSonarUpdateStateInfo {
     $raw = [string]$State
     $info = [ordered]@{ raw = $raw; kind = 'unknown'; phase = 'idle'; level = 'neutral'; word = $(if ($raw) { $raw } else { 'Unknown' }); nextAction = $null }
     switch -Regex ($raw) {
-        '^Installing$' { $info.kind = 'running'; $info.phase = 'installing'; $info.level = 'run'; $info.word = 'Installing' }
-        '^Preparing$' { $info.kind = 'running'; $info.phase = 'preparing'; $info.level = 'run'; $info.word = 'Preparing' }
+        '^(Installing|InstallationInProgress)$' { $info.kind = 'running'; $info.phase = 'installing'; $info.level = 'run'; $info.word = 'Installing' }
+        '^(Preparing|PreparationInProgress)$' { $info.kind = 'running'; $info.phase = 'preparing'; $info.level = 'run'; $info.word = 'Preparing' }
         '^Downloading$' { $info.kind = 'running'; $info.phase = 'preparing'; $info.level = 'run'; $info.word = 'Downloading' }
         '^HealthChecking$' { $info.kind = 'running'; $info.phase = 'preparing'; $info.level = 'run'; $info.word = 'Checking health' }
         '^ScanInProgress$' { $info.kind = 'running'; $info.phase = 'preparing'; $info.level = 'run'; $info.word = 'Scanning' }
@@ -427,11 +427,12 @@ function Get-AzlSonarUpdateRunList {
     return @($list | Sort-Object -Property started -Descending)
 }
 
-function Get-AzlSonarUpdateState {
+function Get-AzlSonarAzureUpdateState {
     <#
     .SYNOPSIS
-        The update track: what Azure offers, the update that installs (or last failed), its newest run as a step tree, the run history and the verdict.
+        The update track as Azure reports it: what Azure offers, the update that installs (or last failed), its newest run as a step tree, the run history and the verdict.
     .DESCRIPTION
+        Azure lags the cluster by many minutes; Get-AzlSonarUpdateState merges what the cluster itself says on top of this.
         Read-only GETs, all best effort (404 means the cluster has no update service data yet and returns an idle track):
         clusters/updateSummaries/default, clusters/updates and clusters/updates/{name}/updateRuns for the update that installs
         (or failed) or, when none does, for the newest installed updates (the history and the end state).
@@ -580,35 +581,102 @@ function Get-AzlSonarUpdateState {
         $result.status = $status
         $result.phase = $phase
 
-        # The tab colour: the worst of the update's own verdict and the failed checks, Informational checks never colour it.
-        $counts = $summary.checkCounts
-        $level = 'neutral'
-        if ($status -eq 'error' -or $counts.critical -gt 0 -or $counts.error -gt 0 -or $summary.healthState -match '^(Failure|Failed|Critical|Error)$') { $level = 'error' }
-        elseif ($status -eq 'running') { $level = 'run' }
-        elseif ($phase -eq 'waiting' -or $counts.warning -gt 0 -or $summary.healthState -match 'Warning') { $level = 'warn' }
-        elseif ($status -eq 'success') { $level = 'ok' }
-        $result.level = $level
-
         $focus = if ($null -ne $active) { $active } elseif ($null -ne $waiting) { $waiting } elseif ($null -ne $ready) { $ready } else { $null }
-        $label = switch ($phase) {
-            'installing' { 'Installing' + $(if ($null -ne $active -and $active.version) { ' ' + $active.version } else { '' }) }
-            'preparing' { 'Preparing the update' }
-            'failed' { 'Update failed' }
-            'attention' { 'Update needs attention' }
-            'waiting' { $focus.stateWord }
-            'available' { 'Update available' }
-            default { $(if ($status -eq 'success') { 'Update succeeded' } else { 'No update has run' }) }
-        }
-        if ($status -eq 'success' -and $summary.currentVersion) { $label += ' (' + $summary.currentVersion + ')' }
-        if ($level -eq 'error' -and $status -ne 'error') { $label = 'Readiness check failed' }
-        elseif ($level -eq 'warn' -and $phase -eq 'idle' -and $status -ne 'success') { $label = 'Readiness warning' }
-        $result.label = $label
-        if ($null -ne $focus -and $focus.nextAction) { $result.nextAction = $focus.nextAction }
+        $verdict = Get-AzlSonarUpdateVerdict -Status $status -Phase $phase -Summary $summary -Active $active -Focus $focus
+        $result.level = $verdict.level
+        $result.label = $verdict.label
+        $result.nextAction = $verdict.nextAction
     }
     catch {
         if ($null -ne $Warnings) { $Warnings.Add("Update track: $($_.Exception.Message)") }
     }
     return $result
+}
+
+function Get-AzlSonarUpdateVerdict {
+    <#
+    .SYNOPSIS
+        The tab colour, the plain-word label and the next action for a status and phase: { level, label, nextAction }.
+    .DESCRIPTION
+        level is the worst of the update's own verdict and the failed readiness checks of the summary (Critical and Error red, Warning
+        amber, Informational never colours it). Shared by the Azure track and the cluster's own reading, so both speak the same words.
+        -Active is the update that installs or failed (version, state); -Focus the update the label talks about (stateWord, nextAction).
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
+    param(
+        [Parameter(Mandatory)][string]$Status,
+        [Parameter(Mandatory)][string]$Phase,
+        [AllowNull()][object]$Summary,
+        [AllowNull()][object]$Active,
+        [AllowNull()][object]$Focus
+    )
+
+    $counts = Get-AzlSonarMember $Summary 'checkCounts'
+    $critical = [int](Get-AzlSonarMember $counts 'critical' 0)
+    $errorCount = [int](Get-AzlSonarMember $counts 'error' 0)
+    $warning = [int](Get-AzlSonarMember $counts 'warning' 0)
+    $healthState = [string](Get-AzlSonarMember $Summary 'healthState' '')
+    $currentVersion = [string](Get-AzlSonarMember $Summary 'currentVersion' '')
+    $activeVersion = [string](Get-AzlSonarMember $Active 'version' '')
+    $activeState = [string](Get-AzlSonarMember $Active 'state' '')
+
+    $level = 'neutral'
+    if ($Status -eq 'error' -or $critical -gt 0 -or $errorCount -gt 0 -or $healthState -match '^(Failure|Failed|Critical|Error)$') { $level = 'error' }
+    elseif ($Status -eq 'running') { $level = 'run' }
+    elseif ($Phase -eq 'waiting' -or $warning -gt 0 -or $healthState -match 'Warning') { $level = 'warn' }
+    elseif ($Status -eq 'success') { $level = 'ok' }
+
+    $label = switch ($Phase) {
+        'installing' { 'Installing' + $(if ($activeVersion) { ' ' + $activeVersion } else { '' }) }
+        'preparing' { switch ($activeState) { 'HealthChecking' { 'Checking update health' } 'Downloading' { 'Downloading the update' } default { 'Preparing the update' } } }
+        'failed' { $(if ($activeState -eq 'HealthCheckFailed') { 'Update health check failed' } else { 'Update failed' }) }
+        'attention' { 'Update needs attention' }
+        'waiting' { $(if ($null -ne $Focus -and [string](Get-AzlSonarMember $Focus 'stateWord' '')) { [string](Get-AzlSonarMember $Focus 'stateWord') } else { 'Waiting for content' }) }
+        'available' { 'Update available' }
+        default { $(if ($Status -eq 'success') { 'Update succeeded' } else { 'No update has run' }) }
+    }
+    if ($Status -eq 'success' -and $currentVersion) { $label += ' (' + $currentVersion + ')' }
+    if ($level -eq 'error' -and $Status -ne 'error') { $label = 'Readiness check failed' }
+    elseif ($level -eq 'warn' -and $Phase -eq 'idle' -and $Status -ne 'success') { $label = 'Readiness warning' }
+    return [ordered]@{ level = $level; label = $label; nextAction = $(if ($null -ne $Focus) { Get-AzlSonarMember $Focus 'nextAction' } else { $null }) }
+}
+
+function Get-AzlSonarUpdateState {
+    <#
+    .SYNOPSIS
+        The update track: what Azure reports, what the cluster itself says (when node-side reading is on), and one verdict from both.
+    .DESCRIPTION
+        Azure's update status lags the cluster by many minutes (an SBE update showed "available, not started" for 17 minutes
+        while the cluster was preparing it). With updateAccount configured (or -UpdateCredential) Sonar also reads the cluster's
+        own update service on one node, read-only (NodeUpdate.ps1). The cluster's state wins when it disagrees with Azure, both
+        sources are shown (update.local, update.sources) and Azure being behind is flagged with the minutes. Without an account
+        update.local says why node-side reading is off and the verdict is Azure's alone, as before.
+    .OUTPUTS
+        { verified, status, phase, level, label, ran, nextAction { text, guide }, summary, active, updates[], runs[], run, tree, counts, local, sources }
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Config,
+
+        [datetime]$Now = [datetime]::UtcNow,
+
+        [AllowNull()]
+        [System.Collections.Generic.List[string]]$Warnings,
+
+        # Shared.UpdateLocal: the account, the last good read and the breaker of the node-side reader. Optional (tests, one-off calls).
+        [AllowNull()]
+        [System.Collections.IDictionary]$UpdateContext
+    )
+
+    $azure = Get-AzlSonarAzureUpdateState -Config $Config -Now $Now -Warnings $Warnings
+    # With a background reader (the live server) the poll only takes its latest record; without one (tests, one-off calls) it reads here.
+    $background = $null -ne $UpdateContext -and $UpdateContext.Contains('Background') -and [bool]$UpdateContext['Background']
+    $local = if ($background) { Get-AzlSonarLocalUpdateSnapshot -Context $UpdateContext -Now $Now -AzureActive ($azure.status -eq 'running') }
+    else { Get-AzlSonarLocalUpdateState -Config $Config -Context $UpdateContext -Now $Now -AzureActive:($azure.status -eq 'running') }
+    return Merge-AzlSonarUpdateSource -Azure $azure -Local $local -Now $Now
 }
 
 function Get-AzlSonarTreeEnd {
@@ -683,7 +751,8 @@ function Get-AzlSonarUpdateMonitorState {
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
     param(
         [Parameter(Mandatory)][object]$Config,
-        [datetime]$Now = [datetime]::UtcNow
+        [datetime]$Now = [datetime]::UtcNow,
+        [AllowNull()][System.Collections.IDictionary]$UpdateContext
     )
 
     $warnings = [System.Collections.Generic.List[string]]::new()
@@ -693,7 +762,7 @@ function Get-AzlSonarUpdateMonitorState {
     $resource = Get-AzlSonarClusterResource -Config $Config
     $state.clusterResource = Get-AzlSonarClusterObject -Config $Config -Resource $resource
     $state.provisioningState = [string]$state.clusterResource.provisioningState
-    $update = Get-AzlSonarUpdateState -Config $Config -Now $Now -Warnings $warnings
+    $update = Get-AzlSonarUpdateState -Config $Config -Now $Now -Warnings $warnings -UpdateContext $UpdateContext
     $move = Resolve-AzlSonarUpdatePhase -Update $update -Phase 'update' -ActivePhase 'update' -Standalone
     $state.phase = $move.phase
     $state.activePhase = $move.activePhase

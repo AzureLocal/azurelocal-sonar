@@ -1243,7 +1243,11 @@ function Get-AzlSonarDeploymentState {
 
         # What the newest node log lines say (Get-AzlSonarLogHint): used to label an Azure state that lags behind the node.
         [AllowNull()]
-        [System.Collections.IDictionary]$LogHint
+        [System.Collections.IDictionary]$LogHint,
+
+        # Shared.UpdateLocal: the update account, the last good read of the cluster's own update service and its breaker (NodeUpdate.ps1).
+        [AllowNull()]
+        [System.Collections.IDictionary]$UpdateContext
     )
 
     $ErrorActionPreference = 'Stop'
@@ -1254,7 +1258,7 @@ function Get-AzlSonarDeploymentState {
 
     # A standalone Update monitor (-Monitor Update) follows a cluster that is already running: no deployment, provisioning or event file is read.
     if ((Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))).monitor -eq 'Update') {
-        return Get-AzlSonarUpdateMonitorState -Config $Config -Now $Now
+        return Get-AzlSonarUpdateMonitorState -Config $Config -Now $Now -UpdateContext $UpdateContext
     }
 
     $settingsPath = '{0}/providers/Microsoft.AzureStackHCI/clusters/{1}/deploymentSettings/default?api-version={2}' -f $rgPath, [uri]::EscapeDataString($Config.clusterName), $Config.apiVersion
@@ -1412,7 +1416,7 @@ function Get-AzlSonarDeploymentState {
     $phaseOut = $phaseInfo.phase
     $activeOut = $active
     if ($updateSetting -ne 'off' -and ($phaseInfo.phase -eq 'done' -or $trackSetting -eq 'update')) {
-        $update = Get-AzlSonarUpdateState -Config $Config -Now $Now -Warnings $warnings
+        $update = Get-AzlSonarUpdateState -Config $Config -Now $Now -Warnings $warnings -UpdateContext $UpdateContext
         $move = Resolve-AzlSonarUpdatePhase -Update $update -Phase $phaseOut -ActivePhase $activeOut -DeploymentEnd (Get-AzlSonarTreeEnd -Tree $deploymentTree) -Now $Now
         if ($move.follow) {
             $phaseOut = $move.phase
@@ -1477,7 +1481,7 @@ function Publish-AzlSonarState {
     )
 
     $json = ConvertTo-AzlSonarJson $State
-    $key = $json -replace '"polledAt":(null|"[^"]*")', '' -replace '"(durationSeconds|elapsedSeconds)":\d+', ''
+    $key = $json -replace '"(polledAt|readAt)":(null|"[^"]*")', '' -replace '"(durationSeconds|elapsedSeconds|ageSeconds|lagMinutes)":\d+', ''
     [System.Threading.Monitor]::Enter($Shared.Lock)
     try {
         if ($key -ne $Shared.LastStateKey) {
@@ -1525,11 +1529,13 @@ function Invoke-AzlSonarPollerLoop {
             $verificationEvents = if ($Shared.Contains('VerificationEvents')) { $Shared['VerificationEvents'] } else { $null }
             $logAccount = if ($Shared.Contains('LogAccount')) { $Shared['LogAccount'] } else { $null }
             $localName = if ($Shared.Contains('LocalUserName')) { [string]$Shared['LocalUserName'] } else { '' }
+            $updateContext = if ($Shared.Contains('UpdateLocal')) { $Shared['UpdateLocal'] } else { $null }
             $discoveryCache = if ($Shared.Contains('DiscoveryCache')) { $Shared['DiscoveryCache'] } else { $null }
             # The Discovery monitor reads the discovery files only: no Azure call, no sign-in, no node.
             $state = if (-not (Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))).azure) { Get-AzlSonarInitialState -Config $Config -DiscoveryCache $discoveryCache -VerificationEvents $verificationEvents } else {
-            Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -ArmEvents $armEvents -VerificationEvents $verificationEvents -DiscoveryCache $discoveryCache -LogAccount $logAccount -LocalUserName $localName }
+            Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -ArmEvents $armEvents -VerificationEvents $verificationEvents -DiscoveryCache $discoveryCache -LogAccount $logAccount -LocalUserName $localName -UpdateContext $updateContext }
             Publish-AzlSonarState -Shared $Shared -State $state
+            try { Register-AzlSonarUpdateRedaction -Shared $Shared } catch { Write-Verbose "Update account redaction: $($_.Exception.Message)" }
         }
         catch {
             $previous = $Shared.State
