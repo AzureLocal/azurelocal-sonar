@@ -120,14 +120,14 @@ Describe 'Module manifest' {
     It 'is valid and exports the public functions of the design, the recording tools and the config commands' {
         $manifest = Test-ModuleManifest -Path $script:SonarManifest -ErrorAction Stop
         @($manifest.ExportedFunctions.Keys | Sort-Object) | Should -Be @(
-            'Add-AzlSonarNode', 'ConvertTo-AzlSonarConfig', 'ConvertTo-AzlSonarStepTree', 'Export-AzlSonarBundle', 'Export-AzlSonarPublishableRecording', 'Get-AzlSonarConfig', 'Get-AzlSonarDeploymentState', 'Get-AzlSonarPhaseGuidance', 'New-AzlSonarConfig', 'Read-AzlSonarConfig', 'Remove-AzlSonarNode', 'Set-AzlSonarConfig', 'Start-AzlSonarServer', 'Test-AzlSonarConfig', 'Test-AzlSonarPublishableRecording'
+            'Add-AzlSonarNode', 'ConvertTo-AzlSonarConfig', 'ConvertTo-AzlSonarStepTree', 'Export-AzlSonarBundle', 'Export-AzlSonarPublishableRecording', 'Get-AzlSonarConfig', 'Get-AzlSonarDeploymentState', 'Get-AzlSonarPhaseGuidance', 'Invoke-AzlSonarApi', 'New-AzlSonarConfig', 'Read-AzlSonarConfig', 'Remove-AzlSonarNode', 'Set-AzlSonarConfig', 'Start-AzlSonarServer', 'Test-AzlSonarConfig', 'Test-AzlSonarPublishableRecording'
         )
     }
 
     It 'imports and exports the same functions as the manifest' {
         Import-SonarTestModule
         @((Get-Module AzlSonar).ExportedFunctions.Keys | Sort-Object) | Should -Be @(
-            'Add-AzlSonarNode', 'ConvertTo-AzlSonarConfig', 'ConvertTo-AzlSonarStepTree', 'Export-AzlSonarBundle', 'Export-AzlSonarPublishableRecording', 'Get-AzlSonarConfig', 'Get-AzlSonarDeploymentState', 'Get-AzlSonarPhaseGuidance', 'New-AzlSonarConfig', 'Read-AzlSonarConfig', 'Remove-AzlSonarNode', 'Set-AzlSonarConfig', 'Start-AzlSonarServer', 'Test-AzlSonarConfig', 'Test-AzlSonarPublishableRecording'
+            'Add-AzlSonarNode', 'ConvertTo-AzlSonarConfig', 'ConvertTo-AzlSonarStepTree', 'Export-AzlSonarBundle', 'Export-AzlSonarPublishableRecording', 'Get-AzlSonarConfig', 'Get-AzlSonarDeploymentState', 'Get-AzlSonarPhaseGuidance', 'Invoke-AzlSonarApi', 'New-AzlSonarConfig', 'Read-AzlSonarConfig', 'Remove-AzlSonarNode', 'Set-AzlSonarConfig', 'Start-AzlSonarServer', 'Test-AzlSonarConfig', 'Test-AzlSonarPublishableRecording'
         )
     }
 }
