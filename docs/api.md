@@ -33,7 +33,7 @@ Sonar has an HTTP API. The page is built on it: every number, step and log line 
 
 ### The access token and the cookie handshake
 
-1. **Get the token.** Sonar prints it once at start, inside the URL, and the token is new at every start:
+1. **Get the token.** The simplest way for automation is `Start-AzlSonar.ps1 -TokenFile ./sonar.token` (or `tokenFile` in the config): Sonar writes the token, and only the token, to that file when it starts, readable by the current user only, and removes it when it stops. [`Invoke-AzlSonarApi`](#invoke-azlsonarapi) reads the file, does steps 2 and 3 for you and starts over after a restart (step 4). Without a token file, Sonar prints the token once at start, inside the URL, and the token is new at every start:
 
    ```text
    AzL Sonar is listening on http://localhost:8642/?t=0123456789abcdef0123456789abcdef for clus01 (read-only). Press Ctrl+C to stop.
@@ -764,7 +764,12 @@ curl -s -N -b cookies.txt http://localhost:8642/api/events
 
 ### PowerShell 7
 
-The recipes use `Invoke-AzlSonarApi`, defined in [Using the API from automation](#using-the-api-from-automation) (it does the cookie handshake). Dates in the parsed JSON arrive as `[datetime]`.
+The recipes use [`Invoke-AzlSonarApi`](#invoke-azlsonarapi), which ships with the module (it does the cookie handshake). Start Sonar with `-TokenFile ./sonar.token`, import the module once and tell the helper where the token is; every recipe then runs as written. Dates in the parsed JSON arrive as `[datetime]`.
+
+```powershell
+Import-Module ./src/AzlSonar/AzlSonar.psd1
+$PSDefaultParameterValues['Invoke-AzlSonarApi:TokenFile'] = './sonar.token'
+```
 
 **Get the state.**
 
@@ -773,36 +778,26 @@ $state = Invoke-AzlSonarApi '/api/state'
 '{0} / {1} / {2} (polled {3:u})' -f $state.phase, $state.deployment.status, $state.current.stepName, $state.polledAt
 ```
 
-**Follow the logs with `since` / `lastSeq` paging.** `truncated` says another page waits; `lastSeq` is the next `since`; `server` changing means Sonar restarted.
+**Follow the logs with `since` / `lastSeq` paging.** `-All` pages for you: it asks again with `since=<lastSeq>` while `truncated` is `true`, and returns one object with the lines, the new cursor (`LastSeq`), the instance id (`Server`) and the gap and restart checks described under [two pitfalls](#apilogs). Keep `LastSeq` and `Server`, and give them back next time.
 
 ```powershell
-function Get-AzlSonarLogLine {
-    [CmdletBinding()]
-    param([long]$Since = 0, [string]$ServerId)
-    do {
-        $page = Invoke-AzlSonarApi '/api/logs' -Query @{ since = $Since }
-        if ($ServerId -and $page.server -ne $ServerId) { throw 'Sonar was restarted: its sequence numbers start again.' }
-        $page.lines
-        $Since = $page.lastSeq
-    } while ($page.truncated)
-}
-
-# New lines every 5 seconds. A huge `since` is lowered to the newest seq: an empty page that gives the cursor.
-$first = Invoke-AzlSonarApi '/api/logs' -Query @{ since = 999999999999999 }
-$cursor = $first.lastSeq; $server = $first.server
+# New lines every 5 seconds. A huge -Since is lowered to the newest seq: an empty page that gives the cursor.
+$cursor = (Invoke-AzlSonarApi '/api/logs' -Since 999999999999999 -All).LastSeq
+$server = $null
 while ($true) {
-    foreach ($line in Get-AzlSonarLogLine -Since $cursor -ServerId $server) {
-        $cursor = $line.seq
-        '{0:HH:mm:ss} {1,-7} {2}' -f $line.time, $line.level, $line.text
-    }
+    $page = Invoke-AzlSonarApi '/api/logs' -Since $cursor -ServerId $server -All
+    if ($page.Gap) { "Missed seq $($page.MissedFrom) to $($page.MissedTo)" }
+    foreach ($line in $page.Lines) { '{0:HH:mm:ss} {1,-7} {2}' -f $line.time, $line.level, $line.text }
+    $cursor = $page.LastSeq; $server = $page.Server
     Start-Sleep -Seconds 5
 }
 ```
 
+The first call has no `-ServerId`, so it cannot tell whether Sonar restarted; every later call does. After a restart the helper warns, sets `Restarted` and reads from `0` (the old cursor means nothing to the new instance).
 **Filter errors** (lines Sonar rated `error`, from the ring buffer):
 
 ```powershell
-Get-AzlSonarLogLine -Since 0 | Where-Object level -eq 'error' |
+(Invoke-AzlSonarApi '/api/logs' -All).Lines | Where-Object level -eq 'error' |
     Select-Object seq, time, @{ n = 'file'; e = { Split-Path $_.file -Leaf } }, text
 ```
 
@@ -847,6 +842,13 @@ try { $buffer = [byte[]]::new(700); $null = $stream.Read($buffer, 0, $buffer.Len
 [System.Text.Encoding]::UTF8.GetString($buffer)
 ```
 
+**Follow the live stream** (`/api/events`). `-Follow` writes one object per event, `{ Event, Data }`, as it arrives; `-EventName` keeps the events you want and `-DurationSeconds` stops it (without it, Ctrl+C or the end of the stream does):
+
+```powershell
+Invoke-AzlSonarApi '/api/events' -Follow -EventName state -DurationSeconds 120 |
+    ForEach-Object { '{0:u} {1} {2}' -f $_.Data.polledAt, $_.Data.phase, $_.Data.current.stepName }
+```
+
 **Wait for a phase** (for a pipeline step):
 
 ```powershell
@@ -859,89 +861,81 @@ if ($state.phase -eq 'failed') { throw "Deployment failed at: $($state.current.s
 
 Sonar is a local tool on the workstation or runner that started it. Anything that runs there and has the token can use the API: a CI step, a script, an agent such as Claude Code.
 
-- **Start Sonar without a browser and keep its output.** Run it as a background job or in a second terminal with all streams redirected, for example `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -NoBrowser *> ./sonar-run.log`; the URL with the token is written to the information stream, which only `*>` (or `6>`) captures. Give `-Credential` (or a Key Vault credential) so nothing prompts. See [Run from a pipeline](./run.md#run-from-a-pipeline-or-an-unattended-session).
-- **Treat the token as a secret** for as long as Sonar runs: read it from the launch output in the same session, keep it in memory or an environment variable (`AZLSONAR_TOKEN`), do not write it to artifacts, tickets or chat. It dies with Sonar; there is no long-lived credential. Do not start Sonar with `-NoAccessToken` on a shared host.
-- **One session per Sonar start.** Do the handshake once, reuse the cookie, and when a call gets `401`, Sonar restarted: read the new token.
-- **Poll sensibly.** The state changes at most every `pollSeconds`, so poll `/api/state` no faster than that, or hold a stream open. Page `/api/logs` with `since`; do not fetch `/api/export` in a loop.
+- **Start Sonar with a token file.** `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -NoBrowser -TokenFile ./sonar.token` writes the access token to `./sonar.token` (or set `tokenFile` in the config) and removes it when Sonar stops, so nothing has to read the launch output. Give `-Credential` (or a Key Vault credential) so nothing prompts. See [Run from a pipeline](./run.md#run-from-a-pipeline-or-an-unattended-session) and [the token file](#the-token-file).
+- **Call it with the helper.** [`Invoke-AzlSonarApi`](#invoke-azlsonarapi) does the handshake, the paging and the stream, and its errors say what to do. Do not write your own cookie handling.
+- **Treat the token as a secret** for as long as Sonar runs. The token file is readable by the current user only and the helper never prints the token; do not copy it into artifacts, tickets or chat. It dies with Sonar; there is no long-lived credential. Do not start Sonar with `-NoAccessToken` on a shared host.
+- **One session per Sonar start.** The helper does the handshake once and reuses the cookie. When Sonar restarts the token changes: the helper reads the token file again and continues. With a token it was given directly (`-Token`) it reports `401` instead.
+- **Poll sensibly.** The state changes at most every `pollSeconds`, so poll `/api/state` no faster than that, or hold a stream open with `-Follow`. Page `/api/logs` with `-Since`/`-All`; do not fetch `/api/export` in a loop.
 - **Do not depend on the page.** Use the routes, not the DOM or `app.js`. Ignore unknown fields.
-- **An agent** can answer "where is the deployment" with `GET /api/state` (`phase`, `current`, the `status` of each section) and "what failed" with `deployment.tree` (steps with `status: "error"` and their `errors[]`), `arm.deployment.failing`, `verification.attention` and the `error` log lines. It changes nothing, so it needs no approval beyond reading the token.
+- **An agent** can answer "where is the deployment" with `GET /api/state` (`phase`, `current`, the `status` of each section) and "what failed" with `deployment.tree` (steps with `status: "error"` and their `errors[]`), `arm.deployment.failing`, `verification.attention` and the `error` log lines. It changes nothing, so it needs no approval beyond reading the token file.
+
+### The token file
+
+`Start-AzlSonar.ps1 -TokenFile <path>` (or `tokenFile` in the config; the parameter wins) writes the per-start access token, and only the token, to `<path>`, with no URL and no newline.
+
+- **Private.** The file is created with its permissions already set, so there is no moment when others can read it. On Windows its access control list has one allow entry, the current user, and inherits nothing; on Linux and macOS the mode is `600`. Sonar checks the result and stops with an error (removing the file) when it is not private.
+- **Removed at stop.** Sonar deletes the file when it stops (Ctrl+C included), but only while it still holds that token. If the delete fails it empties the file. A crash or a killed process leaves a token that no longer works; the next start replaces it.
+- **Never over a foreign file.** A path that is a folder, a link, or an existing file that is not a Sonar token file (not empty and not just a token) is refused before anything starts, unless `-Force`. The folder must exist.
+- **Shown without the token.** The launch output names the file (`Access token file: ...`) and prints the address without `?t=`. The browser, when it opens, still gets the token in its address.
+- **Needs the token on.** `-TokenFile` or `tokenFile` together with `-NoAccessToken` or `accessToken: false` is an error.
 
 ### Invoke-AzlSonarApi
 
-A function you can paste into a script or a profile. It does the cookie handshake once per base address, keeps the session, returns parsed JSON (or text, or a file), and turns `401`, `400` and `404` into clear errors. It is not part of the module.
+Ships with the module (`Import-Module ./src/AzlSonar/AzlSonar.psd1`) and as `./scripts/Invoke-AzlSonarApi.ps1` for callers that do not import modules. It sends only `GET`, only to this machine (`-BaseUrl` must be `localhost` or `127.0.0.1`; the token is never sent to another host), keeps one session cookie container per Sonar address, and never prints, logs or returns the token, not even in an error.
 
 ```powershell
-#Requires -Version 7.4
-Set-StrictMode -Version Latest
+Import-Module ./src/AzlSonar/AzlSonar.psd1
+$PSDefaultParameterValues['Invoke-AzlSonarApi:TokenFile'] = './sonar.token'   # or pass -TokenFile / -Token every time
 
-function Invoke-AzlSonarApi {
-    <#
-    .SYNOPSIS
-        Calls a read-only AzL Sonar API route and returns the parsed JSON (or the raw text).
-    .DESCRIPTION
-        Does the cookie handshake once per base address and port: GET /?t=<token> answers 302 and sets the sonar_t cookie, which the
-        session then sends on every call. The token comes from -Token, the AZLSONAR_TOKEN environment variable, or the newest
-        "?t=<token>" in the file given by -LogPath (the log of the window that started Sonar). It is never printed.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory, Position = 0)]
-        [ValidatePattern('^/api/[a-z]+$')]
-        [string]$Path,
-
-        [hashtable]$Query,
-
-        [string]$BaseUri = 'http://localhost:8642',
-
-        [string]$Token = $env:AZLSONAR_TOKEN,
-
-        [string]$LogPath,
-
-        # Return the response body as text instead of parsing it, or save it to a file (the export).
-        [switch]$Raw,
-
-        [string]$OutFile
-    )
-
-    if (-not (Test-Path variable:script:AzlSonarSession)) { $script:AzlSonarSession = @{} }
-    $BaseUri = $BaseUri.TrimEnd('/')
-    if (-not $script:AzlSonarSession.ContainsKey($BaseUri)) {
-        if (-not $Token -and $LogPath) {
-            $found = Select-String -LiteralPath $LogPath -Pattern '[?&]t=([0-9a-f]{32})' | Select-Object -Last 1
-            if ($found) { $Token = $found.Matches[0].Groups[1].Value }
-        }
-        if (-not $Token) { throw 'No access token: pass -Token, set AZLSONAR_TOKEN, or pass -LogPath (the Sonar launch output).' }
-        $null = Invoke-WebRequest -Uri "$BaseUri/?t=$Token" -SessionVariable session -SkipHttpErrorCheck
-        $script:AzlSonarSession[$BaseUri] = $session
-    }
-    $session = $script:AzlSonarSession[$BaseUri]
-
-    $uri = "$BaseUri$Path"
-    if ($Query -and $Query.Count -gt 0) {
-        $uri += '?' + (($Query.GetEnumerator() | ForEach-Object { [uri]::EscapeDataString([string]$_.Key) + '=' + [uri]::EscapeDataString([string]$_.Value) }) -join '&')
-    }
-    $parameters = @{ Uri = $uri; WebSession = $session; SkipHttpErrorCheck = $true }
-    if ($OutFile) { $parameters.OutFile = $OutFile; $parameters.PassThru = $true }
-    $response = Invoke-WebRequest @parameters
-    if ($response.StatusCode -eq 401) {
-        $script:AzlSonarSession.Remove($BaseUri)
-        throw 'Sonar answered 401: the token is wrong or Sonar was restarted (every start has a new token). Get the new one from the launch output.'
-    }
-    if ($response.StatusCode -ne 200) { throw "Sonar answered $($response.StatusCode) for $Path`: $($response.Content)" }
-    if ($OutFile) { return Get-Item -LiteralPath $OutFile }
-    if ($Raw -or $response.Headers['Content-Type'] -notlike 'application/json*') { return $response.Content }
-    return $response.Content | ConvertFrom-Json -Depth 100
-}
-```
-
-```powershell
-# Typical use
-$PSDefaultParameterValues['Invoke-AzlSonarApi:LogPath'] = './sonar-run.log'
 Invoke-AzlSonarApi '/api/about' | Select-Object name, version
 Invoke-AzlSonarApi '/api/state' | Select-Object phase, activePhase, @{ n = 'step'; e = { $_.current.stepName } }
 ```
 
-With `-OutFile` the status line and body are written straight to the file, so a `4xx` answer is saved into it too: check the returned file's size or remove it when the call throws.
+| Parameter | Meaning |
+| --- | --- |
+| `-Route` (position 0) | One of the nine routes, checked: `/api/config`, `/api/about`, `/api/guidance`, `/api/details`, `/api/state`, `/api/logs`, `/api/events`, `/api/export`, `/api/replay`. Any case. |
+| `-Since`, `-All`, `-ServerId` | `/api/logs`. `-Since` is the cursor (default 0). `-All` pages until caught up and returns one result object (below). `-ServerId` is the `Server` of your last call. |
+| `-Follow`, `-EventName`, `-DurationSeconds` | `/api/events` (needs `-Follow`). One `{ Event, Data }` object per event as it arrives; only the events named by `-EventName` (`hello`, `state`, `tailer`, `log`); stop after `-DurationSeconds` (0: until the stream ends or you stop it). |
+| `-BaseUrl` | `http://localhost:8642` by default. |
+| `-TokenFile`, `-Token` | The access token. Prefer `-TokenFile` (the file Sonar wrote with its own `-TokenFile`); it is read again after a restart. `-Token` is the 32 hex characters only, not the URL. A Sonar started with `-NoAccessToken` needs neither. |
+| `-Raw` (alias `-AsJson`) | Return the body as text instead of objects. With `-All` or `-Follow`: one compact JSON text per result or event. |
+| `-OutFile` | Save the answer to a file and return it (for `/api/export`; written through a `.part` file, so a failed call leaves nothing). |
+| `-TimeoutSeconds` | Seconds one request may take (default 30). For `-Follow`: the longest quiet time on the stream (Sonar pings every 15 seconds). |
+| `-MaxRetry` | Retries after `429` (default 2). |
+
+**The handshake.** On the first call (and whenever the token changes) the helper sends `GET /?t=<token>`, takes the `302` and its `sonar_t` cookie into the session's cookie container, and sends the cookie from then on. When Sonar answers `401` later (it restarted) and `-TokenFile` now holds another token, the helper opens a new session and repeats the call once.
+
+**`/api/logs -All`.** Returns one object:
+
+| Property | Meaning |
+| --- | --- |
+| `Server` | The instance id of the last page. Give it back as `-ServerId`. |
+| `Since`, `LastSeq`, `Pages` | The cursor you gave, the cursor to use next time, and the number of requests it took. |
+| `Lines` | The log lines, oldest first, from every page. |
+| `Gap`, `MissedFrom`, `MissedTo`, `MissedCount` | `true` when lines left the 5000-line ring buffer before they were read: the first returned `seq` was above the cursor + 1 (or every line was gone). `MissedFrom` and `MissedTo` span the first to the last missing line (several gaps in one call are one span); `MissedCount` is the exact number of lines missed. A warning says which. |
+| `Restarted` | `true` when the instance id differs from `-ServerId`, or changes between two pages: Sonar restarted and its sequence numbers start again. The helper warns and reads again from `0`; `Lines` then holds only the new instance's lines. |
+
+**Errors.** Each error is a normal PowerShell error whose message says what happened and what to do, with the HTTP status in `$_.Exception.StatusCode` and the id `AzlSonarApi.<status>`. No message holds the token.
+
+| Status | The message says |
+| --- | --- |
+| `401` | The token is missing, wrong, or Sonar restarted (every start has a new token): pass the current `-Token`, or `-TokenFile` of a Sonar started with `-TokenFile`. |
+| `403` | Sonar only answers this machine, and requests without a foreign `Origin`: call it from the machine Sonar runs on. |
+| `404` | No such route; `/api/replay` exists only with `-Replay`; a replay does not serve `/api/events` or `/api/export`. Sonar's own text is added. |
+| `405` | Sonar is read-only and only answers `GET` (the helper never sends anything else). |
+| `429` | Too many event streams (`maxEventStreams`). The helper waits `Retry-After` seconds (at most 120) and tries again up to `-MaxRetry` times, then reports the status and the time to retry. |
+| `400`, `5xx` | Sonar's own error text. |
+| no status | `Cannot reach Sonar at ...` (not running, wrong port), `did not answer within N second(s)`, or `went silent` on a stream. |
+
+```powershell
+# Everything at once: errors in the log since the last call, the verdict, and a saved export.
+$page = Invoke-AzlSonarApi '/api/logs' -Since $cursor -ServerId $server -All
+$page.Lines | Where-Object level -eq 'error' | Select-Object seq, time, text
+(Invoke-AzlSonarApi '/api/state').verification | Select-Object status, verdict, blockers
+Invoke-AzlSonarApi '/api/export' -OutFile ./sonar-export.json
+```
+
+The script form takes the same parameters: `./scripts/Invoke-AzlSonarApi.ps1 /api/state -TokenFile ./sonar.token`.
 
 ## Tests
 

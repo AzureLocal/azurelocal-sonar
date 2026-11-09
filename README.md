@@ -161,8 +161,10 @@ There is nothing to install: no service, no database, no build step.
 | `-Port` | `8642` | Local port. Pick another if 8642 is taken (Sonar says so). |
 | `-Credential` | (none) | The log account; overrides `credential.source`. |
 | `-Monitor` | `Auto` | Which stage to watch: `Auto` (the whole flow) or one of `Discovery`, `Provisioning`, `OsConfiguration`, `Verification`, `Validate`, `Deployment`, `Update`, `AddNode`, `Repair`. A single monitor shows only its tile and reads only the sources it needs. See [Run one stage on its own](docs/run.md#run-one-stage-on-its-own--monitor). |
-| `-NoBrowser` | off | Do not open the browser. The URL with the access token is still printed. |
+| `-NoBrowser` | off | Do not open the browser. The URL with the access token is still printed (unless `-TokenFile` is used). |
 | `-NoAccessToken` | off | Turn the per-start access token off (also `accessToken: false` in the config). For a single-user machine only: any account on this machine can then read the page. |
+| `-TokenFile` | (none) | Write the access token, and only the token, to this file (readable by the current user only; removed when Sonar stops) so a script, a pipeline step or an agent can read it without scraping the launch output; the launch output then shows the path and not the token. Also `tokenFile` in the config. Refused over a file that is not a Sonar token file unless `-Force`. See [the API](docs/api.md#the-token-file). |
+| `-Force` | off | With `-TokenFile`: replace an existing file that is not a Sonar token file. |
 | `-Record` | (none) | Also append the run to this recording file (JSON Lines). See [Record and replay](#record-and-replay). A normal recording keeps identifiers (GUIDs, IP addresses, host and cluster names). |
 | `-Publishable` | off | With `-Record`: also replace every identifier with a stable pseudonym, so the recording can be shared. Needs a new file. See [Share a recording](#share-a-recording-publishable). |
 | `-ExtraTerm` | (none) | With `-Publishable`: extra strings that must never appear (a company or site name). |
@@ -294,6 +296,7 @@ Unknown fields are ignored. Sonar validates the file at start and lists every pr
 | `identityModel` | yes | | `LocalIdentity` or `ActiveDirectory`. Picks the account guidance and whether `TrustedHosts` is needed. |
 | `pollSeconds` | no | `20` | Azure poll interval, 5 to 3600 seconds. |
 | `accessToken` | no | `true` | `false` turns the per-start access token off (single-user machine only). `-NoAccessToken` does the same. |
+| `tokenFile` | no | (none) | File the access token is written to at start (user-only, removed at stop); relative to the config file. `-TokenFile` overrides it. Not with `accessToken: false`. See [the API](docs/api.md#the-token-file). |
 | `maxEventStreams` | no | `4` | Live browser streams served at once, 1 to 50; more get 429 and the page polls. |
 | `nodes` | yes | | At least one node. |
 | `nodes[].name` | yes | | Host name, unique. |
@@ -480,5 +483,6 @@ Demo data (example names only); the [tour of the page](docs/tour.md) explains ea
 - [What Sonar reads](docs/how-it-works.md#what-sonar-reads): the read-only Azure calls and node reads Sonar makes. The full reference for the Azure, Redfish and Configurator app calls of a ZTP run is in the ZTP docs: [API reference](https://github.com/AzureLocal/azurelocal-ztp/blob/main/docs/appendix/api-reference.md) and [the Configurator app API](https://github.com/AzureLocal/azurelocal-ztp/blob/main/docs/appendix/configurator-app-api.md)
 - [Research](docs/research.md): Microsoft Learn sources and what was verified live
 - [Publishable recordings](docs/reference/publishable-recordings.md) and the [event feed](docs/reference/events.md) (the JSON Lines contract other tools can emit, and how to launch Sonar from a deployment pipeline)
+- API helper: `Invoke-AzlSonarApi` (exported by the module, or `./scripts/Invoke-AzlSonarApi.ps1`) calls the read-only [API](docs/api.md) the supported way: the token handshake, `/api/logs` paging with gap and restart detection, `/api/events` as objects, `/api/export` to a file. Start Sonar with `-TokenFile ./sonar.token` and pass `-TokenFile` to the helper.
 - Export bundle: `./scripts/Export-SonarBundle.ps1 -Recording <file> -OutDirectory <dir>` writes a timeline JSON and a self-contained HTML report from any recording.
 - Tests: `Invoke-Pester -Path tests` (Pester 5; no Azure or node calls). Lint: `Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1`. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [CHANGELOG](CHANGELOG.md).
