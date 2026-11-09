@@ -33,6 +33,14 @@
 .PARAMETER NoAccessToken
     Turns the per-start access token off (also: accessToken: false in the config). The page then answers any account on this
     machine. For a single-user machine only. By default Sonar prints and opens a URL that carries a one-time token.
+.PARAMETER TokenFile
+    Write the per-start access token, and only the token, to this file so automation (a script, a pipeline step, an agent) can read it
+    without scraping the launch output. The file is created readable by the current user only (Windows: an access control list with
+    the current user and no inherited entries; Linux: mode 600) and is removed when Sonar stops. The launch output then shows the
+    path and not the token; the browser still opens with it. An existing file that is not a Sonar token file is refused unless
+    -Force. Overrides tokenFile in the config. Needs the access token, so not with -NoAccessToken.
+.PARAMETER Force
+    With -TokenFile (or tokenFile): replace an existing file that is not a Sonar token file.
 .PARAMETER NoBrowser
     Do not open the browser.
 .PARAMETER Credential
@@ -60,6 +68,8 @@
     ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor OsConfiguration
 .EXAMPLE
     ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor Verification
+.EXAMPLE
+    ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -NoBrowser -TokenFile ./sonar.token
 .EXAMPLE
     ./Start-AzlSonar.ps1 -ConfigPath ./config/my-cluster.json
 .EXAMPLE
@@ -94,6 +104,10 @@ param(
     [switch]$NoBrowser,
 
     [switch]$NoAccessToken,
+
+    [string]$TokenFile,
+
+    [switch]$Force,
 
     [Parameter(ParameterSetName = 'Live')]
     [ValidateSet('Auto', 'Discovery', 'Provisioning', 'OsConfiguration', 'Verification', 'Validate', 'Deployment', 'Update', 'AddNode', 'Repair')]
@@ -132,6 +146,8 @@ $serverParameters = @{
     NoBrowser = $NoBrowser
 }
 if ($NoAccessToken) { $serverParameters.NoAccessToken = $true }
+if ($PSBoundParameters.ContainsKey('TokenFile')) { $serverParameters.TokenFile = $TokenFile }
+if ($Force) { $serverParameters.Force = $true }
 if ($PSCmdlet.ParameterSetName -eq 'Replay') {
     $serverParameters.Replay = $Replay
     $serverParameters.Speed = $Speed

@@ -184,6 +184,7 @@ $script:AzlSonarSettableKeys = [ordered]@{
     'identityModel'             = @{ Kind = 'text'; Words = @('LocalIdentity', 'ActiveDirectory') }
     'provisioningRoute'         = @{ Kind = 'text'; Words = @('auto', 'simplified', 'oem-image') }
     'accessToken'               = @{ Kind = 'flag' }
+    'tokenFile'                 = @{ Kind = 'text' }
     'maxEventStreams'           = @{ Kind = 'number' }
     'pollSeconds'               = @{ Kind = 'number' }
     'recordPath'                = @{ Kind = 'text' }
