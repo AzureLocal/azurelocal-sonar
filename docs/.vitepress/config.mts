@@ -18,6 +18,7 @@ export default defineConfig({
       { text: 'Home', link: '/' },
       { text: 'Getting started', link: '/getting-started' },
       { text: 'How it works', link: '/how-it-works' },
+      { text: 'API', link: '/api' },
       { text: 'Plan', link: '/plan' }
     ],
     sidebar: [
@@ -33,6 +34,7 @@ export default defineConfig({
       { text: 'Tour of the page', link: '/tour' },
       { text: 'Following a ZTP run', link: '/ztp' },
       { text: 'How it works', link: '/how-it-works' },
+      { text: 'API reference', link: '/api' },
       { text: 'Design', link: '/design' },
       { text: 'Research and live findings', link: '/research' },
       { text: 'Plan', link: '/plan' }
