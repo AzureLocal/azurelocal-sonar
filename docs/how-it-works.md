@@ -30,7 +30,11 @@ Sonar has three parts (four while it records a run, see [Record and replay](#rec
 
 ## Export
 
-**Export** downloads one JSON bundle: the config (no secrets), the guidance, the latest state, the change-only state timeline (a snapshot only when something changed, at most 5000; the latest state is always included) and the log lines, with metadata that says how many snapshots and lines the caps dropped.
+**Export** (`GET /api/export`, see the [API reference](./api.md#apiexport)) downloads one JSON bundle: the config (no secrets), the guidance, the latest state, the change-only state timeline (a snapshot only when something changed, at most 5000; the latest state is always included) and the log lines, with metadata that says how many snapshots and lines the caps dropped.
+
+## The API
+
+The page is a client of Sonar's own HTTP API: nine read-only `GET` routes on `http://localhost:<port>/` (config, about, guidance, details, state, logs, the `events` stream, export and, in a replay, the recording), behind the per-start access token. Anything on the same machine that has the token can read them. Every route, field, the stream protocol and recipes for curl and PowerShell are in the [API reference](./api.md).
 
 ## Beyond the deployment
 

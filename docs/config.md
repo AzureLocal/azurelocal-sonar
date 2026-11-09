@@ -171,6 +171,10 @@ The pollers and the log tailer are built when Sonar starts, so a change to the f
 
 Live re-reading of the node set (adding pollers without a restart) is not built: it would mean rebuilding the workers around the running page and recording.
 
+## The API
+
+Two keys change how Sonar's HTTP API answers: `accessToken` (the per-start token that every route and the page need; `false` removes the handshake, single-user machines only) and `maxEventStreams` (how many `/api/events` streams are served at once; one more gets 429). `pollSeconds` sets how often the state behind `/api/state` is refreshed, and `monitor` decides which parts of it are filled. All routes, fields and examples are in the [API reference](./api.md).
+
 ## Common mistakes
 
 | You see | Cause and fix |

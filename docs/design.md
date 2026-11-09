@@ -131,7 +131,7 @@ Per phase and identity model: which account reads the node logs, where the logs 
 
 ## Page server (localhost only, `http://localhost:{port}/`)
 
-These routes only feed Sonar's own page. They are internal, not an interface for other tools: they can change with the page, and Sonar does not document or support them as an API. (Tools that feed Sonar do it the other way round, through the [event feed](./reference/events.md).)
+These routes are Sonar's local HTTP API; the page is built on them. They are read-only and documented route by route, field by field, with live examples and recipes in the [API reference](./api.md); this section is the design summary. (Tools that feed Sonar do it the other way round, through the [event feed](./reference/events.md).)
 
 | Route | Returns |
 | --- | --- |
@@ -150,7 +150,7 @@ A log line is `{ seq, time, received, timeSource, file, level, text }`: `seq` co
 
 `server` is the back end's instance id (a new GUID at every start; also in `/api/config` as `serverId`). `lastSeq` is the last sequence number given out, read together with the lines: after an answer the page has every line up to `lastSeq` (or it fell out of the ring buffer) and uses it as its catch-up cursor.
 
-**Server-Sent Events.** A stream starts with `retry: 5000` and `event: hello` (data `{ server, since }`: the instance id and the seq the stream continues after). Then `event: state` (data = state JSON) on every change, `event: tailer` (tailer status) on every change, `event: log` (data = `{ server, lines[] }`, at most 1000 lines per event) and `: ping` every 15 s. At most **10** streams are served at once; one more gets `503` with `Retry-After: 30` (the page polls meanwhile). The dispatch loop never waits for a client: each client has a bounded queue (4 MiB) and at most one asynchronous write in flight. A client whose write is still in flight gets nothing new that turn (state and tailer coalesce to the latest; log lines wait at its cursor). A client is dropped (connection aborted; the page reconnects and catches up through `/api/logs`) when a write fails or stays in flight longer than 15 s, when its queue would pass the limit, or when the lines it still needs have left the ring buffer.
+**Server-Sent Events.** A stream starts with `retry: 5000` and `event: hello` (data `{ server, since }`: the instance id and the seq the stream continues after). Then `event: state` (data = state JSON) on every change, `event: tailer` (tailer status) on every change, `event: log` (data = `{ server, lines[] }`, at most 1000 lines per event) and `: ping` every 15 s. At most `maxEventStreams` (default **4**) streams are served at once; one more gets `429` with `Retry-After: 30` (the page polls meanwhile). The dispatch loop never waits for a client: each client has a bounded queue (4 MiB) and at most one asynchronous write in flight. A client whose write is still in flight gets nothing new that turn (state and tailer coalesce to the latest; log lines wait at its cursor). A client is dropped (connection aborted; the page reconnects and catches up through `/api/logs`) when a write fails or stays in flight longer than 15 s, when its queue would pass the limit, or when the lines it still needs have left the ring buffer.
 
 **Export.** `{ export, config, guidance, state, timeline[], logs }`. `state` is the latest state; `timeline` is the change-only, capped list of state snapshots (see *State timeline*); `logs` is the `/api/logs?since=0` body (the ring buffer). `export` describes the bundle and both caps:
 
