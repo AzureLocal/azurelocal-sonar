@@ -298,6 +298,7 @@ One JSON document to keep or to hand to someone. The page's **Export** button do
 | `config` | The `/api/config` body. |
 | `guidance` | The `/api/guidance` body. |
 | `state` | The latest state (always kept, whatever the cap did). |
+| `update` | The cluster's own reading of the update against Azure's, from the latest state: `{ sources, local, history, events }`, or `null` when the state has no `update.sources` (no update object yet). `local` is `update.local` without its step tree, `history` and `events` (those are the two lists next to it); the step tree is in `state` and in every `timeline` snapshot. See [update.local](#updatelocal-what-the-cluster-says). |
 | `timeline[]` | State snapshots, oldest first. A snapshot is added only when the state changed (`polledAt` and running-step durations are ignored), at most 5000; older ones are dropped first. |
 | `logs` | The `/api/logs?since=0` body without the 2000-line cap: the whole ring buffer, `truncated` always `false`. |
 
@@ -311,6 +312,7 @@ One JSON document to keep or to hand to someone. The page's **Export** button do
   "config": { /* /api/config */ },
   "guidance": { /* /api/guidance */ },
   "state": { /* /api/state */ },
+  "update": { "sources": { /* update.sources */ }, "local": { /* update.local without tree, history, events */ }, "history": [ /* runs */ ], "events": [ /* started, finished, failed, node */ ] },
   "timeline": [ /* 666 states */ ],
   "logs": { /* /api/logs?since=0, no cap */ }
 }
@@ -363,7 +365,7 @@ The page plays the recording locally. The whole document is held in memory by So
 | `deployment` | object | `{ status, tree[], counts }`: the Deploy steps (`reportedProperties.deploymentStatus`). **Always.** |
 | `nodes` | array | One entry per configured machine, its Arc machine, see [nodes](#nodes). **Always.** |
 | `edgeMachines` | array | The edge machines of the resource group (simplified route), see [edgeMachines](#edgemachines). Empty on the OEM image route. **Always.** |
-| `update` | object or `null` | The update track: `{ verified, status, phase, level, label, ran, nextAction, summary, active, updates[], runs[], run, tree[], counts }`. An object after the deployment is done, or with `track: update`, or with `-Monitor Update`, unless `updateTrack` is `off`; `null` otherwise; the key is absent before the first poll. See [The update object](#the-update-object). Built from the Microsoft Learn reference; `verified` is `false` (a whole update was not yet followed live). |
+| `update` | object or `null` | The update track: `{ verified, status, phase, level, label, ran, nextAction, summary, active, updates[], runs[], run, tree[], counts, local, sources }`. An object after the deployment is done, or with `track: update`, or with `-Monitor Update`, unless `updateTrack` is `off`; `null` otherwise; the key is absent before the first poll. See [The update object](#the-update-object). The Azure side is built from the Microsoft Learn reference; `verified` is `false` (a whole update was not yet followed live). `local` is what the cluster itself says and `sources` compares it with Azure: see [update.local](#updatelocal-what-the-cluster-says) and [update.sources](#updatesources-the-cluster-against-azure). |
 | `track` | string | The `track` setting in lower case: `auto`, `update`, `add-node` or `repair`. Absent before the first poll. |
 | `lag` | object | Whether Azure is behind the node: `{ detected, kind, message, source, nodeStep, since, verified }`. `kind` is `rerun-pending` (an ARM deployment newer than the settings is still running; the steps shown are from the previous attempt) or `deploy-not-reported` (Azure shows no deploy step yet but the seed node log shows the orchestrator running `Role:Interface`, named in `nodeStep`), else `null`. `verified` is `false`. Absent before the first poll. |
 | `environmentChecker` | object | Which part of Deploy mode runs: `{ stage, label, source, verified }`. `stage` is `none`, `validate`, `starting`, `limited`, `full` or `cloud-deployment`; `source` is `Azure steps`, `node log` or `Learn`. Absent before the first poll. |
@@ -483,6 +485,76 @@ The cluster resource, read once a deployment settings object exists (before that
 | `run`, `tree`, `counts` | The newest run (`name`, `update`, `status`, `timeStarted`, `duration`, `lastUpdated`) and its step tree (see [Step trees](#step-trees)). |
 
 With `-Monitor Update` (see [The `-Monitor` option](#the--monitor-option)) `phase` of the state is `update` (`failed` when the update failed) whatever the cluster's deployment history says.
+
+**One verdict from two sources.** Azure's update status lags the cluster by many minutes: an SBE update ran 17 minutes in Preparing and HealthChecking on the cluster while Azure still said `Ready`. When Sonar can read the cluster itself (an update account is set) it merges that into the verdict. The cluster's state wins when it differs from Azure's, so `status`, `phase`, `level`, `label`, `nextAction`, `active` and `updates` are the cluster's then. `run`, `tree`, `counts` and `runs` come from the cluster when its run is the newer one (`run.source` is `cluster`). `summary` stays Azure's; it is the cluster's when Azure has none. A run that ended `Succeeded` on the cluster with its update `Installed` gives `status` `success` and the label `Update succeeded (<version>)` even when Azure still says `Ready`. Without an update account nothing changes: the verdict is Azure's alone and `local` says why.
+
+#### update.local: what the cluster says
+
+`update.local` is always there when `update` is. It is the answer of the cluster's own update service on one node, read-only (`Get-SolutionUpdate`, `Get-SolutionUpdateRun`, `Get-SolutionUpdateEnvironment`, `Get-ClusterNode`, over WinRM, as the deployment account). It carries no account name and no secret.
+
+```jsonc
+{ "enabled": true, "read": true, "stale": false, "reason": "", "reasonKind": "", "node": "iic-azl-n01",
+  "nodeNote": "iic-azl-n01 did not answer, so iic-azl-n02 was read. A node restarts during an update; this is normal.",
+  "readAt": "2026-11-09T05:21:00Z", "ageSeconds": 0, "observedSince": "2026-11-09T05:21:00Z",
+  "attempts": [ { "node": "iic-azl-n01", "ok": false, "class": "unreachable", "reason": "the node did not answer", "detail": "..." }, { "node": "iic-azl-n02", "ok": true, "class": "ok", "reason": "" } ],
+  "status": "running", "phase": "preparing", "level": "run", "label": "Checking update health", "nextAction": null,
+  "state": "HealthChecking", "stateWord": "Checking health", "active": { "name": "SBE5.0.2609.1611", "version": "5.0.2609.1611", "displayName": "...", "state": "HealthChecking", "rebootRequired": "Unknown" },
+  "summary": { /* as update.summary */ }, "updates": [ /* as update.updates */ ],
+  "run": { "id": "redmond/SBE5.0.2609.1611/b15c4b7f-...", "update": "SBE5.0.2609.1611", "version": "5.0.2609.1611", "packageType": "SBE", "type": "Install", "state": "InProgress", "status": "running",
+           "started": "2026-11-09T05:03:34Z", "lastUpdated": "2026-11-09T05:20:00Z", "ended": null, "durationSeconds": 1046, "duration": "00:17:26" },
+  "runStatus": "running", "tree": [ /* Step trees */ ], "counts": { /* as update.counts */ },
+  "progress": { "done": 3, "total": 9, "running": 1, "current": "Finalize SBE preparation", "elapsedSeconds": 1046 },
+  "failed": null,
+  "nodes": [ { "name": "iic-azl-n02", "state": "Paused", "role": "patching", "word": "Paused: drained and being patched", "step": "Install CAU Updates", "stepStatus": "running",
+               "started": "2026-11-09T06:18:34Z", "ended": null, "durationSeconds": 3600, "steps": 2, "timeline": [ { "name": "Install CAU Updates", "status": "running", "start": "...", "end": null, "durationSeconds": 3600 } ] } ],
+  "history": [ { "id": "...", "update": "SBE5.0.2609.1611", "version": "5.0.2609.1611", "packageType": "SBE", "type": "Install", "status": "success", "state": "Succeeded", "started": "...", "ended": "...", "durationSeconds": 11779, "duration": "03:16:19" } ],
+  "versions": { "current": { "solution": "12.2610.1004.50", "sbe": "4.1.2609.5" }, "before": { "solution": "12.2610.1004.50", "sbe": "4.1.2609.5", "known": true },
+                "after": { "solution": "", "sbe": "5.0.2609.1611", "known": false }, "target": { "solution": "", "sbe": "5.0.2609.1611", "packageType": "SBE" } },
+  "events": [ { "at": "2026-11-09T05:03:34Z", "kind": "started", "text": "Update SBE5.0.2609.1611 started on the cluster." } ],
+  "partialErrors": [] }
+```
+
+| Field | Meaning |
+| --- | --- |
+| `enabled` | `true` when an update account is set (config `updateAccount` or `-UpdateCredential`). `false`: node-side reading is off, nothing else in `local` is filled, and `reason` says why in plain words. |
+| `read` | `true` when the record holds data from the cluster. `false`: off, paused or no node answered; `reason` says which. |
+| `stale` | `true` when the last read failed and the last good one is shown (for at most 10 minutes). The record is the old answer; `reason` says that the node being read is probably restarting. |
+| `reason`, `reasonKind` | Plain words and a kind: `off` (no account), `unavailable` (the account could not be read from Key Vault; Sonar asks again every 5 minutes), `credential` (a node refused the account: Sonar backs off 15 minutes, then stops until Sonar restarts or the password secret changes), `unreachable` (no node answered), `pending` (the reader has not answered yet, only in the first seconds), `error`. |
+| `node`, `nodeNote` | The node that answered. `nodeNote` says when another node was tried first ("n01 did not answer, so n02 was read"). A node restarting during an update is normal and is not an error. |
+| `readAt`, `ageSeconds`, `observedSince` | When the node was read, how old a repeated record is, and when Sonar first saw the cluster in this state (used when the run has no start time yet). |
+| `attempts[]` | What each node did on the last read: `node`, `ok`, `class` (`ok`, `unreachable`, `module`, `rejected`, `lockedOut`, `accountUnusable`, `authorization`, `other`), `reason`, `detail` (masked, at most 240 characters). |
+| `status`, `phase`, `level`, `label`, `nextAction` | The cluster's own verdict, in the words of [the update object](#the-update-object). |
+| `state`, `stateWord` | The state of the update the verdict is about, as the cluster says it: `Ready`, `Preparing`, `HealthChecking`, `HealthCheckFailed`, `Installing` (also `InstallationInProgress`), `InstallationFailed`, `Installed`, `AdditionalContentRequired`, `Invalid`; `stateWord` is the plain word. |
+| `active`, `summary`, `updates[]` | As in the Azure object, from the cluster: the update that installs or failed, the cluster's update summary with its readiness checks, and every update the cluster lists. |
+| `run`, `runStatus`, `tree[]`, `counts` | The newest run: `id`, `update`, `version`, `packageType`, `type`, `state`, `status` (`running`, `success`, `error`), `started`, `lastUpdated`, `ended`, `durationSeconds`, `duration` (`hh:mm:ss`), and its step tree (see [Step trees](#step-trees)). `null` when no run exists. |
+| `progress` | `done` and `total` count the leaf steps seen so far (more appear as the update goes on), `current` is the step that runs, `elapsedSeconds` the run time. |
+| `failed` | The deepest failed step: `name`, `path[]`, `error` (masked, at most 700 characters), `start`, `end`, `node` (the cluster node named in the step, or empty). `null` when nothing failed. |
+| `nodes[]` | Per cluster node: `state` (`Up`, `Paused`, `Down`, `Joining`), `role` (`patching`, `draining`, `restarting`, `rejoining`, `done`, `failed`, `waiting`, `up`, `down`, `unknown`), `word`, the `step` that runs, `stepStatus`, `started`, `ended`, `durationSeconds`, `steps` (how many steps name this node) and `timeline[]` (the shallowest steps that name the node, oldest first, at most 30). A node that is `Paused` is drained for patching; `Down` while a run is active is restarting. |
+| `history[]` | The runs the cluster lists, newest first, at most 10: `id`, `update`, `version`, `packageType`, `type`, `status`, `state`, `started`, `ended`, `durationSeconds`, `duration`. |
+| `versions` | `current` is what the cluster reports now. `before` is what Sonar saw while the run was running (`known` is `false` when Sonar was not watching then: it does not guess). `after` is the current version once the run succeeded, or the target while it runs. `target` is the version the update installs (`packageType` `SBE` or `Solution`). |
+| `events[]` | `started`, `finished` and `failed` of the newest run (from the run itself, so a Sonar that starts mid-update still has them), plus the changes Sonar saw in this session: the update state and a node going from `Up` to `Paused` or `Down`. Oldest first, at most 60. |
+| `partialErrors[]` | A cmdlet on the node that failed while the others worked (masked). Usually empty. |
+
+#### update.sources: the cluster against Azure
+
+```jsonc
+{ "azure": { "read": true, "state": "UpdateAvailable", "status": "notstarted", "phase": "available", "label": "Update available", "runUpdated": null },
+  "cluster": { "enabled": true, "read": true, "stale": false, "node": "iic-azl-n01", "state": "HealthChecking", "status": "running", "phase": "preparing", "label": "Checking update health", "readAt": "2026-11-09T05:21:00Z", "reason": "" },
+  "winner": "cluster", "agree": false, "lagMinutes": 17, "lagSince": "2026-11-09T05:03:34Z", "lagBasis": "run",
+  "message": "Azure is behind the cluster by 17 minutes. The cluster says: Checking update health. Azure still says: Update available. Sonar shows the cluster's state." }
+```
+
+| Field | Meaning |
+| --- | --- |
+| `azure`, `cluster` | Both sides, as each said it before the merge, so the stale Azure answer is shown and not hidden. |
+| `winner` | `cluster` when the cluster was read (also from the last good read), else `azure`. |
+| `agree` | `true` when both give the same `status` and `phase`. |
+| `lagMinutes`, `lagSince`, `lagBasis` | How long Azure has been behind: from the cluster's run start (running), or its end (finished or failed), `lagBasis` `run`; or from when Sonar first saw the state, `lagBasis` `observed`, when the run has no time yet. Also set, with `agree` `true`, when both say the update runs but Azure's newest step is at least 5 minutes older than the cluster's. `null` when Azure is not behind. |
+| `message` | One plain sentence for the page: the lag, or why the cluster was not read. Empty when both agree and the cluster was read. |
+
+**Account and safety.** The reader runs only `Get-` cmdlets, on one node at a time, over WinRM with Negotiate and short timeouts, so a node that restarts is skipped and the next one is tried. It needs the deployment account (config `updateAccount`, or `-UpdateCredential`), not the account that reads the logs. A node that refuses the account is not followed by the other nodes: the same account would fail everywhere and every failed sign-in counts at the domain. After the first refusal Sonar waits 15 minutes; after the second it stops until Sonar restarts or the password secret has a new version in Key Vault. A locked-out or disabled account stops it at once. The cluster is read at most every 10 seconds while an update runs and every 30 seconds otherwise.
+
+**Unverified parts.** The cmdlet output (`State`, versions, the run and its step names, `Get-ClusterNode`) was read on a live 12.2610 cluster after a finished SBE update. Sonar has not yet followed a whole update live from start to end on the cluster.
 
 ### provisioning
 

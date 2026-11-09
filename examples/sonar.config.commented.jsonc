@@ -77,8 +77,13 @@
   // DomainJoined and DomainAdminsConfigured. Only names and a keyvault:// reference for the password; a password in the file is refused.
   // The reference is keyvault://<vault>/<secret>, optionally /<version> (32 hex characters) to pin the secret version; an invalid one is
   // refused at load. maxRejections (1 to 5, default 2): rejections of the domain account before Sonar stops trying it until its password
-  // changes. Sonar never uses the LCM user.
+  // changes. Sonar never reads the LCM user from the master file.
   // "logAccounts": { "local": { "username": "azl-admin" }, "domain": { "netbios": "IIC", "username": "svc-join", "passwordRef": "keyvault://kv-example/svc-join-password", "maxRejections": 2 } },
+  // Optional. The deployment account that reads the cluster's own update service on one node (read-only), so the Update tab shows what the
+  // cluster says as it happens; Azure's update status lags it by many minutes. Not the log account. Names only; a password in the file is
+  // refused. Without it (and without -UpdateCredential) Sonar shows Azure only and says so. source is keyvault (vault, passwordSecret, and username
+  // or usernameSecret) or parameter (-UpdateCredential). domain is appended to a user name that has none.
+  // "updateAccount": { "source": "keyvault", "vault": "kv-example", "usernameSecret": "update-user", "passwordSecret": "update-password", "domain": "example.test" },
   // Optional. Append the run to this recording (JSON Lines). Start-AzlSonar.ps1 -Record overrides it.
   // "recordPath": "./recordings/clus01.jsonl",
   // Optional. Where the deployment logs are read on the seed node. The defaults are shown.

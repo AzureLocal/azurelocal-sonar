@@ -160,6 +160,7 @@ There is nothing to install: no service, no database, no build step.
 | `-PollSeconds` | `20` | Seconds between Azure polls (5 to 3600). Overrides the file. |
 | `-Port` | `8642` | Local port. Pick another if 8642 is taken (Sonar says so). |
 | `-Credential` | (none) | The log account; overrides `credential.source`. |
+| `-UpdateCredential` | (none) | The deployment account that reads the cluster's own update service on one node (read-only), so the Update tab shows what the cluster says as it happens and not Azure's delayed answer. Overrides `updateAccount.source`. Without it and without `updateAccount`, node-side update reading is off and the Update tab says so. See [updateAccount](docs/config.md#updateaccount-the-clusters-own-update-service). |
 | `-Monitor` | `Auto` | Which stage to watch: `Auto` (the whole flow) or one of `Discovery`, `Provisioning`, `OsConfiguration`, `Verification`, `Validate`, `Deployment`, `Update`, `AddNode`, `Repair`. A single monitor shows only its tile and reads only the sources it needs. See [Run one stage on its own](docs/run.md#run-one-stage-on-its-own--monitor). |
 | `-NoBrowser` | off | Do not open the browser. The URL with the access token is still printed (unless `-TokenFile` is used). |
 | `-NoAccessToken` | off | Turn the per-start access token off (also `accessToken: false` in the config). For a single-user machine only: any account on this machine can then read the page. |
@@ -183,7 +184,7 @@ Add `?demo=1` to the page URL to see the page with built-in sample data (a runni
 | `OsConfiguration` | The toolkit's OS configuration run | The OS configuration events and, for Arc Run Commands, Azure | `osConfigEventsPath` (`os-configuration-events.jsonl`) | Yes | No node logs |
 | `Validate` | The toolkit's ARM Validate | The validation resources in Azure, the cluster resource, the ARM events, the seed node log | `armEventsPath` (`arm-deployment-events.jsonl`) | Yes | Seed node log |
 | `Deployment` | The toolkit's ARM Deploy, then the post-deployment steps | The deployment resources in Azure, the cluster resource, the ARM events, the seed node log | `armEventsPath` | Yes | Seed node log |
-| `Update` | A solution update | The update resources in Azure, the cluster resource, the seed node log | none | Yes | Seed node log |
+| `Update` | A solution update | The update resources in Azure, the cluster resource, the seed node log, and (with an update account) the cluster's own update service on one node | none | Yes | Seed node log |
 | `AddNode` | Adding a node | The Arc machines, the cluster resource, the seed node log | none | Yes | Seed node log |
 | `Repair` | Repairing a node | The Arc machines, the cluster resource, the seed node log | none | Yes | Seed node log |
 | `Verification` | The toolkit's pre-cluster verification gate, between OS configuration and Validate: can the cluster deployment start, and what blocks it | The gate's event file only | `verificationEventsPath` (`precluster-verification-events.jsonl`) | No | No |

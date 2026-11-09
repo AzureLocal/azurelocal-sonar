@@ -37,6 +37,7 @@ Types are JSON types. "Dashboard" says what the key changes on the page. "Master
 | `armEventsPath` | string | no | `<temp>/azl-arm-<cluster.name>/arm-deployment-events.jsonl` with the master file, else none | `D:\Data\azl-arm\clus01\arm-deployment-events.jsonl` | `cluster.name` (the toolkit's default report directory) | The ARM Validate and Deploy event file written by the toolkit's `Invoke-AzureLocalArmDeployment.ps1` (`-ReportDirectory` moves it). Without it the **Validate** and **Deployment** modes show only what Azure reports and there are no `[arm]` log lines. Relative paths are relative to the config file. See [Validate and Deploy from the toolkit](./arm-run.md). |
 | `verificationEventsPath` | string | no | `<evidence folder>/arm-report/verification/live/precluster-verification-events.jsonl` with the master file (without an evidence folder `<temp>/azl-arm-<cluster.name>/arm-report/verification/live/...`), else none | `D:\Data\azl-ztp\evidence\arm-report\verification\live\precluster-verification-events.jsonl` | `provisioning.simplified.evidence_path` (the `arm-report` folder inside it) | The pre-cluster verification gate's event file (or the folder that holds it: the file name is added). Written by the toolkit's gate next to `report.json` and `summary.md`. Without it the **Verification** mode shows nothing and there are no `[verify]` log lines. The file is read whole and the latest run in it is shown; a file the gate replaces for a new run is shown as it is now. Relative paths are relative to the config file. Registered in the toolkit's variables registry as `tools.sonar.config_keys.Config.verificationEventsPath`. |
 | `logAccounts` | object | no | none | `{ "local": { "username": "azl-admin" }, "domain": { "netbios": "IIC", "username": "svc-join", "passwordRef": "keyvault://kv-example/svc-join-password" } }` | `identity.local_admin`, `identity.active_directory` (see below) | Which account reads a node's logs: `local` while it is a workgroup machine, `domain` once the OS configuration has reported both `DomainJoined` and `DomainAdminsConfigured`. Names only plus a `keyvault://<vault>/<secret>[/<version>]` reference; a password is refused. `domain.maxRejections` (whole number 1 to 5, default 2) is how many rejections the circuit breaker allows before it stops trying the domain account until its password changes, and also the most connection attempts with the domain account in flight at once: set it below the domain's lockout threshold. Edit the file to change it (`Set-AzlSonarConfig` does not set objects). A reference that is not valid (a plain password, a vault name Azure would not accept, a version that is not 32 hexadecimal characters) is a problem at load, naming `logAccounts.domain.passwordRef`. See [Log access](./log-access.md#the-lockout-circuit-breaker). |
+| `updateAccount` | object | no | none | `{ "source": "keyvault", "vault": "kv-example", "usernameSecret": "update-user", "passwordSecret": "update-password", "domain": "example.test" }` | - | The deployment account that reads the cluster's own update service on one node (read-only), so the Update tab shows what the cluster says as it happens and not Azure's delayed answer. See [updateAccount](#updateaccount-the-clusters-own-update-service). Absent: Sonar reads the Azure update resources only, as before, and the Update tab says that node-side reading is off. |
 | `recordPath` | string | no | none | `./recordings/clus01.jsonl` | - (use `-Record`) | Record every run (as `-Record`, which overrides it). |
 | `credential.source` | `prompt`, `parameter`, `keyvault` | no | `prompt` | `keyvault` | - (always `prompt`) | Who supplies the log account: asked at start; `-Credential`; or Key Vault. |
 | `credential.vault` | string | with `keyvault` | | `kv-example` | - | Name of the Key Vault that holds the log account (a name, never a value). Needs Az.KeyVault. |
@@ -83,7 +84,7 @@ Types are JSON types. "Dashboard" says what the key changes on the page. "Master
 | `identity.active_directory.netbios_name` | `logAccounts.domain.netbios` | Active Directory only. The `NETBIOS` of the domain account `NETBIOS\username` that reads a node's logs once the node has reported both `DomainJoined` and `DomainAdminsConfigured`. |
 | `identity.active_directory.domain_join_account.username` | `logAccounts.domain.username` | Active Directory only. The domain account **you supply**: it reads a node's logs once the node has reported both `DomainJoined` and `DomainAdminsConfigured`. Read defensively: absent is fine (the local account stays). |
 | `identity.active_directory.domain_join_account.password` | `logAccounts.domain.passwordRef` | Must be a `keyvault://<vault>/<secret>` reference, optionally `/<version>` (32 hexadecimal characters) to pin the secret version. Sonar reads the secret with Az.KeyVault when the first node needs it, keeps it as a secure string and never shows, logs or records it. A value that is not a valid reference stops the import with a message that names this key and does not repeat the value. See [Log access](./log-access.md#which-account-reads-which-node-local-first-then-the-domain-account). |
-| `identity.active_directory.lcm_user.*` | (not read) | Sonar never uses the LCM user, for the domain credential or for anything else. If `lcm_user` is the only account in the file, there is no domain account and the local account stays. |
+| `identity.active_directory.lcm_user.*` | (not read) | Sonar never reads the LCM user from the master file and never uses it for the domain credential. If `lcm_user` is the only account in the file, there is no domain account and the local account stays. To read the cluster's own update service as the deployment account, supply it yourself: [`updateAccount`](#updateaccount-the-clusters-own-update-service) or `-UpdateCredential`. |
 | `provisioning.simplified.evidence_path` + `discovery` | `discoveryPath` | The `discovery` folder inside the evidence folder (run the toolkit's discovery with `-OutputPath <evidence_path>\discovery`). Set whenever `evidence_path` is given. |
 | `provisioning.simplified.evidence_path` + `os-configuration-events.jsonl` | `osConfigEventsPath` | The evidence folder next to the ZTP event file. On the simplified route it follows `ztpEvents.path` (same default folder); on the ISO route it is set only when `evidence_path` is given. |
 | `provisioning.simplified.evidence_path` + `ztp-events.jsonl` | `ztpEvents.path` | Simplified route only. Without `evidence_path`, ZTP's default `%ProgramData%\AzureLocalZtp\<site_name>\evidence` (needs `provisioning.simplified.site_name`). |
@@ -116,6 +117,33 @@ It refuses these, with `YAML line N: ...` (the message names the line, never its
 - A nested list on one line (`- - a`), anchors, aliases and tags (`&`, `*`, `!`), block scalar headers with an indentation number (`|2`).
 - More than one document, or content after `...`; tab indentation.
 - Input over 2 MB, and nesting deeper than 40 levels.
+
+## updateAccount: the cluster's own update service
+
+Azure's update status lags the cluster by many minutes. With `updateAccount` Sonar also reads the cluster's own update service on one node, over WinRM, read-only (`Get-SolutionUpdate`, `Get-SolutionUpdateRun`, `Get-SolutionUpdateEnvironment`, `Get-ClusterNode`), and shows what the cluster says as it happens, after a deployment and in a standalone `-Monitor Update` session. The account must be the **deployment account** (a domain user), not the local administrator or the domain account that reads the logs. It is optional and off by default.
+
+```json
+"updateAccount": {
+  "source": "keyvault",
+  "vault": "kv-example",
+  "usernameSecret": "update-user",
+  "passwordSecret": "update-password",
+  "domain": "example.test"
+}
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `updateAccount.source` | `keyvault`, `parameter` | `keyvault` when `vault` is set, else `parameter` | Where the account comes from: Key Vault, or `-UpdateCredential` of `Start-AzlSonar.ps1`. |
+| `updateAccount.username` | string | | The account name: `user@domain`, `DOMAIN\user`, or a name without a domain (then `domain` qualifies it). Never a password. When absent, the name is read from `usernameSecret`. |
+| `updateAccount.domain` | string | | Appended as `@domain` to a name that has no `@` and no backslash (the vault often keeps the name without it). |
+| `updateAccount.vault` | string | | The Key Vault that holds the secrets (a name). Needs Az.KeyVault and an Azure sign-in that can read secrets. |
+| `updateAccount.usernameSecret` | string | | The secret that holds the user name. Needed when `username` is not set. |
+| `updateAccount.passwordSecret` | string | | The secret that holds the password. It is kept as a SecureString and never shown, logged or recorded. |
+
+A password in the file (`password`, `secret`, `secretValue`) is refused. `-UpdateCredential (Get-Credential)` gives the account without any key (`source` `parameter`, or no `updateAccount` at all). With `-InfrastructureFile` the master file does not carry this account: give `-UpdateCredential`, or generate a config file with `ConvertTo-AzlSonarConfig` and add `updateAccount`. `updateTrack` `off` turns the whole update track off, including this.
+
+Without an account, or when it cannot be read, Sonar keeps its Azure-only behaviour and the Update tab says so in plain words ("Node-side update reading is off ..."). A refused account is never retried per poll: see [the update object](./api.md#updatesources-the-cluster-against-azure).
 
 ## Monitoring a monthly update
 

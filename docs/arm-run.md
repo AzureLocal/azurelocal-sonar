@@ -42,7 +42,7 @@ With the master file, Sonar follows the toolkit's default: `arm-deployment-event
 ## What Sonar does not do
 
 - It never submits, resumes or cancels anything. It reads the event file and the Azure status it already read.
-- It never uses the LCM account. The domain account that reads node logs is the one described in [Log access](./log-access.md), unchanged.
+- It never uses the LCM account for the toolkit run or for the logs. The domain account that reads node logs is the one described in [Log access](./log-access.md), unchanged. The optional update account, supplied by you, reads only the cluster's update service (see [updateAccount](./config.md#updateaccount-the-clusters-own-update-service)).
 - The event file holds references and names only; Sonar masks anything that looks like a secret before it stores or serves a line.
 - The event file contract is the toolkit's (`docs/design/arm-validate-deploy.md`, section 11). The step numbers and times the toolkit reports come from `deploymentSettings`; whether the real payload carries them as assumed is not verified here.
 

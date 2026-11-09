@@ -243,7 +243,17 @@ Azure Local is updated about once a month. The **Update** tile and mode follow t
 
 **While an update runs.** Auto switches to the Update view when an update starts or its state becomes Preparing or Installing (also on a cluster whose deployment finished long ago). The Steps box shows the update run (`updates/<name>/updateRuns`) with each machine's steps, and the node log of the seed node follows. Cluster-Aware Updating restarts the machines one after another, so the seed node restarts during the update: the log tile then reads **Reconnecting to node logs** (not an error), and Sonar continues from the last line it read when the node answers again. The *Update history* panel lists the earlier runs.
 
-**Not verified on a live update.** *Waiting for content* and the readiness checks were seen on a live 12.2610 cluster. The run steps, the per-machine progress and the restart of the seed node are built from the Learn reference and not yet confirmed on a whole live update.
+**What the cluster says (needs an update account).** Azure's update status lags the cluster by many minutes. On 9 Nov 2026 an SBE update spent its first 17 minutes in Preparing and HealthChecking on the cluster while Azure said *Ready*, and the tab said "Update available, not started". With [`updateAccount`](./config.md#updateaccount-the-clusters-own-update-service) (or `-UpdateCredential`) Sonar also reads the cluster's own update service on one node, read-only, and shows both:
+
+- The verdict is the cluster's when it differs from Azure's. The mapping is: `Ready` is *Update available*, `Preparing` is *Preparing the update*, `HealthChecking` is *Checking update health*, `HealthCheckFailed` is *Update health check failed*, `Installing` is *Installing <version>*, `InstallationFailed` is *Update failed*, `Installed` with a run that `Succeeded` is *Update succeeded*, `AdditionalContentRequired` is *Waiting for content*, `Invalid` is *Does not match this hardware*.
+- **Where this comes from** shows what the cluster says and what Azure says, and, when Azure is behind, how long: *Azure is behind the cluster by 17 minutes*.
+- **The update run on the cluster** shows when it started and finished, how long it ran or took, the steps done so far, the step that runs now, the failed step with its error text, and the solution and SBE version before and after (the version before is only known when Sonar was watching while the run ran).
+- **Machines in the update** shows each machine as the cluster sees it: `Up`, `Paused` (drained for patching), `Down` (restarting), and the step it is in. The machine cards say *Being patched*, *Restarting*, *Updated* or *Waiting*.
+- **What happened** lists *update started*, *update finished* or *failed*, and when a node went Paused or Down. **Update history** includes the runs the cluster lists.
+
+A node restarts during the update. When the node Sonar reads does not answer, Sonar reads the next one and says so ("n01 did not answer, so n02 was read"). That is information, not an error. When no node answers, the last answer stays for 10 minutes, marked as old. Without an account the tab says "Node-side update reading is off" and why, and shows Azure only.
+
+**Not verified on a live update.** *Waiting for content* and the readiness checks were seen on a live 12.2610 cluster. The cluster's update cmdlets and their output were read on a live 12.2610 cluster after a finished SBE update. The step tree of a running update, the per-machine progress and the restart of the seed node on the Azure side are built from the Learn reference and the finished run; Sonar has not yet followed a whole update live from start to end.
 
 ### Monitoring a monthly update
 
@@ -254,8 +264,10 @@ Two ways to follow the monthly update:
 
    ```powershell
    Connect-AzAccount
-   ./Start-AzlSonar.ps1 -ConfigPath ./config/update.json -Monitor Update -Credential (Get-Credential)
+   ./Start-AzlSonar.ps1 -ConfigPath ./config/update.json -Monitor Update -Credential (Get-Credential) -UpdateCredential (Get-Credential)
    ```
+
+   `-UpdateCredential` is the deployment account that reads the cluster's own update service; leave it out (and `updateAccount` unset) and Sonar shows what Azure reports, which can be many minutes behind.
 
    With `-Monitor Update` Sonar reads the cluster resource, the Arc machine of each node, the update resources and the log of the seed node. It reads no deployment settings, edge machines, ARM deployments or event files, so no old deployment tree appears and the config needs none of the deployment, provisioning, ZTP, OS configuration or ARM keys. The [minimal config](./config.md#monitoring-a-monthly-update) is five settings and a node.
 
