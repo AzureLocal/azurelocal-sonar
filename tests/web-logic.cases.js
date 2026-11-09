@@ -2152,7 +2152,7 @@ test('cluster card (Update): the update state, the current and target version an
   var c = m.clusterCard({ clusterResource: clusterRes(), update: up }, 'update'), r = rowsOf(c);
   eq(r['Update'], 'Installing'); eq(r['Current version'], '12.2609.0.1'); eq(r['Target version'], '12.2610.0.4'); eq(c.kind, 'run');
   eq(r['Update health'], undefined, 'a healthy summary adds no row');
-  var bad = m.clusterCard({ clusterResource: clusterRes(), update: { phase: 'attention', summary: { currentVersion: '1', healthState: 'Failure', failedChecks: [{ title: 'Storage pool is not healthy' }, { title: 'A node is paused' }] }, active: null, tree: [] } }, 'update');
+  var bad = m.clusterCard({ clusterResource: clusterRes(), update: { phase: 'attention', summary: { currentVersion: '1', healthState: 'Failure', failedChecks: [{ title: 'Storage pool is not healthy', severity: 'Critical' }, { title: 'A node is paused', severity: 'Error' }] }, active: null, tree: [] } }, 'update');
   eq(rowsOf(bad)['Update'], 'Needs attention'); eq(rowsOf(bad)['Update health'], 'Failure'); eq(bad.failures, ['Storage pool is not healthy', 'A node is paused']); eq(bad.kind, 'err');
   ['idle', 'available', 'preparing', 'failed'].forEach(function (p) { eq(typeof rowsOf(m.clusterCard({ clusterResource: clusterRes(), update: { phase: p, summary: {}, tree: [] } }, 'update'))['Update'], 'string', p); });
   eq(rowsOf(m.clusterCard({ clusterResource: clusterRes(), update: { phase: 'idle', summary: {}, tree: [] } }, 'update'))['Update'], 'Up to date');
@@ -2335,6 +2335,215 @@ test('Verification page: hostile text stays text; only a documentation https sou
     eq(links[0].attrs.href, 'https://learn.microsoft.com/azure/azure-local/x');
     eq(text.indexOf('https://evil.example/x') >= 0, true, 'a foreign source is plain text');
     eq(textOf(dom.byId.summary).indexOf('Verdict: Fail') >= 0, true, 'the banner is shown');
+  });
+});
+
+// ---------------------------------------------------------------- the Update tab: a summary that says AppliedSuccessfully is not an update that ran
+
+var LEARN_SBE = 'https://learn.microsoft.com/azure/azure-local/update/solution-builder-extension?view=azloc-2610#the-additionalcontentrequired-update-state';
+// What /api/state update reads for the live cluster (sanitised): AppliedSuccessfully, never updated, one SBE update waiting for content,
+// two Informational readiness checks.
+function liveUpdate(extra) {
+  var u = {
+    verified: false, status: 'notstarted', phase: 'waiting', level: 'warn', label: 'Waiting for content', ran: false,
+    nextAction: { text: 'The update package must be added (SBE side-load): the hardware vendor’s Solution Builder Extension files have to be downloaded and imported before this update can be prepared or installed. The Learn page explains how.', guide: LEARN_SBE },
+    summary: { state: 'AppliedSuccessfully', healthState: 'Success', currentVersion: '12.2610.1004.50', currentSbeVersion: '', lastChecked: '2026-11-06T09:14:00Z', lastUpdated: '',
+      checkCounts: { total: 3, failed: 2, critical: 0, error: 0, warning: 0, informational: 2, other: 0 },
+      failedChecks: [
+        { title: 'The machine proxy on each failover cluster node should be set to a local proxy server', severity: 'Informational', description: '', remediation: 'https://learn.microsoft.com/azure/azure-local/manage/configure-proxy-settings-23h2' },
+        { title: 'The CAU clustered role should be installed on the cluster', severity: 'Informational', description: '', remediation: 'Install the Cluster-Aware Updating clustered role.' }] },
+    active: null,
+    updates: [{ name: 'SBE5.0.2609.1611', version: '5.0.2609.1611', displayName: 'SBE5.0.2609.1611', description: 'Premier SBE for Example 16G AX Servers', packageType: 'SBE',
+      state: 'AdditionalContentRequired', stateWord: 'Waiting for content', phase: 'waiting', level: 'warn', rebootRequired: 'Unknown' }],
+    runs: [], run: null, tree: [], counts: {}
+  };
+  Object.keys(extra || {}).forEach(function (k) { u[k] = extra[k]; });
+  return u;
+}
+function doneState(update, extra) {
+  var s = { phase: 'done', activePhase: 'deployment', cluster: 'clus01', update: update, nodes: [{ name: 'n1', arcStatus: 'Connected', seed: true }], deployment: { status: 'Success', tree: [] }, validation: { status: 'Success', tree: [] } };
+  Object.keys(extra || {}).forEach(function (k) { s[k] = extra[k]; });
+  return s;
+}
+
+test('Update tile: the live payload (AppliedSuccessfully, never updated, an SBE update waits for content) is amber, not green', function () {
+  var t = tileOf(m.modeStates(doneState(liveUpdate())), 'update');
+  eq(t.status, 'warn');
+  eq(t.line, 'Waiting for content');
+  eq(/SBE side-load/.test(t.tip), true, 'the tip carries the next action');
+  eq(/2 informational/.test(t.tip), true, 'and the counts of the failed checks');
+});
+
+test('Update tile: the state Sonar sent before the fix (status success, phase idle, no run) is not green', function () {
+  var t = tileOf(m.modeStates(doneState({ verified: false, status: 'success', phase: 'idle', run: null, active: null, tree: [], summary: { state: 'AppliedSuccessfully' } })), 'update');
+  eq(t.status, 'idle');
+});
+
+test('Update tile: neutral with the label "No update has run" when nothing ran, nothing waits and only Informational checks failed', function () {
+  var u = liveUpdate({ phase: 'idle', level: 'neutral', label: 'No update has run', nextAction: null, updates: [] });
+  var t = tileOf(m.modeStates(doneState(u)), 'update');
+  eq(t.status, 'idle'); eq(t.line, 'No update has run');
+  eq(m.updateLevel(u), 'neutral');
+});
+
+test('Update tile: green only for level ok (a real run finished), "Done"', function () {
+  var t = tileOf(m.modeStates(doneState({ status: 'success', phase: 'idle', level: 'ok', label: 'Update succeeded (12.2611.1002.10)', ran: true, tree: [{ id: '1', name: 'Prepare', status: 'success', children: [] }], summary: {} })), 'update');
+  eq(t.status, 'ok'); eq(t.line, 'Done');
+});
+
+test('Update tile: the colour is the back end level: error red, run with the step count, warn amber', function () {
+  var tree = [{ id: '1', name: 'Prepare', status: 'success', children: [] }, { id: '2', name: 'Install', status: 'running', children: [] }, { id: '3', name: 'Finish', status: 'notstarted', children: [] }];
+  var run = tileOf(m.modeStates(doneState({ status: 'running', phase: 'installing', level: 'run', label: 'Installing 12.2611.1002.10', tree: tree, summary: {} })), 'update');
+  eq(run.status, 'run'); eq(run.line, 'Step 2 of 3');
+  var failed = tileOf(m.modeStates(doneState({ status: 'error', phase: 'failed', level: 'error', label: 'Update failed', tree: tree, summary: {} })), 'update');
+  eq(failed.status, 'err'); eq(failed.line, 'Failed');
+  var check = tileOf(m.modeStates(doneState(liveUpdate({ status: 'notstarted', phase: 'idle', level: 'error', label: 'Readiness check failed', updates: [] }))), 'update');
+  eq(check.status, 'err'); eq(check.line, 'Readiness check failed');
+  var warn = tileOf(m.modeStates(doneState(liveUpdate({ phase: 'idle', level: 'warn', label: 'Readiness warning', updates: [] }))), 'update');
+  eq(warn.status, 'warn');
+});
+
+test('Update tile: no update object at all stays a plain waiting tile with the old text', function () {
+  var t = tileOf(m.modeStates({ phase: 'done', nodes: [] }), 'update');
+  eq(t.status, 'idle'); eq(t.line, '');
+  eq(/Available after the cluster is deployed/.test(t.tip), true);
+});
+
+test('updateChecks: counts per severity, the worst non-informational severity decides', function () {
+  var live = m.updateChecks(liveUpdate());
+  eq(live.counts.informational, 2); eq(live.text, '2 informational'); eq(live.worst, 'idle');
+  var mix = m.updateChecks({ summary: { checkCounts: { total: 5, failed: 4, critical: 1, error: 0, warning: 1, informational: 2, other: 0 }, failedChecks: [] } });
+  eq(mix.text, '1 critical, 1 warning, 2 informational'); eq(mix.worst, 'err');
+  eq(m.updateChecks({ summary: { checkCounts: { warning: 1 }, failedChecks: [] } }).worst, 'warn');
+  eq(m.updateChecks({ summary: {} }).worst, 'ok');
+  eq(m.updateChecks({ summary: { failedChecks: [{ title: 'a', severity: 'Error' }, { title: 'b', severity: 'Weird' }] } }).counts.other, 1, 'counts are derived when the back end sent none');
+});
+
+test('updatePanels: the offered update with its next action link, and the Informational checks as a list with their remediation link', function () {
+  var p = m.updatePanels(liveUpdate());
+  eq(p.map(function (x) { return x.title; }), ['Updates Azure offers', 'Readiness checks that failed: 2 informational']);
+  var offers = p[0];
+  eq(offers.kind, 'warn');
+  eq(offers.rows[0].k, 'SBE5.0.2609.1611');
+  eq(offers.rows[0].v, 'SBE · Waiting for content · Premier SBE for Example 16G AX Servers');
+  var next = offers.rows[offers.rows.length - 1];
+  eq(next.k, 'Next'); eq(next.href, LEARN_SBE); eq(/SBE side-load/.test(next.v), true);
+  var checks = p[1];
+  eq(checks.kind, 'idle', 'Informational checks do not colour the panel');
+  eq(checks.rows.map(function (r) { return r.k; }), ['Informational', 'Informational']);
+  eq(checks.rows[0].href, 'https://learn.microsoft.com/azure/azure-local/manage/configure-proxy-settings-23h2');
+  eq(checks.rows[1].href, undefined, 'a remediation that is only text is shown as text');
+  eq(/Install the Cluster-Aware Updating clustered role/.test(checks.rows[1].v), true);
+});
+
+test('updatePanels: a Critical check makes the checks panel red; the history lists the runs', function () {
+  var u = liveUpdate({ runs: [{ name: 'r1', update: 'Solution12.2611.1002.10', status: 'success', timeStarted: '2026-12-09T18:40:00Z', duration: 'PT0H40M' }] });
+  u.summary.checkCounts = { total: 3, failed: 2, critical: 1, error: 0, warning: 0, informational: 1, other: 0 };
+  u.summary.failedChecks[0].severity = 'Critical';
+  var p = m.updatePanels(u);
+  eq(p[1].kind, 'err'); eq(p[1].title, 'Readiness checks that failed: 1 critical, 1 informational');
+  eq(p[2].title, 'Update history');
+  eq(/Succeeded/.test(p[2].rows[0].v), true); eq(/Solution12\.2611/.test(p[2].rows[0].v), true);
+});
+
+test('updatePanels: an update state Sonar does not know is shown as the raw word, neutral', function () {
+  var u = liveUpdate({ updates: [{ name: 'X1', version: '1.0', packageType: 'Solution', state: 'SomethingNew', stateWord: 'SomethingNew', phase: 'idle', level: 'neutral' }], nextAction: null });
+  var p = m.updatePanels(u);
+  eq(p[0].kind, 'idle'); eq(/SomethingNew/.test(p[0].rows[0].v), true);
+});
+
+test('updatePanels: only links to known documentation hosts are links', function () {
+  var u = liveUpdate({ nextAction: { text: 'x', guide: 'https://evil.example/doc' } });
+  eq(m.updatePanels(u)[0].rows.pop().href, undefined);
+});
+
+test('updateFacts: never updated says so, a lastUpdated shows the date', function () {
+  var f = m.updateFacts(liveUpdate());
+  eq(f.filter(function (x) { return x.k === 'Last updated'; })[0].v, 'never: no update has run');
+  eq(f.filter(function (x) { return x.k === 'Current version'; })[0].v, '12.2610.1004.50');
+  var u = liveUpdate(); u.summary.lastUpdated = '2026-12-09T19:20:00Z';
+  eq(/never/.test(m.updateFacts(u).filter(function (x) { return x.k === 'Last updated'; })[0].v), false);
+});
+
+test('summaryFor (Update): waiting for content states the next action; the panels and facts are there', function () {
+  var sm = m.summaryFor(doneState(liveUpdate()), 'update', { nodes: [{ name: 'n1', seed: true }] });
+  eq(sm.status, 'warn'); eq(sm.chip, { kind: 'warn', text: 'Needs attention' });
+  eq(/^Waiting for content: The update package must be added \(SBE side-load\)/.test(sm.headline), true);
+  eq(sm.panels.length, 2);
+  eq(sm.facts.length > 0, true);
+});
+
+test('summaryFor (Update): a running update keeps the step headline', function () {
+  var tree = [{ id: '1', name: 'Prepare', status: 'success', children: [] }, { id: '2', name: 'Update node 2', status: 'running', children: [] }];
+  var sm = m.summaryFor({ phase: 'update', activePhase: 'update', nodes: [], update: { status: 'running', phase: 'installing', level: 'run', label: 'Installing', tree: tree, summary: {} } }, 'update');
+  eq(sm.headline, 'Update is running: step 2 of 2 (Update node 2)');
+});
+
+test('activeModeId: Auto lands on Update when an update installs or prepares, also while the phase still reads done', function () {
+  eq(m.activeModeId({ phase: 'update', activePhase: 'update' }), 'update');
+  eq(m.activeModeId(doneState({ status: 'running', phase: 'installing', level: 'run', summary: {} })), 'update');
+  eq(m.activeModeId(doneState({ status: 'running', phase: 'preparing', level: 'run', summary: {} })), 'update');
+  eq(m.activeModeId(doneState(liveUpdate())), 'deploy', 'a waiting update right after the deployment stays on Deployment');
+  eq(m.activeModeId({ phase: 'failed', activePhase: 'update' }), 'update');
+});
+
+test('a standalone Update monitor shows the Update tile only', function () {
+  var tiles = m.modeStates({ monitor: 'Update', phase: 'update', activePhase: 'update', update: liveUpdate(), nodes: [] });
+  eq(tiles.filter(function (t) { return !t.hidden; }).map(function (t) { return t.id; }), ['update']);
+  eq(tileOf(tiles, 'update').status, 'warn');
+  eq(m.activeModeId({ monitor: 'Update', phase: 'update', update: liveUpdate() }), 'update');
+});
+
+test('cluster card (Update): the live payload says what waits, lists no red failure for Informational checks, shows Critical as a failure and Warning as an amber row', function () {
+  var c = m.clusterCard({ clusterResource: clusterRes(), update: liveUpdate() }, 'update'), r = rowsOf(c);
+  eq(r['Update'], 'Waiting for content'); eq(r['Current version'], '12.2610.1004.50'); eq(r['Target version'], '5.0.2609.1611');
+  eq(r['Last updated'], 'never: no update has run');
+  eq(c.failures, []); eq(c.kind, 'warn');
+  var u = liveUpdate(); u.level = 'error'; u.summary.failedChecks = [{ title: 'Storage pool is not healthy', severity: 'Critical' }, { title: 'Time skew', severity: 'Warning' }, { title: 'Proxy', severity: 'Informational' }];
+  u.summary.checkCounts = { total: 3, failed: 3, critical: 1, error: 0, warning: 1, informational: 1, other: 0 };
+  var b = m.clusterCard({ clusterResource: clusterRes(), update: u }, 'update');
+  eq(b.failures, ['Storage pool is not healthy']); eq(rowsOf(b)['Warning'], 'Time skew'); eq(b.kind, 'err');
+});
+
+test('tailerView: while an update runs an unreachable seed node is "Reconnecting to node logs", not an error', function () {
+  var down = { state: 'unavailable', reason: 'Cannot reach the logs on n1 (192.0.2.11).', node: 'n1' };
+  var upd = { phase: 'update', update: { status: 'running', phase: 'installing', level: 'run', summary: {} } };
+  var v = m.tailerView(down, upd);
+  eq(v.state, 'reconnecting'); eq(v.bad, false); eq(v.label, 'Reconnecting to node logs');
+  eq(/Cannot reach the logs on n1/.test(v.reason), true, 'the original reason is kept');
+  var idle = m.tailerView(down, doneState(liveUpdate()));
+  eq(idle.state, 'unavailable'); eq(idle.bad, true);
+  eq(m.tailerView({ state: 'connected', node: 'n1' }, upd), { state: 'connected', bad: false, label: 'Tailer: connected to n1', reason: '' });
+  eq(m.tailerView(down, null).bad, true, 'no state yet: still an error');
+});
+
+test('emptyLogView: Reconnecting to node logs while the seed node restarts', function () {
+  var v = m.emptyLogView({}, false, 0, 'reconnecting');
+  eq(v.title, 'Reconnecting to node logs…'); eq(v.kind, 'waiting');
+  eq(m.emptyLogView({}, false, 0, 'unavailable').title, 'No log lines: the log tailer cannot reach the seed node.');
+});
+
+
+test('Update view in the page: hostile check titles, remediation links and offer descriptions render as text; only allow-listed links are links', function () {
+  withDom(function (dom, h) {
+    var u = liveUpdate();
+    u.summary.failedChecks = [
+      { title: HOSTILE[0], severity: 'Informational', description: HOSTILE[1], remediation: HOSTILE[2] },
+      { title: 'Proxy', severity: 'Informational', description: '', remediation: 'https://learn.microsoft.com/azure/azure-local/manage/configure-proxy-settings-23h2' },
+      { title: 'Elsewhere', severity: 'Informational', description: '', remediation: 'https://evil.example/fix' }];
+    u.summary.checkCounts = { total: 3, failed: 3, critical: 0, error: 0, warning: 0, informational: 3, other: 0 };
+    u.updates[0].description = HOSTILE[1];
+    h.app.config = { cluster: 'clus01', nodes: [{ name: 'n1', seed: true }] };
+    h.app.state = { cluster: 'clus01', phase: 'update', activePhase: 'update', monitor: 'Update', nodes: [{ name: 'n1', arcStatus: 'Connected' }], update: u };
+    h.renderSummary();
+    var host = dom.byId.summary;
+    assertInert(host, 'update summary');
+    var anchors = host.querySelectorAll('a');
+    eq(anchors.length, 2, 'the next-action Learn link and the one allow-listed remediation link');
+    anchors.forEach(function (a) { eq(a.attrs.rel, 'noopener noreferrer'); eq(a.attrs.target, '_blank'); });
+    eq(textOf(host).indexOf(HOSTILE[0]) >= 0, true, 'the hostile title shows as text');
+    eq(textOf(host).indexOf('Waiting for content') >= 0, true);
+    staticIcons(dom, 'update summary');
   });
 });
 

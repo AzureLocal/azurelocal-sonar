@@ -32,9 +32,9 @@
   var REPLAY_SPEEDS = [1, 30, 60, 240];
   var DEMO_ROUTE = (function () {
     if (typeof location === 'undefined') return '';
-    var m = /(?:^|[?&])route=(simplified|oem|oem-image|osconfig|arm|iso|discovery|cluster)(?:&|$)/i.exec(location.search);
+    var m = /(?:^|[?&])route=(simplified|oem|oem-image|osconfig|arm|iso|discovery|cluster|update)(?:&|$)/i.exec(location.search);
     var k = m ? m[1].toLowerCase() : '';
-    return k === 'simplified' || k === 'osconfig' || k === 'arm' || k === 'iso' || k === 'discovery' || k === 'cluster' ? k : (m ? 'oem-image' : '');
+    return k === 'simplified' || k === 'osconfig' || k === 'arm' || k === 'iso' || k === 'discovery' || k === 'cluster' || k === 'update' ? k : (m ? 'oem-image' : '');
   })();
 
   // ------------------------------------------------------------------ state
@@ -773,8 +773,148 @@
     return out.sort(function (a, b) { return (a.status === 'error' ? 0 : 1) - (b.status === 'error' ? 0 : 1); });
   }
 
-  var CLUSTER_UPDATE_PHASE = { idle: 'Up to date', available: 'Update available', preparing: 'Preparing', installing: 'Installing', failed: 'Failed', attention: 'Needs attention', unknown: 'Not known yet' };
-  var CLUSTER_STATUS_KIND = { success: 'ok', running: 'run', error: 'err', notstarted: 'idle', skipped: 'ok', unknown: 'idle' };
+  // ------------------------------------------------------------------ Update (pure; also run by tests under Node)
+  //
+  // state.update comes from the back end with a verdict: status (notstarted | running | success | error: success only after a
+  // real update run), phase (idle, available, waiting, preparing, installing, failed, attention), level (neutral | run | warn |
+  // error | ok: the colour of the tab) and label. The summary state AppliedSuccessfully alone is what a cluster says before any
+  // update ever ran, so it never turns the tab green. A failed readiness check colours the tab by its severity (Critical and
+  // Error red, Warning amber); Informational checks are only listed.
+
+  var UPDATE_LEVELS = ['neutral', 'run', 'warn', 'error', 'ok'];
+  var UPDATE_TILE_STATUS = { error: 'err', run: 'run', warn: 'warn', ok: 'ok', neutral: 'idle' };
+  var UPDATE_SEVERITY_ORDER = ['critical', 'error', 'warning', 'informational', 'other'];
+  var UPDATE_SEVERITY_WORD = { critical: 'critical', error: 'error', warning: 'warning', informational: 'informational', other: 'other' };
+  var UPDATE_PHASE_WORD = { idle: 'No update has run', available: 'Update available', waiting: 'Waiting for content', preparing: 'Preparing', installing: 'Installing', failed: 'Failed', attention: 'Needs attention', unknown: 'Not known yet' };
+
+  function updOf(state) { return isObj(state) && isObj(state.update) ? state.update : null; }
+
+  // The level of the tab. A state from an older Sonar (an old recording) has no level: only a finished tree counts as done.
+  function updateLevel(upd) {
+    if (!isObj(upd)) return 'neutral';
+    var lv = str(upd.level).toLowerCase();
+    if (UPDATE_LEVELS.indexOf(lv) >= 0) return lv;
+    var ph = str(upd.phase);
+    if (ph === 'failed' || ph === 'attention') return 'error';
+    if (ph === 'installing' || ph === 'preparing') return 'run';
+    if (ph === 'waiting') return 'warn';
+    var st = sectionStatus(upd);
+    if (st === 'error') return 'error';
+    if (st === 'running') return 'run';
+    if (st === 'success') return arr(upd.tree).length ? 'ok' : 'neutral';
+    return 'neutral';
+  }
+
+  // Failed readiness checks of the summary, worst first, and the counts per severity.
+  function updateChecks(upd) {
+    var sum = isObj(upd) && isObj(upd.summary) ? upd.summary : {}, c = isObj(sum.checkCounts) ? sum.checkCounts : {};
+    var items = arr(sum.failedChecks).filter(isObj).map(function (x) {
+      var sev = str(x.severity).toLowerCase();
+      return { title: str(x.title), severity: str(x.severity), key: UPDATE_SEVERITY_ORDER.indexOf(sev) >= 0 ? sev : 'other', description: str(x.description), remediation: str(x.remediation) };
+    });
+    var counts = {};
+    UPDATE_SEVERITY_ORDER.forEach(function (k) {
+      counts[k] = c[k] !== undefined ? Number(c[k]) || 0 : items.filter(function (x) { return x.key === k; }).length;
+    });
+    var text = UPDATE_SEVERITY_ORDER.filter(function (k) { return counts[k] > 0; }).map(function (k) { return counts[k] + ' ' + UPDATE_SEVERITY_WORD[k]; }).join(', ');
+    var worst = counts.critical || counts.error ? 'err' : counts.warning ? 'warn' : counts.informational || counts.other ? 'idle' : 'ok';
+    return { counts: counts, text: text, worst: worst, items: items, total: Number(c.total) || 0, failed: items.length };
+  }
+
+  // The Update tile: { status ok|run|warn|err|idle, line, tip }.
+  function updateTile(upd) {
+    if (!isObj(upd)) return { status: 'idle', line: '', tip: '' };
+    var lv = updateLevel(upd), status = UPDATE_TILE_STATUS[lv], label = str(upd.label), pr = stepProgress(upd.tree), chk = updateChecks(upd);
+    var line;
+    if (lv === 'run') line = pr.total ? 'Step ' + pr.current + ' of ' + pr.total : 'Running';
+    else if (lv === 'ok') line = 'Done';
+    else if (lv === 'error' && str(upd.status) === 'error') line = 'Failed';
+    else if (lv === 'error' && !label) line = 'Failed';
+    else line = label;
+    var tip = [label, isObj(upd.nextAction) ? str(upd.nextAction.text) : '', chk.text ? 'Readiness checks that failed: ' + chk.text + '.' : ''].filter(Boolean).join(' ');
+    return { status: status, line: line, tip: tip };
+  }
+
+  // One update Azure offers as a row: { k, v, href, linkText }.
+  function updateOfferRow(u) {
+    var parts = [str(u.packageType), str(u.stateWord) || str(u.state), str(u.description)].filter(Boolean);
+    if (str(u.rebootRequired) && str(u.rebootRequired).toLowerCase() === 'true') parts.push('reboot required');
+    if (u.progressPercentage !== null && u.progressPercentage !== undefined && u.progressPercentage !== '' && str(u.level) === 'run') parts.push(Number(u.progressPercentage) + '%');
+    var name = str(u.name) || str(u.displayName);
+    return { k: name + (str(u.version) && name.indexOf(str(u.version)) < 0 ? ' ' + str(u.version) : ''), v: parts.join(' · ') + (str(u.notifyMessage) ? ' (' + firstLine(u.notifyMessage, 160) + ')' : '') };
+  }
+
+  // The panels of the Update view: what Azure offers (with the next action), the readiness checks, the history of runs.
+  function updatePanels(upd) {
+    if (!isObj(upd)) return [];
+    var out = [], offers = arr(upd.updates).filter(isObj);
+    if (offers.length) {
+      var rows = offers.slice(0, 6).map(updateOfferRow);
+      if (offers.length > 6) rows.push({ k: 'More', v: (offers.length - 6) + ' more updates are listed by Azure' });
+      var next = isObj(upd.nextAction) ? upd.nextAction : null;
+      if (next && str(next.text)) {
+        var link = safeLink(next.guide), r = { k: 'Next', v: str(next.text) };
+        if (link) { r.href = link; r.linkText = 'Learn page'; }
+        rows.push(r);
+      }
+      var worst = offers.map(function (u) { return UPDATE_TILE_STATUS[str(u.level)] || 'idle'; });
+      var kind = worst.indexOf('err') >= 0 ? 'err' : worst.indexOf('warn') >= 0 ? 'warn' : worst.indexOf('run') >= 0 ? 'run' : 'idle';
+      out.push({ node: '', title: 'Updates Azure offers', kind: kind, rows: rows, until: '' });
+    }
+    var chk = updateChecks(upd);
+    if (chk.failed) {
+      var crows = chk.items.slice(0, 10).map(function (x) {
+        var url = safeLink(x.remediation), row = { k: x.severity || 'Check', v: x.title };
+        if (url) { row.href = url; row.linkText = 'Remediation'; }
+        else if (x.remediation) row.v += ': ' + firstLine(x.remediation, 160);
+        return row;
+      });
+      if (chk.items.length > 10) crows.push({ k: 'More', v: (chk.items.length - 10) + ' more checks' });
+      out.push({ node: '', title: 'Readiness checks that failed: ' + chk.text, kind: chk.worst, rows: crows, until: '' });
+    }
+    var runs = arr(upd.runs).filter(isObj);
+    if (runs.length) {
+      var hrows = runs.slice(0, 8).map(function (x) {
+        var t = parseTime(x.timeStarted);
+        return { k: isNaN(t) ? str(x.name) : fmtDateTime(t), v: [STATUS_LABEL[normStatus(x.status)] || str(x.status), str(x.duration), str(x.update)].filter(Boolean).join(' · ') };
+      });
+      out.push({ node: '', title: 'Update history', kind: 'idle', rows: hrows, until: '' });
+    }
+    return out;
+  }
+
+  // The facts line of the Update view.
+  function updateFacts(upd) {
+    var sum = isObj(upd) && isObj(upd.summary) ? upd.summary : null;
+    if (!sum) return [];
+    var out = [], t = parseTime(sum.lastChecked), u = parseTime(sum.lastUpdated);
+    if (str(sum.currentVersion)) out.push({ k: 'Current version', v: str(sum.currentVersion) });
+    if (str(sum.currentSbeVersion)) out.push({ k: 'Current SBE', v: str(sum.currentSbeVersion) });
+    if (!isNaN(t)) out.push({ k: 'Last checked', v: fmtDateTime(t) });
+    out.push({ k: 'Last updated', v: isNaN(u) ? 'never: no update has run' : fmtDateTime(u) });
+    if (str(sum.healthState) && str(sum.healthState).toLowerCase() !== 'success') out.push({ k: 'Update health', v: str(sum.healthState), warn: true });
+    return out;
+  }
+
+  // Is an update installing or preparing right now? (the node restarts during one: the log tailer reconnects, it is not an error)
+  function updateActive(state) {
+    var upd = updOf(state);
+    return !!upd && str(upd.status) === 'running' && ['installing', 'preparing'].indexOf(str(upd.phase)) >= 0;
+  }
+
+  // The tailer as the page shows it: { state, bad, label, reason }. While an update runs, a seed node that does not answer is
+  // restarting (rolling reboots): the tile says Reconnecting to node logs, not an error.
+  function tailerView(t, state) {
+    var s = str(isObj(t) ? t.state : '').toLowerCase() || 'unknown', reason = isObj(t) ? str(t.reason) : '';
+    var down = s === 'unavailable' || s === 'error' || s === 'disconnected';
+    if (down && updateActive(state)) {
+      return { state: 'reconnecting', bad: false, label: 'Reconnecting to node logs', reason: 'The seed node is probably restarting during the update; Sonar reconnects by itself and continues from the last line it read.' + (reason ? ' (' + reason + ')' : '') };
+    }
+    return { state: s, bad: down, label: 'Tailer: ' + (s === 'connected' ? 'connected' : s) + (s === 'connected' && isObj(t) && t.node ? ' to ' + t.node : ''), reason: reason };
+  }
+
+  var CLUSTER_UPDATE_PHASE = { idle: 'Up to date', available: 'Update available', waiting: 'Waiting for content', preparing: 'Preparing', installing: 'Installing', failed: 'Failed', attention: 'Needs attention', unknown: 'Not known yet' };
+  var CLUSTER_STATUS_KIND = { success: 'ok', running: 'run', error: 'err', notstarted: 'idle', skipped: 'ok', unknown: 'idle', warn: 'warn' };
 
   // The card of a mode: { name, title, kind, waiting, rows[{ k, v, warn }], failures[], lastError, tip } or null for a mode that is not cluster-level.
   function clusterCard(state, modeId) {
@@ -816,13 +956,17 @@
       row('Deployment settings', str(c.deploymentState));
     } else if (modeId === 'update') {
       var up = isObj(state.update) ? state.update : {}, sum = isObj(up.summary) ? up.summary : {}, act = isObj(up.active) ? up.active : {};
-      var phase = str(up.phase) || 'unknown';
-      row('Update', CLUSTER_UPDATE_PHASE[phase] || phase, phase === 'failed' || phase === 'attention');
+      var phase = str(up.phase) || 'unknown', ulevel = updateLevel(up), chk = updateChecks(up);
+      var offered = arr(up.updates).filter(isObj).filter(function (u) { return ['waiting', 'available', 'installing', 'preparing', 'failed'].indexOf(str(u.phase)) >= 0; })[0] || {};
+      row('Update', str(up.label) || CLUSTER_UPDATE_PHASE[phase] || phase, ulevel === 'error' || ulevel === 'warn');
       row('Current version', str(sum.currentVersion));
-      row('Target version', str(act.version));
+      row('Target version', str(act.version) || str(offered.version));
+      row('Last updated', str(sum.lastUpdated) ? str(sum.lastUpdated) : (isObj(up.summary) ? 'never: no update has run' : ''));
       if (str(sum.healthState) && str(sum.healthState).toLowerCase() !== 'success') row('Update health', str(sum.healthState), true);
-      arr(sum.failedChecks).filter(isObj).slice(0, 3).forEach(function (x) { failures.push(str(x.title)); });
-      st = phase === 'failed' || phase === 'attention' ? 'error' : phase === 'installing' || phase === 'preparing' ? 'running' : st;
+      // Critical and Error checks are failures (red); Warning checks are amber rows; Informational checks are only listed in the Update view.
+      chk.items.filter(function (x) { return x.key === 'critical' || x.key === 'error'; }).slice(0, 3).forEach(function (x) { failures.push(x.title); });
+      chk.items.filter(function (x) { return x.key === 'warning'; }).slice(0, 3).forEach(function (x) { row('Warning', x.title, true); });
+      st = ulevel === 'error' ? 'error' : ulevel === 'run' ? 'running' : ulevel === 'warn' ? 'warn' : ulevel === 'ok' ? 'success' : 'notstarted';
     } else {
       var key = modeId === 'addnode' ? 'add-node' : 'repair', on = str(state.track).toLowerCase() === key || str(state.activePhase).toLowerCase() === key || monitorOf(state) === modeId;
       row('Operation', (modeId === 'addnode' ? 'Add node' : 'Repair') + (on ? '' : ' (not started)'));
@@ -1069,6 +1213,8 @@
     var only = monitorOf(state);
     if (only) return only;
     var mode = MODE_OF_PHASE[key] || 'prov';
+    // An update that installs or prepares is the mode to watch (Auto lands on the Update view when one starts).
+    if ((p === 'done' || p === 'post-deployment') && updateActive(state)) return 'update';
     // Provisioning is over for the machines that ZTP finished, or an OS configuration run has started: that mode is the one to watch.
     // A manual install has no provisioning to watch: the run starts at OS configuration.
     if (mode === 'prov') {
@@ -1207,11 +1353,10 @@
       else tile(x[0], 'idle');
     });
 
-    var upd = isObj(s.update) ? s.update : null, ust = upd ? sectionStatus(upd) : 'notstarted', upr = stepProgress(upd && upd.tree);
-    if (ust === 'success') tile('update', 'ok', 'Done');
-    else if (ust === 'running') tile('update', 'run', upr.total ? 'Step ' + upr.current + ' of ' + upr.total : 'Running');
-    else if (ust === 'error') tile('update', 'err', 'Failed');
-    else tile('update', 'idle');
+    // The Update tile follows the back end's verdict, never the summary alone: neutral (grey) when no update has run, amber
+    // when an update waits for content or a check warns, red for a failure or a Critical/Error check, green only after a run.
+    var ut = updateTile(updOf(s));
+    tile('update', ut.status, ut.line, false, ut.tip ? (ut.status === 'idle' ? ut.tip + ' (' + modeWhen('update', route, manual) + ')' : ut.tip) : undefined);
 
     // Add node and Repair: a tile of their own, shown only when the run is one of them (Azure reports no steps for them).
     var track = str(s.track).toLowerCase(), act = str(s.activePhase).toLowerCase(), only = monitorOf(s);
@@ -1427,7 +1572,7 @@
     var s = isObj(state) ? state : {};
     var route = provRouteOf(s), modes = modeStates(s);
     var me = modes.filter(function (m) { return m.id === modeId; })[0] || modes[0];
-    var chipText = { ok: 'Done', run: 'Running', err: 'Failed', idle: 'Waiting', na: 'Not used' };
+    var chipText = { ok: 'Done', run: 'Running', err: 'Failed', idle: 'Waiting', na: 'Not used', warn: 'Needs attention' };
     var out = { id: me.id, title: me.name, status: me.status, chip: { kind: me.status, text: chipText[me.status] }, headline: '',
       startedAt: NaN, endedAt: NaN, when: me.tip, cards: [] };
     var machines = machineList(s, config);
@@ -1522,6 +1667,15 @@
       out.headline = word + ' is running' + (pr.total ? ': step ' + pr.current + ' of ' + pr.total : '') + (cur ? ' (' + cur + ')' : '');
     } else out.headline = me.tip;
 
+    if (me.id === 'update') {
+      // What Azure offers, the readiness checks and the history; the verdict word replaces the generic waiting text.
+      var uo = updOf(s);
+      if (uo) {
+        if (me.status !== 'run' && !(me.status === 'err' && secTree.length)) out.headline = (str(uo.label) || me.tip) + (isObj(uo.nextAction) && str(uo.nextAction.text) ? ': ' + str(uo.nextAction.text) : '');
+        out.facts = updateFacts(uo);
+        out.panels = updatePanels(uo);
+      }
+    }
     var verb = { validate: ['Validated', 'Being validated', 'Waiting'], deploy: ['Deployed', 'Taking part', 'Waiting'],
       update: ['Updated', 'Being updated', 'Waiting'], addnode: ['Added', 'Following', 'Waiting'], repair: ['Repaired', 'Following', 'Waiting'] }[me.id];
     var pct = pr.total ? Math.round(100 * pr.done / pr.total) : null;
@@ -1629,6 +1783,7 @@
   function stepsEmptyText(modeId, status, when, hasMachines) {
     if (modeId === 'addnode' || modeId === 'repair') return 'Azure reports no steps for this operation. Sonar follows the Arc machines (the cards above) and the seed node’s log.';
     if (modeId === 'discovery') return status === 'idle' ? 'The machines appear here when the toolkit’s hardware discovery has written its output. Run Invoke-HardwareDiscovery.ps1 and point discoveryPath at its output folder.' + (when ? ' ' + when + '.' : '') : 'No machines reported yet.';
+    if (modeId === 'update' && status !== 'run') return 'No update run yet: the steps and the progress of each machine appear here when an update starts.' + (when ? ' ' + when + '.' : '');
     if (modeId === 'prov' && status === 'na') return 'Not used: the OS was installed by hand. There is nothing to provision; OS configuration starts when the machines answer.';
     if (modeId === 'prov' && !hasMachines) return 'No machines reported yet.';
     if (modeId === 'osconfig' && status === 'idle') return 'The steps appear here when the OS configuration run starts. Run Invoke-AzureLocalOsConfiguration.ps1 from the toolkit and point osConfigEventsPath at its os-configuration-events.jsonl.' + (when ? ' ' + when + '.' : '');
@@ -1644,6 +1799,7 @@
     var stepScope = !!(f && (f.stepKey || f.stage)), nodeScope = !!(f && f.node);
     if (!total) {
       var down = /^(unavailable|error|disconnected)$/.test(str(tailer).toLowerCase());
+      if (str(tailer).toLowerCase() === 'reconnecting') return { kind: 'waiting', title: 'Reconnecting to node logs…', text: 'The seed node is restarting during the update. Lines continue when it answers again.', actions: [] };
       return { kind: 'waiting', title: down ? 'No log lines: the log tailer cannot reach the seed node.' : 'Waiting for log lines…', text: '', actions: [] };
     }
     if ((stepScope || nodeScope) && !scoped) {
@@ -2420,7 +2576,7 @@
       createLogStore: createLogStore, logStoreReset: logStoreReset, logStoreIngest: logStoreIngest,
       logStoreStreamOpened: logStoreStreamOpened, logStoreStreamClosed: logStoreStreamClosed,
       stepWindowOf: stepWindowOf, windowSignature: windowSignature, lineInWindow: lineInWindow, stepFilterChange: stepFilterChange,
-      safeLink: safeLink, __dom: function () {
+      safeLink: safeLink, updateLevel: updateLevel, updateChecks: updateChecks, updateTile: updateTile, updatePanels: updatePanels, updateFacts: updateFacts, updateActive: updateActive, tailerView: tailerView, updOf: updOf, __dom: function () {
         return { app: app, el: el, renderSummary: renderSummary, renderDetails: renderDetails, renderHelp: renderHelp, buildLine: buildLine,
           renderLiveNotes: renderLiveNotes, renderChips: renderChips, renderLogAccessWindow: renderLogAccessWindow, renderTree: renderTree, buildItem: buildItem };
       },
@@ -2717,6 +2873,7 @@
     renderModes();
     renderSummary();
     renderLogAccessButton();
+    renderTailerPill();
 
     if (app.state) {
       if (app.lastAnnounced.phase !== null && app.lastAnnounced.phase !== phase) {
@@ -2751,6 +2908,11 @@
     var phase = normPhase(s.phase);
     if (phase === 'failed') return { key: 'error', label: 'Failed' };
     if (phase === 'done') return { key: 'success', label: 'Succeeded' };
+    var uov = phase === 'update' ? updOf(s) : null;
+    if (uov && (str(uov.level) || str(uov.label))) {
+      var ul = updateLevel(uov);
+      return { key: ul === 'error' ? 'error' : ul === 'run' ? 'running' : ul === 'ok' ? 'success' : 'notstarted', label: str(uov.label) || STATUS_LABEL.notstarted };
+    }
     if (phase === 'deployment' || phase === 'validation' || phase === 'update') {
       var k = sectionStatus(s[phase]);
       var label = STATUS_LABEL[k];
@@ -2891,7 +3053,7 @@
     if (sm.cluster) {
       var cc = sm.cluster, csel = !!app.filter.cluster;
       var cbox = el('button', { type: 'button', class: 'card cluster-card cluster-' + cc.kind + (csel ? ' sel' : ''), 'aria-pressed': String(csel), 'data-cluster': '1', title: cc.tip }, [
-        el('span', { class: 'nm' }, [el('span', { class: 'nm-name', text: cc.title }), chipEl(cc.kind, cc.waiting ? 'Waiting' : ({ ok: 'OK', run: 'Running', err: 'Needs attention', idle: 'Waiting' })[cc.kind] || '', cc.tip)])
+        el('span', { class: 'nm' }, [el('span', { class: 'nm-name', text: cc.title }), chipEl(cc.kind, cc.waiting ? 'Waiting' : ({ ok: 'OK', run: 'Running', err: 'Needs attention', warn: 'Needs attention', idle: 'Waiting' })[cc.kind] || '', cc.tip)])
       ]);
       cc.rows.forEach(function (r) { cbox.appendChild(el('span', { class: 'ln' + (r.warn ? ' warnk' : '') }, [el('span', { class: 'k', text: r.k + ': ' }), r.v])); });
       cc.failures.forEach(function (t) { cbox.appendChild(el('span', { class: 'ln cluster-fail', text: 'Failed: ' + t })); });
@@ -2926,7 +3088,11 @@
       var box = el('section', { class: 'panel-guard guard-' + p.kind, 'aria-label': p.title });
       box.appendChild(el('h3', { class: 'sub-h', text: p.title }));
       var dl = el('dl', { class: 'facts' });
-      p.rows.forEach(function (r) { dl.appendChild(el('div', null, [el('dt', { text: r.k }), el('dd', { text: r.v })])); });
+      p.rows.forEach(function (r) {
+        var dd = el('dd', { text: r.v });
+        if (r.href) { dd.appendChild(document.createTextNode(' ')); dd.appendChild(el('a', { class: 'lk', href: r.href, target: '_blank', rel: 'noopener noreferrer', text: (r.linkText || 'Learn more') + ' ↗' })); }
+        dl.appendChild(el('div', null, [el('dt', { text: r.k }), dd]));
+      });
       box.appendChild(dl);
       if (p.until) box.appendChild(el('p', { class: 'ln' }, [el('span', { class: 'countdown', 'data-until': p.until, text: 'Confirmation window: ' + fmtCountdown(oscCountdown(p.until)) })]));
       host.appendChild(box);
@@ -3618,8 +3784,8 @@
     return a && !a.hidden ? active : (tiles.filter(function (x) { return !x.hidden; })[0] || { id: active }).id;
   }
 
-  var MODE_GLYPH = { ok: '✓', run: '●', idle: '○', err: '✕', na: '–' };
-  var MODE_WORD = { ok: 'done', run: 'running', idle: 'waiting', err: 'failed', na: 'not used' };
+  var MODE_GLYPH = { ok: '✓', run: '●', idle: '○', err: '✕', na: '–', warn: '!' };
+  var MODE_WORD = { ok: 'done', run: 'running', idle: 'waiting', err: 'failed', na: 'not used', warn: 'needs attention' };
 
   function renderModes() {
     var host = $('modes');
@@ -3639,7 +3805,7 @@
           el('span', { class: 'mn', text: t.name }),
           t.line ? el('span', { class: 'ms', text: t.line }) : null
         ]),
-        el('span', { class: 'sr-only', text: ', ' + MODE_WORD[t.status] + (t.tip ? '. ' + t.tip : '') })
+        el('span', { class: 'sr-only', text: ', ' + MODE_WORD[t.status] + (t.line && t.status !== 'run' ? ': ' + t.line : '') + (t.tip ? '. ' + t.tip : '') })
       ]);
       b.addEventListener('click', function () { setMode(t.id); });
       host.appendChild(b);
@@ -3951,21 +4117,26 @@
     if (!isObj(t)) return;
     app.tailer = t;
     renderLogAccessButton();
-    var state = str(t.state).toLowerCase() || 'unknown';
+    renderTailerPill();
+    if (Array.isArray(t.activeFiles)) applyFiles(t.activeFiles);
+  }
+
+  // The tailer pill and its alert. While an update runs, a seed node that does not answer is rebooting: the pill says
+  // "Reconnecting to node logs" and the alert stays hidden; the tailer keeps its place in the files and continues.
+  function renderTailerPill() {
+    var t = app.tailer;
+    if (!isObj(t)) return;
+    var v = tailerView(t, app.state), state = v.state;
     var pill = $('tailer-pill');
     pill.setAttribute('data-tailer', state);
-    var label = 'Tailer: ' + (state === 'connected' ? 'connected' : state);
-    if (state === 'connected' && t.node) label += ' to ' + t.node;
-    pill.textContent = label;
-    pill.title = t.reason ? str(t.reason) : label;
-    var bad = state === 'unavailable' || state === 'error' || state === 'disconnected';
-    $('tailer-alert').hidden = !bad;
-    $('tailer-reason').textContent = bad ? (t.reason ? str(t.reason) : 'No reason reported.') + (t.node ? ' (node ' + t.node + ')' : '') : '';
+    pill.textContent = v.label;
+    pill.title = v.reason ? v.reason : v.label;
+    $('tailer-alert').hidden = !v.bad;
+    $('tailer-reason').textContent = v.bad ? (v.reason ? v.reason : 'No reason reported.') + (t.node ? ' (node ' + t.node + ')' : '') : '';
     if (app.lastAnnounced.tailer !== null && app.lastAnnounced.tailer !== state) {
-      announce(bad ? 'Live logs unavailable: ' + str(t.reason) : 'Log tailer ' + state + '.');
+      announce(v.bad ? 'Live logs unavailable: ' + v.reason : state === 'reconnecting' ? 'Reconnecting to node logs.' : 'Log tailer ' + state + '.');
     }
     app.lastAnnounced.tailer = state;
-    if (Array.isArray(t.activeFiles)) applyFiles(t.activeFiles);
   }
 
   // The tailer's current file list replaces the previous one (files that left it stay only while lines from them are held).
@@ -4500,7 +4671,7 @@
     if (app.rendered) return;
     var win = stepWindow(), scoped = 0;
     for (var i = 0; i < app.store.lines.length && !scoped; i++) { if (lineInView(app.store.lines[i], win)) scoped = 1; }
-    var v = emptyLogView(app.filter, scoped, app.store.lines.length, app.tailer && app.tailer.state);
+    var v = emptyLogView(app.filter, scoped, app.store.lines.length, tailerView(app.tailer, app.state).state);
     var box = el('div', { class: 'log-empty', role: 'status', 'data-kind': v.kind }, [el('b', { text: v.title }), v.text ? el('span', { text: v.text }) : null]);
     if (v.actions.length) {
       var btns = el('div', { class: 'log-empty-actions' });
@@ -5049,6 +5220,65 @@
     setInterval(function () { if (i < kinds.length - 1) i++; applyState(build()); }, 15000);
   }
 
+  // ?demo=1&route=update: the standalone Update monitor (a cluster updated weeks after its deployment) in four moments, 15 s apart:
+  // no update has run and an SBE update waits for content (amber, with the Informational readiness checks listed), the update
+  // installs (the seed node reboots: Reconnecting to node logs), the run finished (green, with the history). Sample data only.
+  function startUpdateDemo(iso, M) {
+    var d = demoDeploymentSample(Date.now()), base = d.state, kinds = ['waiting', 'installing', 'reconnecting', 'done'], i = 0;
+    var NEXT = { text: 'The update package must be added (SBE side-load): the hardware vendor’s Solution Builder Extension files have to be downloaded and imported before this update can be prepared or installed. The Learn page explains how.',
+      guide: 'https://learn.microsoft.com/azure/azure-local/update/solution-builder-extension?view=azloc-2610#the-additionalcontentrequired-update-state' };
+    var CHECKS = [{ title: 'The machine proxy on each failover cluster node should be set to a local proxy server', severity: 'Informational', description: '', remediation: 'https://learn.microsoft.com/azure/azure-local/manage/configure-proxy-settings-23h2' },
+      { title: 'The CAU clustered role should be installed on the cluster', severity: 'Informational', description: '', remediation: 'Install the Cluster-Aware Updating clustered role.' }];
+    function leaf(id, name, status, a, b) { return { id: id, name: name, status: status, description: '', start: a === null ? null : iso(a), end: b === null ? null : iso(b), durationSeconds: a !== null && b !== null ? Math.round((a - b) / 1000) : null, errors: [], children: [] }; }
+    function node(id, name, status, a, b, kids) { var n = leaf(id, name, status, a, b); n.children = kids; return n; }
+    function build() {
+      var k = kinds[i], s = JSON.parse(JSON.stringify(base));
+      s.monitor = 'Update'; s.phase = 'update'; s.activePhase = 'update'; s.track = 'update';
+      s.validation = { status: 'NotStarted', tree: [], counts: {} }; s.deployment = { status: 'NotStarted', tree: [], counts: {} };
+      s.clusterResource = demoClusterResource('exists', 2, '', 'Deploy');
+      var sum = { state: 'AppliedSuccessfully', healthState: 'Success', currentVersion: '12.2610.1004.50', currentSbeVersion: '', lastChecked: iso(2 * M), lastUpdated: '',
+        checkCounts: { total: 3, failed: 2, critical: 0, error: 0, warning: 0, informational: 2, other: 0 }, failedChecks: CHECKS };
+      var sbe = { name: 'SBE5.0.2609.1611', version: '5.0.2609.1611', displayName: 'SBE5.0.2609.1611', description: 'Premier SBE for Example 16G AX Servers', packageType: 'SBE', state: 'AdditionalContentRequired', stateWord: 'Waiting for content', phase: 'waiting', level: 'warn', rebootRequired: 'Unknown' };
+      if (k === 'waiting') {
+        s.update = { verified: false, status: 'notstarted', phase: 'waiting', level: 'warn', label: 'Waiting for content', ran: false, nextAction: NEXT, summary: sum, active: null, updates: [sbe], runs: [], run: null, tree: [], counts: {} };
+        s.current = { phase: 'update', stepPath: [], stepName: null };
+      } else if (k === 'installing' || k === 'reconnecting') {
+        var kids = [node('1', 'Prepare', 'success', 20 * M, 14 * M, []),
+          node('2', 'Install the solution update', 'running', 14 * M, null, [leaf('2.1', 'Update node 1', 'success', 14 * M, 6 * M), leaf('2.2', 'Update node 2', 'running', 6 * M, null)]),
+          leaf('3', 'Finish', 'notstarted', null, null)];
+        sum.state = 'UpdateInProgress'; sum.lastUpdated = '';
+        s.update = { verified: false, status: 'running', phase: 'installing', level: 'run', label: 'Installing 12.2611.1002.10', ran: true, nextAction: null, summary: sum,
+          active: { name: 'Solution12.2611.1002.10', version: '12.2611.1002.10', displayName: 'Azure Local solution update 12.2611.1002.10', state: 'Installing', rebootRequired: 'True' },
+          updates: [{ name: 'Solution12.2611.1002.10', version: '12.2611.1002.10', packageType: 'Solution', state: 'Installing', stateWord: 'Installing', phase: 'installing', level: 'run', rebootRequired: 'True', description: 'Azure Local solution update' }],
+          runs: [{ name: '20261209-1840-run', update: 'Solution12.2611.1002.10', status: 'running', timeStarted: iso(20 * M), duration: '' }],
+          run: { name: '20261209-1840-run', status: 'running', timeStarted: iso(20 * M) }, tree: kids, counts: {} };
+        s.current = { phase: 'update', stepPath: ['2', '2.2'], stepName: 'Update node 2' };
+      } else {
+        var done = [node('1', 'Prepare', 'success', 60 * M, 54 * M, []), node('2', 'Install the solution update', 'success', 54 * M, 20 * M, [leaf('2.1', 'Update node 1', 'success', 54 * M, 37 * M), leaf('2.2', 'Update node 2', 'success', 37 * M, 20 * M)])];
+        sum.currentVersion = '12.2611.1002.10'; sum.lastUpdated = iso(20 * M); sum.checkCounts = { total: 3, failed: 0, critical: 0, error: 0, warning: 0, informational: 0, other: 0 }; sum.failedChecks = [];
+        s.update = { verified: false, status: 'success', phase: 'idle', level: 'ok', label: 'Update succeeded (12.2611.1002.10)', ran: true, nextAction: null, summary: sum, active: null,
+          updates: [{ name: 'Solution12.2611.1002.10', version: '12.2611.1002.10', packageType: 'Solution', state: 'Installed', stateWord: 'Installed', phase: 'idle', level: 'ok', description: 'Azure Local solution update' }],
+          runs: [{ name: '20261209-1840-run', update: 'Solution12.2611.1002.10', status: 'success', timeStarted: iso(60 * M), duration: 'PT0H40M' }, { name: '20261105-1000-old', update: 'Solution12.2610.1004.50', status: 'success', timeStarted: iso(30 * 24 * 60 * M), duration: 'PT1H' }],
+          run: { name: '20261209-1840-run', status: 'success', timeStarted: iso(60 * M) }, tree: done, counts: {} };
+        s.current = { phase: 'update', stepPath: ['2', '2.2'], stepName: 'Update node 2' };
+      }
+      s.polledAt = new Date().toISOString();
+      return s;
+    }
+    applyConfig(d.config);
+    app.guidance = d.guidance;
+    applyState(build());
+    applyTailer(d.tailer);
+    applyFiles(d.files);
+    applyLogBatch(d.lines, { source: 'live' });
+    setInterval(function () {
+      if (i < kinds.length - 1) i++;
+      applyState(build());
+      // The seed node reboots in the third moment: the tailer cannot reach it; the page says Reconnecting to node logs.
+      applyTailer(kinds[i] === 'reconnecting' ? { state: 'unavailable', reason: 'Cannot reach the logs on the seed node (192.0.2.11). The WinRM connection was closed.', node: d.tailer.node, address: d.tailer.address } : d.tailer);
+    }, 15000);
+  }
+
   // ?demo=1&route=simplified: a ZTP run of three machines (example names). Two are complete (Device, Azure's steps,
   // Network and Restore done); the third is installing the OS in Azure. The ZTP events show in the log pane tagged
   // with the machine and the stage, as the ZTP event file does on a real run. Sample data only; no API calls.
@@ -5473,6 +5703,7 @@
     if (route === 'arm') { startArmDemo(iso, M); return; }
     if (route === 'iso') { startOsConfigDemo(iso, M, true); return; }
     if (route === 'cluster') { startClusterDemo(iso, M); return; }
+    if (route === 'update') { startUpdateDemo(iso, M); return; }
     if (route === 'discovery') { startDiscoveryDemo(iso, M); return; }
     function steps(prefix, names, startAgo, per, cur, curStatus, errors) { return demoSteps(step, prefix, names, startAgo, per, cur, curStatus, errors); }
     // OEM image route: the three groups Arc registration shows per machine (OS image update, Bootstrap, Azure registration).
