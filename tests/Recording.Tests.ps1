@@ -508,7 +508,7 @@ Describe 'Start-AzlSonarServer -Replay and -Record (random port, no Azure, no no
             $Command -eq 'Invoke-AzlSonarRecorderLoop' -and $Arguments.Path -eq [System.IO.Path]::GetFullPath($recordPath) -and
             $Arguments.SessionJson -match '"format":1' -and $Arguments.SessionJson -notmatch 'sonar-pass-secret'
         }
-        Should -Invoke -ModuleName AzlSonar -CommandName Stop-AzlSonarWorker -Times 4 -Exactly
+        Should -Invoke -ModuleName AzlSonar -CommandName Stop-AzlSonarWorker -Times 5 -Exactly
         Test-Path -LiteralPath (Split-Path $recordPath) | Should -BeTrue -Because 'the folder is created (and the file checked) before binding'
     }
 

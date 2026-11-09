@@ -609,7 +609,9 @@ Describe 'Start-AzlSonarServer end to end (random port, mocked poller and tailer
         Should -Invoke -ModuleName AzlSonar -CommandName Start-AzlSonarWorker -Times 1 -Exactly -ParameterFilter { $Command -eq 'Invoke-AzlSonarTailerLoop' }
         # provisioningRoute auto may turn out to be the OEM image route: the node probe (Arc registration status) starts too.
         Should -Invoke -ModuleName AzlSonar -CommandName Start-AzlSonarWorker -Times 1 -Exactly -ParameterFilter { $Command -eq 'Invoke-AzlSonarNodeProbeLoop' }
-        Should -Invoke -ModuleName AzlSonar -CommandName Stop-AzlSonarWorker -Times 3 -Exactly
+        # The update reader (the cluster's own update service, apart from the Azure poll) starts too.
+        Should -Invoke -ModuleName AzlSonar -CommandName Start-AzlSonarWorker -Times 1 -Exactly -ParameterFilter { $Command -eq 'Invoke-AzlSonarUpdateReaderLoop' }
+        Should -Invoke -ModuleName AzlSonar -CommandName Stop-AzlSonarWorker -Times 4 -Exactly
         Should -Invoke -ModuleName AzlSonar -CommandName Start-Process -Times 0 -Exactly
         Should -Invoke -ModuleName AzlSonar -CommandName Invoke-AzRestMethod -Times 0 -Exactly
 
