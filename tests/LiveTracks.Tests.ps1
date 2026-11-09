@@ -637,7 +637,7 @@ Describe 'Monitoring a monthly update: standalone (-Monitor Update) and Auto aga
     Context 'Auto with a deployment that finished a while ago' {
         BeforeEach {
             $script:Cfg = Read-AzlSonarConfig -Path $script:SonarExampleConfig
-            function script:Set-AutoRoutes {
+            function script:Set-AutoRoute {
                 param([string]$DeploymentEnd, [string]$Updates = 'updates-list-live-sbe-content.json')
                 $dep = [pscustomobject]@{ status = 'Success'; steps = @([pscustomobject]@{ name = 'All'; fullStepIndex = '0'; status = 'Success'; startTimeUtc = '2026-09-01T10:00:00Z'; endTimeUtc = $DeploymentEnd }) }
                 $settings = [pscustomobject]@{ properties = [pscustomobject]@{ deploymentMode = 'Deploy'; provisioningState = 'Succeeded'; reportedProperties = [pscustomobject]@{ validationStatus = (Get-SonarValidationSuccessFixture); deploymentStatus = $dep } } }
@@ -650,7 +650,7 @@ Describe 'Monitoring a monthly update: standalone (-Monitor Update) and Auto aga
         }
 
         It 'lands on the Update view when the finished deployment is old and an update waits' {
-            Set-AutoRoutes -DeploymentEnd '2026-09-01T12:00:00Z'
+            Set-AutoRoute -DeploymentEnd '2026-09-01T12:00:00Z'
             $state = Get-AzlSonarDeploymentState -Config $script:Cfg -Now $script:Now
             $state.phase | Should -Be 'update'
             $state.activePhase | Should -Be 'update'
@@ -658,14 +658,14 @@ Describe 'Monitoring a monthly update: standalone (-Monitor Update) and Auto aga
         }
 
         It 'stays on Deployment (done) right after the deployment finished' {
-            Set-AutoRoutes -DeploymentEnd '2026-10-11T12:00:00Z'
+            Set-AutoRoute -DeploymentEnd '2026-10-11T12:00:00Z'
             $state = Get-AzlSonarDeploymentState -Config $script:Cfg -Now $script:Now
             $state.phase | Should -Be 'done'
             $state.update.phase | Should -Be 'waiting' -Because 'the Update tile still shows the waiting update'
         }
 
         It 'stays on Deployment when the old deployment has nothing waiting' {
-            Set-AutoRoutes -DeploymentEnd '2026-09-01T12:00:00Z' -Updates ''
+            Set-AutoRoute -DeploymentEnd '2026-09-01T12:00:00Z' -Updates ''
             $state = Get-AzlSonarDeploymentState -Config $script:Cfg -Now $script:Now
             $state.phase | Should -Be 'done'
         }
