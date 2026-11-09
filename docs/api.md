@@ -363,7 +363,7 @@ The page plays the recording locally. The whole document is held in memory by So
 | `deployment` | object | `{ status, tree[], counts }`: the Deploy steps (`reportedProperties.deploymentStatus`). **Always.** |
 | `nodes` | array | One entry per configured machine, its Arc machine, see [nodes](#nodes). **Always.** |
 | `edgeMachines` | array | The edge machines of the resource group (simplified route), see [edgeMachines](#edgemachines). Empty on the OEM image route. **Always.** |
-| `update` | object or `null` | The update track: `{ verified, status, phase, summary, active, run, tree[], counts }`. An object after the deployment is done, or with `track: update`, unless `updateTrack` is `off`; `null` otherwise; the key is absent before the first poll. `phase` is `idle`, `available`, `preparing`, `installing`, `failed` or `attention`; `summary` the cluster's update summary; `active` the update that installs (`name`, `version`, `displayName`, `state`, `rebootRequired`); `run` its newest run (`name`, `status`, `timeStarted`, `duration`, `lastUpdated`). Built from the Microsoft Learn reference; `verified` is `false` (not confirmed on a live run). |
+| `update` | object or `null` | The update track: `{ verified, status, phase, level, label, ran, nextAction, summary, active, updates[], runs[], run, tree[], counts }`. An object after the deployment is done, or with `track: update`, or with `-Monitor Update`, unless `updateTrack` is `off`; `null` otherwise; the key is absent before the first poll. See [The update object](#the-update-object). Built from the Microsoft Learn reference; `verified` is `false` (a whole update was not yet followed live). |
 | `track` | string | The `track` setting in lower case: `auto`, `update`, `add-node` or `repair`. Absent before the first poll. |
 | `lag` | object | Whether Azure is behind the node: `{ detected, kind, message, source, nodeStep, since, verified }`. `kind` is `rerun-pending` (an ARM deployment newer than the settings is still running; the steps shown are from the previous attempt) or `deploy-not-reported` (Azure shows no deploy step yet but the seed node log shows the orchestrator running `Role:Interface`, named in `nodeStep`), else `null`. `verified` is `false`. Absent before the first poll. |
 | `environmentChecker` | object | Which part of Deploy mode runs: `{ stage, label, source, verified }`. `stage` is `none`, `validate`, `starting`, `limited`, `full` or `cloud-deployment`; `source` is `Azure steps`, `node log` or `Learn`. Absent before the first poll. |
@@ -448,6 +448,41 @@ The cluster resource, read once a deployment settings object exists (before that
 | `nodeCount`, `nodesConfigured` | Machines the cluster reports, and machines in the config. |
 | `deploymentState`, `deploymentMode` | `provisioningState` and `deploymentMode` of the deployment settings. |
 | `error` | Azure's error text when the read failed, else empty. |
+
+### The update object
+
+`update` is the update track. Its verdict never trusts the cluster's update summary alone: `AppliedSuccessfully` is also what a cluster says before any update ever ran.
+
+```json
+{ "verified": false, "status": "notstarted", "phase": "waiting", "level": "warn", "label": "Waiting for content", "ran": false,
+  "nextAction": { "text": "The update package must be added (SBE side-load): ...", "guide": "https://learn.microsoft.com/azure/azure-local/update/solution-builder-extension?view=azloc-2610#the-additionalcontentrequired-update-state" },
+  "summary": { "state": "AppliedSuccessfully", "healthState": "Success", "currentVersion": "12.2610.1004.50", "currentSbeVersion": "", "currentOemVersion": "",
+    "hardwareModel": "", "oemFamily": "", "lastChecked": "2026-11-06T09:14:00Z", "lastUpdated": null,
+    "checkCounts": { "total": 3, "failed": 2, "critical": 0, "error": 0, "warning": 0, "informational": 2, "other": 0 },
+    "failedChecks": [ { "title": "The CAU clustered role should be installed on the cluster", "severity": "Informational", "description": "", "remediation": "" } ] },
+  "active": null,
+  "updates": [ { "name": "SBE5.0.2609.1611", "version": "5.0.2609.1611", "displayName": "SBE5.0.2609.1611", "description": "...", "packageType": "SBE",
+    "state": "AdditionalContentRequired", "stateWord": "Waiting for content", "phase": "waiting", "level": "warn", "nextAction": { "text": "...", "guide": "https://..." },
+    "rebootRequired": "Unknown", "availabilityType": "Online", "progressPercentage": null, "notifyMessage": "", "installedDate": null } ],
+  "runs": [], "run": null, "tree": [], "counts": { "total": 0, "notstarted": 0, "running": 0, "success": 0, "error": 0, "skipped": 0, "unknown": 0 } }
+```
+
+| Field | Meaning |
+| --- | --- |
+| `verified` | `false`: the track is built from the Microsoft Learn reference; the readiness checks and `AdditionalContentRequired` were seen on a live cluster, a whole update was not yet followed. |
+| `status` | `notstarted`, `running`, `success` or `error`. `success` only when a real update run finished `Succeeded` (or `summary.lastUpdated` is set together with an update in state `Installed` when Azure keeps no run) and `summary.state` is `AppliedSuccessfully`. A summary that says `AppliedSuccessfully` with no run is `notstarted`. |
+| `phase` | `idle`, `available` (an update is ready or `UpdateAvailable`), `waiting` (`AdditionalContentRequired` or `HasPrerequisite`: it cannot start yet), `preparing`, `installing`, `failed` or `attention`. |
+| `level` | The colour of the Update tab: `neutral`, `run`, `warn`, `error` or `ok`. The worst of `status`/`phase` and the failed checks: Critical and Error checks give `error`, Warning checks `warn`, Informational checks nothing. |
+| `label` | The plain-word verdict, for example `No update has run`, `Waiting for content`, `Installing 12.2611.1002.10`, `Update failed`, `Update succeeded (12.2611.1002.10)`. |
+| `ran` | `true` when an update run exists, or `summary.lastUpdated` is set with an installed update. |
+| `nextAction` | `{ text, guide }` for an update that waits (`AdditionalContentRequired`: add the package, SBE side-load) or failed; `guide` is a Microsoft Learn URL. `null` otherwise. |
+| `summary` | The cluster's update summary. `state` is Azure's own word (`AppliedSuccessfully`, `UpdateAvailable`, `UpdateInProgress`, `UpdateFailed`, `PreparationInProgress`, `PreparationFailed`, `NeedsAttention`). `lastUpdated` is `null` when no update has ever run. `failedChecks` are the readiness checks that failed, worst severity first (at most 25); `checkCounts` counts them per severity (`critical`, `error`, `warning`, `informational`, `other`). |
+| `active` | The update that installs or failed (`name`, `version`, `displayName`, `state`, `rebootRequired`), else `null`. |
+| `updates` | Every update Azure lists, running first, then failed, waiting, ready, others, installed (at most 20). `stateWord` is the state in plain words (an unknown state keeps Azure's word and `level` `neutral`). |
+| `runs` | The update runs Sonar read, newest first (at most 10): `name`, `update`, `status`, `timeStarted`, `duration`, `lastUpdated`. The runs of the active update, or of the newest installed updates when none installs. |
+| `run`, `tree`, `counts` | The newest run (`name`, `update`, `status`, `timeStarted`, `duration`, `lastUpdated`) and its step tree (see [Step trees](#step-trees)). |
+
+With `-Monitor Update` (see [The `-Monitor` option](#the-monitor-option)) `phase` of the state is `update` (`failed` when the update failed) whatever the cluster's deployment history says.
 
 ### provisioning
 
@@ -731,7 +766,8 @@ What the API returns depends on how Sonar was started.
 | `Verification` | no | verification events | Like `Discovery`; the `verification` section is filled. |
 | `Validate` | yes | ARM events, the log tailer | The cluster, `validation`, `arm` and the tailer. |
 | `Deployment` | yes | ARM events, the log tailer | The cluster, `deployment`, `arm` and the tailer. |
-| `Update`, `AddNode`, `Repair` | yes | the log tailer | The cluster and the update track (or the Arc machines and the node log for add node and repair); no ARM events. |
+| `Update` | yes | the log tailer | The cluster resource, the Arc machine of each node and the update track; `phase` is `update` (`failed` when the update failed). No deployment settings, edge machines, ARM events or event files are read: `deployment` and `validation` stay empty. |
+| `AddNode`, `Repair` | yes | the log tailer | The cluster (or the Arc machines and the node log for add node and repair); no ARM events. |
 
 `/api/config` reports the monitor in `monitor` and the log-access phases it lists in `monitorPhases`; `/api/state` repeats it in `monitor`.
 

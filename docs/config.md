@@ -116,6 +116,24 @@ It refuses these, with `YAML line N: ...` (the message names the line, never its
 - More than one document, or content after `...`; tab indentation.
 - Input over 2 MB, and nesting deeper than 40 levels.
 
+## Monitoring a monthly update
+
+To follow an update on a cluster that is already running, with no deployment in progress or in its history, a config needs only the target, the seed node and a credential source. Placeholders:
+
+```json
+{
+  "subscriptionId": "00000000-0000-0000-0000-000000000001",
+  "resourceGroup": "<resource-group>",
+  "clusterName": "<cluster-name>",
+  "identityModel": "ActiveDirectory",
+  "nodes": [ { "name": "<seed-node-name>", "address": "<seed-node-address>", "seed": true } ],
+  "credential": { "source": "prompt" },
+  "monitor": "Update"
+}
+```
+
+Start it with `./Start-AzlSonar.ps1 -ConfigPath ./config/update.json -Monitor Update -Credential (Get-Credential)` (`-Monitor Update` overrides `monitor` in the file). `identityModel` (`ActiveDirectory` or `LocalIdentity`) only decides which account reads the node logs. List every node if you want a card per machine; the seed node (`seed: true`) is the one whose log is read. `credential.source` can also be `keyvault` (with `vault`, `usernameSecret`, `passwordSecret`). No `ztpEvents`, `osConfigEventsPath`, `armEventsPath` or `discoveryPath` is needed, and none is read for this monitor. What the page shows is on [Update](./stages.md#update).
+
 ## Update the configuration
 
 ### Change any one key (without an editor)

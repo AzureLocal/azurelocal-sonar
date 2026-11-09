@@ -206,10 +206,60 @@ These modes act on the cluster resource (`Microsoft.AzureStackHCI/clusters`), so
 | **Verification** | The **Verification** mode: the pre-cluster verification gate's verdict (Pass, Fail, Running, Expired), the counts by status and the checks by category with their node, message, remedy and source; a skipped check blocks the gate. | The toolkit's pre-cluster verification gate, with Sonar pointed at its event file (`verificationEventsPath`). [Details](./verification.md). |
 | **Validate** | The **Validate** mode: the toolkit's checks and validation results ([ARM run](./arm-run.md)), Azure's validation steps (`deploymentSettings`), the running step with a live timer, errors expanded. Node logs from the seed node. | `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Credential (Get-Credential)` with the deployment local admin. [Details](./run.md#watch-validate). |
 | **Deployment** | The **Deployment** mode: the toolkit's progress per cluster step with the known-failure hint ([ARM run](./arm-run.md)), the nested step tree, the live logs, the account and folders in **Log access**. | The same command. [Details](./run.md#watch-a-deployment). |
-| **Update** | The **Update** mode: the update run's steps. | `track: update`, or `auto` when Azure reports an update. [Details](./run.md#follow-an-update). |
+| **Update** | The **Update** mode: what Azure offers, the readiness checks, the update run's steps and the history. [Details](#update). | `track: update`, or `auto` when Azure reports an update; weeks later, `-Monitor Update` on its own ([Monitoring a monthly update](#monitoring-a-monthly-update)). |
 | **Deployed cluster** | The **Deployment** mode in its *Done* state, with a card per machine that keeps its Arc status. There is no Health mode. | Any run on a deployed cluster. [Details](./run.md#look-at-a-deployed-cluster). |
 
 A machine that fails in any stage turns red, the status chip reads **Failed**, and the page stays on the mode that failed so you can read the text.
+
+## Update
+
+Azure Local is updated about once a month. The **Update** tile and mode follow that: what Azure offers, whether an update has run, and while one runs, its steps and the log of the seed node.
+
+**A green tab means an update ran.** Azure's update summary says `AppliedSuccessfully` on a cluster that has never been updated, so Sonar does not read that as success. The tab is green only when an update run finished `Succeeded` (a run in `updateRuns`, or a `lastUpdated` together with an update in state `Installed` when Azure keeps no run) and the summary is back to `AppliedSuccessfully`. The colour of the tab is the worst of the update's own state and its failed readiness checks:
+
+| Tab | When | Label |
+| --- | --- | --- |
+| Grey (neutral) | No update has run and nothing is installing. Informational checks are listed but do not colour it. | *No update has run* |
+| Amber | An update cannot start yet (*Waiting for content*, *Needs another update first*), or a readiness check of severity Warning failed. | *Waiting for content*, *Readiness warning* |
+| Blue (running) | An update is preparing or installing. | *Step 2 of 5* |
+| Red | An update failed (`InstallationFailed`, `PreparationFailed`, `HealthCheckFailed`, `DownloadFailed`, `ScanFailed`), or a readiness check of severity Critical or Error failed. | *Failed*, *Readiness check failed* |
+| Green | An update run finished and the summary is `AppliedSuccessfully` again. | *Done* |
+
+**What Azure offers.** The *Updates Azure offers* panel lists every update with its name, version, package type (`Solution` or `SBE`), description and what its state means:
+
+| Azure state | Sonar says | Colour |
+| --- | --- | --- |
+| `AdditionalContentRequired` | *Waiting for content*: the update package must be added (SBE side-load). The panel links the Learn page that explains how to import the hardware vendor's Solution Builder Extension files. | Amber |
+| `HasPrerequisite` | *Needs another update first* | Amber |
+| `Ready`, `ReadyToInstall` | *Ready to install*; Sonar only watches, the update is started from Azure | Neutral |
+| `Downloading`, `Preparing`, `HealthChecking`, `ScanInProgress` | *Preparing* | Running |
+| `Installing` | *Installing* | Running |
+| `InstallationFailed`, `PreparationFailed`, `HealthCheckFailed`, `DownloadFailed`, `ScanFailed` | The failure, the failing step and its error. The Learn page on update failures is linked. | Red |
+| `Installed` | *Installed* | Green (history) |
+| `Obsolete`, `Invalid`, `Recalled` | *Superseded by a newer version*, *Does not match this hardware*, *Recalled* | Neutral |
+| anything else | the word Azure sent | Neutral, never green |
+
+**Readiness checks.** The pre-update checks that failed (`healthCheckResult`) are listed under the update with their severity, title and remediation link (a link is shown only when it points to a documentation site Sonar knows; otherwise the text). The panel title gives the counts per severity, for example *Readiness checks that failed: 1 critical, 2 informational*. Critical and Error turn the tab red, Warning amber; Informational is information only.
+
+**While an update runs.** Auto switches to the Update view when an update starts or its state becomes Preparing or Installing (also on a cluster whose deployment finished long ago). The Steps box shows the update run (`updates/<name>/updateRuns`) with each machine's steps, and the node log of the seed node follows. Cluster-Aware Updating restarts the machines one after another, so the seed node restarts during the update: the log tile then reads **Reconnecting to node logs** (not an error), and Sonar continues from the last line it read when the node answers again. The *Update history* panel lists the earlier runs.
+
+**Not verified on a live update.** *Waiting for content* and the readiness checks were seen on a live 12.2610 cluster. The run steps, the per-machine progress and the restart of the seed node are built from the Learn reference and not yet confirmed on a whole live update.
+
+### Monitoring a monthly update
+
+Two ways to follow the monthly update:
+
+1. **Right after a deployment, in the same session** (Auto). Nothing to configure: once the deployment is done Sonar reads the update resources. Right after the deployment the page stays on Deployment and the Update tile shows what is waiting; when an update starts it moves to Update by itself.
+2. **Standalone, weeks later, against a cluster that is already running.** Start Sonar for the update only:
+
+   ```powershell
+   Connect-AzAccount
+   ./Start-AzlSonar.ps1 -ConfigPath ./config/update.json -Monitor Update -Credential (Get-Credential)
+   ```
+
+   With `-Monitor Update` Sonar reads the cluster resource, the Arc machine of each node, the update resources and the log of the seed node. It reads no deployment settings, edge machines, ARM deployments or event files, so no old deployment tree appears and the config needs none of the deployment, provisioning, ZTP, OS configuration or ARM keys. The [minimal config](./config.md#monitoring-a-monthly-update) is five settings and a node.
+
+   Auto against a cluster whose deployment finished more than 24 hours ago also lands on the Update view when an update is waiting for content or ready (a running update always does).
 
 ## Running without a deployment: demo and replay
 

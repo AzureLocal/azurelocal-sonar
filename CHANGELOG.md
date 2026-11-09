@@ -24,6 +24,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 * **api:** read-only `GET /api/about` (Sonar version from the module manifest and the documentation links) and `GET /api/details` (what Sonar collected and is using).
 * **config:** optional `location` (infrastructure file: `azure.location`), shown in Details.
 * **demo:** `?demo=1&route=simplified` is a ZTP run of three machines (two done, one installing the OS), with ZTP events in the logs.
+* **update:** `state.update` gains `level`, `label`, `ran`, `nextAction`, `updates[]` (what Azure offers), `runs[]` (history), `summary.checkCounts` and `phase: waiting`; the Update view has panels for the offered updates, the readiness checks and the history. `?demo=1&route=update` shows the standalone Update monitor. See [the update object](docs/api.md#the-update-object).
 
 ### Security
 
@@ -35,6 +36,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 
 ### Fixed
 
+* **update:** the Update tab was green on a cluster that had never run an update. Azure's update summary says `AppliedSuccessfully` before any update ran, and Sonar rolled that up to success. Now the tab is neutral (*No update has run*) until an update run finished `Succeeded` (or `lastUpdated` is set with an installed update) and the summary is back to `AppliedSuccessfully`; an update that waits for content (`AdditionalContentRequired`, the SBE side-load) is amber with its name, version, package type, description and a link to the Learn page; unknown update states show Azure's word and are never green.
+* **update:** the pre-update readiness checks are counted and coloured by severity: Critical and Error turn the tab red, Warning amber, Informational are listed with their remediation link and do not colour it. A check that passed is no longer listed as failed because its severity is Critical.
+* **update:** `-Monitor Update` (standalone, weeks after a deployment) reads only the cluster, the Arc machines, the update resources and the seed node log: no deployment settings, edge machines, ARM deployments or event files, and no stale deployment tree. Auto lands on the Update view when an update starts, and also when a deployment that finished more than 24 hours ago has an update waiting for content or ready.
+* **update:** while an update runs, a seed node that does not answer is rebooting: the log tile reads *Reconnecting to node logs*, not an error.
 * **web:** clicking a provisioning step such as *Register machine* or *Install OS* left the live logs empty ("No lines match the current filters"). Cause: every step offered a time-window log filter, but a step that runs in Azure writes nothing to a node log, so its window held no line. Azure steps now show their details under the step and never filter the logs; node steps filter by machine and time window (or, for a ZTP stage, by the ZTP event lines of that stage); and an empty result says why and offers **Show all lines for this node** and **Clear filter**.
 
 ### Changed
