@@ -50,6 +50,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 * **config:** the built-in YAML reader for `infrastructure.yml` is stricter and more exact: a key such as `712:` keeps its inline value, unquoted keys are trimmed, `''` inside a single-quoted value no longer ends the comment scan, `|` and `>` block scalars keep blank lines, indentation and `#` lines, duplicate keys are refused, and every error names its line without printing it. Multi-line quoted values and flow collections, `- - a`, text after a closing quote, content after `...`, input over 2 MB and nesting over 40 levels are refused with a clear message. See "What the YAML reader supports and refuses" in the configuration page.
 * **provisioning:** the **Prepare for Validate** step and the per-machine `prepare` field are removed: azurelocal-ztp no longer has a Prepare stage. Prepare events in older event files still show in the log pane.
 
+## [0.5.0](https://github.com/AzureLocal/azurelocal-sonar/compare/v0.4.0...v0.5.0) (2026-11-09)
+
+
+### Features
+
+* **api:** Invoke-AzlSonarApi, the supported helper for the read-only API AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([2c4395c](https://github.com/AzureLocal/azurelocal-sonar/commit/2c4395c290b9d777608661e503515ea6a0ddc57b))
+* **api:** Start-AzlSonar.ps1 -TokenFile and the tokenFile config key write the access token to a user-only file AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([0046aaf](https://github.com/AzureLocal/azurelocal-sonar/commit/0046aaf20688e2ed1ef3ed7c1bf479944d946b96))
+* **arm:** read the ARM Validate and Deploy event feed, build the arm state, follow armEventsPath AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([dc4b5f0](https://github.com/AzureLocal/azurelocal-sonar/commit/dc4b5f006df7be1e714d654d864e6e526ad95180))
+* **config:** build Sonar's config from the master infrastructure.yml, config commands, guided setup, docs ([08ea801](https://github.com/AzureLocal/azurelocal-sonar/commit/08ea801554c4c3e54748c08f5fd1f2f99d2c8f35))
+* **config:** Set-AzlSonarConfig changes one key, checked before writing; document every key ([917c922](https://github.com/AzureLocal/azurelocal-sonar/commit/917c92297214c9d51f4644fe7beaf8ea377740cd))
+* **discovery:** Discovery stage reader, manual install flag, -Monitor, no Health AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([d1299e5](https://github.com/AzureLocal/azurelocal-sonar/commit/d1299e5d0dfb31e5e9d8e6ec20641733f9aec8e8))
+* **osconfig:** read the hardened event feed: runId, seq, every state, address source, guarded panel data AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([ddac6a9](https://github.com/AzureLocal/azurelocal-sonar/commit/ddac6a9f739c1e05d723f887d19d1056fad4709f))
+* **osconfig:** read the OS configuration event feed, build osConfiguration, pick the log account per node ([432318f](https://github.com/AzureLocal/azurelocal-sonar/commit/432318f88aac105d38ca69d3cf10c5127fd4d04b))
+* **provisioning:** ZTP Device, Network and Restore steps; ZTP complete hands over to OS configuration ([f776a23](https://github.com/AzureLocal/azurelocal-sonar/commit/f776a2362a8e63b35fb974e88d8143e7f2310ba5))
+* **security:** access token, Host and Origin checks, security headers, fixed static files, limits ([66d1e35](https://github.com/AzureLocal/azurelocal-sonar/commit/66d1e35229b6167e8c423e7b8366084ec4338480))
+* **sonar:** show the domain account's breaker in Details, drop the LCM wording from the page ([7ff3e30](https://github.com/AzureLocal/azurelocal-sonar/commit/7ff3e307d8a6ffec376ca39981c75d1c5bd82d37))
+* **update:** read the cluster's own update service and merge it with Azure's verdict AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([a368df8](https://github.com/AzureLocal/azurelocal-sonar/commit/a368df8a8e6f8b9088ba52d1c867f9cc6370f7b5))
+* **verification:** Sonar monitors the pre-cluster verification gate AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([d0dcbab](https://github.com/AzureLocal/azurelocal-sonar/commit/d0dcbab5a00127edeefde4de7fee32f175f60ef9))
+* **web:** ARM checks, validation results and deployment progress inside the Validate and Deployment modes AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([9601e1c](https://github.com/AzureLocal/azurelocal-sonar/commit/9601e1c99ea0223a72472ea4ff605cf19cddf465))
+* **web:** cluster card for Validate, Deployment, Update, Add node and Repair AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([651d96e](https://github.com/AzureLocal/azurelocal-sonar/commit/651d96e24e8ffb966f2a4f2bdeb87bc543d1c5bd))
+* **web:** Discovery tile first, Provisioning not used for a manual install, standalone monitors, guarded panel and address source AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([1cd8757](https://github.com/AzureLocal/azurelocal-sonar/commit/1cd8757b78278abdfab3ff0e4eab25f99afe60ad))
+* **web:** fill-the-window layout, fix for empty log filters, docs and tour with screenshots ([67f90c4](https://github.com/AzureLocal/azurelocal-sonar/commit/67f90c49b3154e2f4dd4864cbaf8322811a4ca8b))
+* **web:** five-tile mode bar, steps per mode, Log access window ([eb37f31](https://github.com/AzureLocal/azurelocal-sonar/commit/eb37f31d877fd7654a0db58023e1ed46ffce2ff1))
+* **web:** new top bar, Details pop-down, Help box and summary box with machine cards ([9b14f43](https://github.com/AzureLocal/azurelocal-sonar/commit/9b14f43e99231492b535002f6659f239bc85c43b))
+* **web:** OS configuration mode between Provisioning and Validate ([299a746](https://github.com/AzureLocal/azurelocal-sonar/commit/299a746a9a7b6f202d1983aacc8a63957616d21e))
+
+
+### Bug Fixes
+
+* **arm:** empty lists stay arrays under strict mode, one analyzer-clean naming, quicker step-limit test AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([73ea1f2](https://github.com/AzureLocal/azurelocal-sonar/commit/73ea1f20dd5fd8b17f89bf0628f9de6a9242fbb6))
+* **config:** harden the built-in YAML reader for infrastructure.yml ([bcb5858](https://github.com/AzureLocal/azurelocal-sonar/commit/bcb58588105344407489c8074e628e4043215f21))
+* **dashboard:** use the Azure Local family icon for the favicon and page logo ([d7dfef5](https://github.com/AzureLocal/azurelocal-sonar/commit/d7dfef5086ed366ce1b7d44b6b95bc4b0e2bec09))
+* **dashboard:** use the Azure Local family icon for the favicon and page logo ([aac5d52](https://github.com/AzureLocal/azurelocal-sonar/commit/aac5d52c02ce0680d804de215bd73b6a4bde7149))
+* **provisioning:** a Network step that ZTP deferred to OS configuration counts as done ([c95c990](https://github.com/AzureLocal/azurelocal-sonar/commit/c95c990407ae85c6e95b204cc1098f550ba7f09e))
+* **sonar:** classify each transport leg, never reuse the domain password on a second transport (F2) ([fd4bfec](https://github.com/AzureLocal/azurelocal-sonar/commit/fd4bfeca3e8ddd2db51f382c461ac02bc82fbffe))
+* **sonar:** classify the legs' exceptions, not only the text; count only real attempts (N1, N3) ([5dc7f34](https://github.com/AzureLocal/azurelocal-sonar/commit/5dc7f34b9f7ca9287a755b41761fad11f331866e))
+* **sonar:** inconclusive-result backoff, attempt cap, version recheck, SSPI codes, unusable accounts (N2 to N5) ([ea9844d](https://github.com/AzureLocal/azurelocal-sonar/commit/ea9844ddc54de8f4d016abeab6e8fa8d66072570))
+* **sonar:** keep a working local session when the attempt cap is full (D2) ([62617d0](https://github.com/AzureLocal/azurelocal-sonar/commit/62617d0211052352a753ec6909d929badd07c893))
+* **sonar:** mask secrets by salted fingerprint, never keep the password as text in Shared ([e80518f](https://github.com/AzureLocal/azurelocal-sonar/commit/e80518fbca2c79f5625e9d4e7ddf54dda39c3d8b))
+* **sonar:** one lock, immutable records and an account-wide lockout breaker for the domain account ([4ca17e6](https://github.com/AzureLocal/azurelocal-sonar/commit/4ca17e6c1129d2c7584f2444d48d3e95081ba4d9))
+* **sonar:** probe-gated, ticketed domain account breaker; classify by code and stage (F1, F3, F5-F11) ([cd79ddf](https://github.com/AzureLocal/azurelocal-sonar/commit/cd79ddfed53cd6cd168cfee059d526e765615519))
+* **sonar:** the recorder masks a password registered after the recording started (F4) ([a4a30a5](https://github.com/AzureLocal/azurelocal-sonar/commit/a4a30a580c3ec8fd9c7de6d77f57c11fb4112fa4))
+* **sonar:** unclassified results no longer latch a healthy account for every node (D1, D3) ([9a99f57](https://github.com/AzureLocal/azurelocal-sonar/commit/9a99f5780bd742fa88913aa0aab07258390c7048))
+* **sonar:** use only the operator-supplied domain account, validate its Key Vault reference at load ([9d592cc](https://github.com/AzureLocal/azurelocal-sonar/commit/9d592cc177260028dc83eb9c7b334c6969498648))
+* **test:** replay seek compares UTC; no prompt in a -NonInteractive session ([e6e2299](https://github.com/AzureLocal/azurelocal-sonar/commit/e6e22999d9bbaf907e17c7c2c9d53575936642a9))
+* **ui:** always show the five mode tiles, grey Provisioning with a reason when there is no machine data ([ff73a14](https://github.com/AzureLocal/azurelocal-sonar/commit/ff73a14c889c5b670a5208f7d0dbe25bfa293a7c))
+* **update:** AppliedSuccessfully is not an update that ran; verdict, offers, history and standalone Update monitor AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([a7fd91c](https://github.com/AzureLocal/azurelocal-sonar/commit/a7fd91cd29d62fcc24fce79581940f3678403c31))
+* **update:** orphaned runs and unreadable run status do not decide the verdict; no URL in app.js demo; fix anchor AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([c6d29b4](https://github.com/AzureLocal/azurelocal-sonar/commit/c6d29b401b62a83bd6be45c2c8f2841092a36665))
+* **update:** the Update tab follows the verdict, lists offers and checks, and reconnects to node logs AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([7ace56e](https://github.com/AzureLocal/azurelocal-sonar/commit/7ace56e2176b415b40c536cc0eb7ca220d0afdb2))
+* **web:** analyzer-clean name for the cluster object builder AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([b9a7cd8](https://github.com/AzureLocal/azurelocal-sonar/commit/b9a7cd873062636fb75537f71ec46fa33bae856d))
+* **web:** level filter helpers no longer depend on a var set after the test export; exhaustive level-filter tests AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([afdde6a](https://github.com/AzureLocal/azurelocal-sonar/commit/afdde6afa871951bbcdf8077bfe36d09bcd700d8))
+* **web:** no URL in the demo state, repair the config page link anchor AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([7c242c5](https://github.com/AzureLocal/azurelocal-sonar/commit/7c242c52fcea7f2cc5a50a62d1ff15c2dbcc0f47))
+* **ztp:** a later run no longer erases the finished stages of machines it does not cover ([09af13a](https://github.com/AzureLocal/azurelocal-sonar/commit/09af13accf1690c3d1e8e74e4cd6530ae4023c0e))
+
 ## [0.4.0](https://github.com/AzureLocal/azurelocal-sonar/compare/v0.3.0...v0.4.0) (2026-11-06)
 
 
