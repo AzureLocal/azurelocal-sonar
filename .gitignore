@@ -11,3 +11,6 @@ bundle/
 artifacts/
 *.NOT-PUBLISHABLE
 *.partial
+
+# Pester test results (written by every local test run)
+testResults.xml
