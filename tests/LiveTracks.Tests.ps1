@@ -671,3 +671,37 @@ Describe 'Monitoring a monthly update: standalone (-Monitor Update) and Auto aga
         }
     }
 }
+
+Describe 'The update verdict: edge cases found in review' {
+    BeforeEach {
+        $script:ArmRoutes.Clear()
+        $script:ArmCalls.Clear()
+        Mock -ModuleName AzlSonar -CommandName Invoke-AzRestMethod -MockWith {
+            $script:ArmCalls.Add($Path)
+            foreach ($route in $script:ArmRoutes) { if ($Path -match $route.Match) { return $route.Response } }
+            throw "Unrouted ARM call in test: $Path"
+        }
+        $script:Cfg = Read-AzlSonarConfig -Path $script:SonarExampleConfig
+    }
+
+    It 'an orphaned run left InProgress does not outvote an installed update and AppliedSuccessfully' {
+        $orphan = (Get-Fx 'updateruns-succeeded.json') -replace '"status": "Success"', '"status": "InProgress"'
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 (Get-Fx 'update-summary-live-succeeded.json'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 (Get-Fx 'updates-list-live-succeeded.json'))
+        Add-Route 'updates/Solution12.2611.1002.10/updateRuns' (New-SonarArmResponse 200 $orphan)
+        Add-Route 'updates/SBE5.0.2609.1611/updateRuns' (New-SonarArmResponse 200 @{ value = @() })
+        $u = InModuleScope AzlSonar -Parameters @{ C = $script:Cfg; N = $script:Now } { param($C, $N) Get-AzlSonarUpdateState -Config $C -Now $N }
+        $u.status | Should -Not -Be 'running'
+        $u.status | Should -Be 'success' -Because 'lastUpdated is set with an installed update and the run status cannot be trusted'
+    }
+
+    It 'a newest run with a status Sonar cannot read falls back to lastUpdated with an installed update' {
+        $odd = (Get-Fx 'updateruns-succeeded.json') -replace '"status": "Success"', '"status": "Unknown status"'
+        Add-Route 'updateSummaries/default' (New-SonarArmResponse 200 (Get-Fx 'update-summary-live-succeeded.json'))
+        Add-Route '/updates\?' (New-SonarArmResponse 200 (Get-Fx 'updates-list-live-succeeded.json'))
+        Add-Route 'updates/Solution12.2611.1002.10/updateRuns' (New-SonarArmResponse 200 $odd)
+        Add-Route 'updates/SBE5.0.2609.1611/updateRuns' (New-SonarArmResponse 200 @{ value = @() })
+        $u = InModuleScope AzlSonar -Parameters @{ C = $script:Cfg; N = $script:Now } { param($C, $N) Get-AzlSonarUpdateState -Config $C -Now $N }
+        $u.status | Should -Be 'success'
+    }
+}

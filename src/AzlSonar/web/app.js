@@ -5225,9 +5225,9 @@
   // installs (the seed node reboots: Reconnecting to node logs), the run finished (green, with the history). Sample data only.
   function startUpdateDemo(iso, M) {
     var d = demoDeploymentSample(Date.now()), base = d.state, kinds = ['waiting', 'installing', 'reconnecting', 'done'], i = 0;
-    var NEXT = { text: 'The update package must be added (SBE side-load): the hardware vendor’s Solution Builder Extension files have to be downloaded and imported before this update can be prepared or installed. The Learn page explains how.',
-      guide: 'https://learn.microsoft.com/azure/azure-local/update/solution-builder-extension?view=azloc-2610#the-additionalcontentrequired-update-state' };
-    var CHECKS = [{ title: 'The machine proxy on each failover cluster node should be set to a local proxy server', severity: 'Informational', description: '', remediation: 'https://learn.microsoft.com/azure/azure-local/manage/configure-proxy-settings-23h2' },
+    // Sample data carries no URL (the web files never do); a real state carries nextAction.guide and the check remediation links.
+    var NEXT = { text: 'The update package must be added (SBE side-load): the hardware vendor’s Solution Builder Extension files have to be downloaded and imported before this update can be prepared or installed. The Learn page explains how.', guide: '' };
+    var CHECKS = [{ title: 'The machine proxy on each failover cluster node should be set to a local proxy server', severity: 'Informational', description: '', remediation: 'Set the machine proxy to a local proxy server.' },
       { title: 'The CAU clustered role should be installed on the cluster', severity: 'Informational', description: '', remediation: 'Install the Cluster-Aware Updating clustered role.' }];
     function leaf(id, name, status, a, b) { return { id: id, name: name, status: status, description: '', start: a === null ? null : iso(a), end: b === null ? null : iso(b), durationSeconds: a !== null && b !== null ? Math.round((a - b) / 1000) : null, errors: [], children: [] }; }
     function node(id, name, status, a, b, kids) { var n = leaf(id, name, status, a, b); n.children = kids; return n; }

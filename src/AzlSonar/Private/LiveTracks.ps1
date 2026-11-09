@@ -556,7 +556,8 @@ function Get-AzlSonarUpdateState {
         $phase = 'idle'
         if ($null -ne $active -and $active.kind -eq 'running') { $status = 'running'; $phase = $active.phase }
         elseif ($null -ne $active) { $status = 'error'; $phase = 'failed' }
-        elseif ($sortedRuns.Count -gt 0 -and $runStatus -eq 'running') { $status = 'running'; $phase = 'installing' }
+        # A run left InProgress (an orphaned run) does not outvote an update that is Installed and a summary that says AppliedSuccessfully.
+        elseif ($sortedRuns.Count -gt 0 -and $runStatus -eq 'running' -and $summaryState -ne 'AppliedSuccessfully') { $status = 'running'; $phase = 'installing' }
         elseif ($sortedRuns.Count -gt 0 -and $runStatus -eq 'error') { $status = 'error'; $phase = 'failed' }
         else {
             # The summary alone speaks only when the update list says nothing.
@@ -571,7 +572,9 @@ function Get-AzlSonarUpdateState {
         if ($status -eq 'notstarted') {
             if ($null -ne $waiting) { $phase = 'waiting' }
             elseif ($null -ne $ready -or $summaryState -eq 'UpdateAvailable') { $phase = 'available' }
-            $runSucceeded = ($sortedRuns.Count -gt 0 -and $runStatus -eq 'success') -or ($sortedRuns.Count -eq 0 -and [bool]$summary.lastUpdated -and $installedUpdates.Count -gt 0)
+            # The newest run says Succeeded; or Azure keeps no usable run (none, or a status Sonar cannot read) and lastUpdated is set with an installed update.
+            $noUsableRun = $sortedRuns.Count -eq 0 -or $runStatus -in 'unknown', 'notstarted' -or ($runStatus -eq 'running' -and $summaryState -eq 'AppliedSuccessfully')
+            $runSucceeded = ($sortedRuns.Count -gt 0 -and $runStatus -eq 'success') -or ($noUsableRun -and [bool]$summary.lastUpdated -and $installedUpdates.Count -gt 0)
             if ($runSucceeded -and $summaryState -eq 'AppliedSuccessfully' -and $phase -eq 'idle') { $status = 'success' }
         }
         $result.status = $status

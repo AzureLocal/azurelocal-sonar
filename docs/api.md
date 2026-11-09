@@ -482,7 +482,7 @@ The cluster resource, read once a deployment settings object exists (before that
 | `runs` | The update runs Sonar read, newest first (at most 10): `name`, `update`, `status`, `timeStarted`, `duration`, `lastUpdated`. The runs of the active update, or of the newest installed updates when none installs. |
 | `run`, `tree`, `counts` | The newest run (`name`, `update`, `status`, `timeStarted`, `duration`, `lastUpdated`) and its step tree (see [Step trees](#step-trees)). |
 
-With `-Monitor Update` (see [The `-Monitor` option](#the-monitor-option)) `phase` of the state is `update` (`failed` when the update failed) whatever the cluster's deployment history says.
+With `-Monitor Update` (see [The `-Monitor` option](#the--monitor-option)) `phase` of the state is `update` (`failed` when the update failed) whatever the cluster's deployment history says.
 
 ### provisioning
 
