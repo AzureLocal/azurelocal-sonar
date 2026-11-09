@@ -29,12 +29,12 @@ features:
 
 ## Run it and configure it
 
-- [Start here](/start-here): pick your purpose; the three ways to configure Sonar (the master `infrastructure.yml`, guided prompts, a file by hand).
-- [Running Sonar, by purpose](/run) and [stage by stage](/stages): the commands, what the page shows, what done and failed look like and the access needed, for Discovery, each ZTP stage, OS configuration, Validate, Deployment, Update, add node and repair, a single stage on its own (`-Monitor`), and replay.
-- [Log access](/log-access): the account and folders for every phase, and how Sonar reaches the node.
-- [Configuration](/config): every key, the master-file mapping, and how to update the file (`Set-AzlSonarConfig`).
+- [Start here](./start-here.md): pick your purpose; the three ways to configure Sonar (the master `infrastructure.yml`, guided prompts, a file by hand).
+- [Running Sonar, by purpose](./run.md) and [stage by stage](./stages.md): the commands, what the page shows, what done and failed look like and the access needed, for Discovery, each ZTP stage, OS configuration, Validate, Deployment, Update, add node and repair, a single stage on its own (`-Monitor`), and replay.
+- [Log access](./log-access.md): the account and folders for every phase, and how Sonar reaches the node.
+- [Configuration](./config.md): every key, the master-file mapping, and how to update the file (`Set-AzlSonarConfig`).
 
 ## Reference
 
-- [What Sonar reads](/how-it-works#what-sonar-reads): the read-only Azure calls and node reads Sonar makes.
+- [What Sonar reads](./how-it-works.md#what-sonar-reads): the read-only Azure calls and node reads Sonar makes.
 - The Azure, Redfish and Configurator app calls of a ZTP run are documented in the ZTP docs: [API reference](https://github.com/AzureLocal/azurelocal-ztp/blob/main/docs/appendix/api-reference.md) and [The Configurator app API](https://github.com/AzureLocal/azurelocal-ztp/blob/main/docs/appendix/configurator-app-api.md).
