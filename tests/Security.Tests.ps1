@@ -314,11 +314,17 @@ Describe 'Static files: a fixed table, never a path from the request' {
         @{ U = '/../AzlSonar.psd1' }, @{ U = '/..\..\Windows\win.ini' }, @{ U = '/../../Windows/win.ini' }, @{ U = '//server/share/x' }, @{ U = '/index.html::$DATA' },
         @{ U = '/CON' }, @{ U = '/NUL' }, @{ U = '/con.txt' }, @{ U = '/COM1' }, @{ U = '/LPT9.js' }, @{ U = '/index.html.' }, @{ U = '/index.html ' }, @{ U = '/app.js.' },
         @{ U = '/api/details/..%2f..%2fx' }, @{ U = '/%252e%252e/Windows/win.ini' }, @{ U = '/%2e%2e/Windows/win.ini' }, @{ U = '/index.html?x' }, @{ U = '/app*.js' },
-        @{ U = '/app"js' }, @{ U = '/app<js' }, @{ U = '/app>js' }, @{ U = '/app|js' }, @{ U = "/app.js`0.png" }, @{ U = '/APP.JS' }, @{ U = '/data/phase-guidance.json' },
+        @{ U = '/app"js' }, @{ U = '/app<js' }, @{ U = '/app>js' }, @{ U = '/app|js' }, @{ U = '/APP.JS' }, @{ U = '/data/phase-guidance.json' },
         @{ U = '/Start-AzlSonar.ps1' }, @{ U = '/sub/../index.html' }, @{ U = 'C:\Windows\win.ini' }, @{ U = '/C:/Windows/win.ini' }, @{ U = '/missing.html' }
     ) {
         param($U)
         InModuleScope AzlSonar -Parameters @{ R = $script:Root; U = $U } { param($R, $U) Resolve-AzlSonarStaticPath -WebRoot $R -UrlPath $U } | Should -BeNullOrEmpty
+    }
+
+    # The NUL is built at run time and is not in the test name: Pester writes the name into the NUnit XML, and XML cannot hold char 0.
+    It 'refuses a NUL byte inside the path' {
+        $u = '/app.js' + [string][char]0 + '.png'
+        InModuleScope AzlSonar -Parameters @{ R = $script:Root; U = $u } { param($R, $U) Resolve-AzlSonarStaticPath -WebRoot $R -UrlPath $U } | Should -BeNullOrEmpty
     }
 
     It 'never serves a file outside the root, even one that exists, through the handler' {
