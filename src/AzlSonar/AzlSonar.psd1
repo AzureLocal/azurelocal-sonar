@@ -1,6 +1,6 @@
 @{
     RootModule           = 'AzlSonar.psm1'
-    ModuleVersion        = '0.5.0' # x-release-please-version
+    ModuleVersion        = '0.5.1' # x-release-please-version
     GUID                 = '5d6ee105-e406-4e6b-8227-b2dcd7c9e3c6'
     Author               = 'AzureLocal'
     CompanyName          = 'AzureLocal'
