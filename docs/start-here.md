@@ -28,7 +28,7 @@ All three end in the same configuration object, so everything after the start be
 
 ### 1. From the master infrastructure file (the default)
 
-One file describes the instance for ZTP, OS configuration, the ARM deployment and Sonar: `infrastructure.yml` (schema 5, azurelocal-toolkit `config/infrastructure/`). Sonar reads it directly. Nothing to write or keep in step.
+One file describes the instance for ZTP, OS configuration, the ARM deployment and Sonar: `infrastructure.yml` (schema 5, azurelocal-toolkit `config/variables/`). Sonar reads it directly. Nothing to write or keep in step.
 
 ```powershell
 Connect-AzAccount

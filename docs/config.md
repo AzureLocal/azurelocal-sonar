@@ -65,7 +65,7 @@ Types are JSON types. "Dashboard" says what the key changes on the page. "Master
 
 ## From the master infrastructure.yml
 
-`-InfrastructureFile` (and `ConvertTo-AzlSonarConfig`) reads the master file (schema 5, azurelocal-toolkit `config/infrastructure/`) with a small reader built into Sonar. It needs neither the toolkit nor a YAML module. It reads only these keys:
+`-InfrastructureFile` (and `ConvertTo-AzlSonarConfig`) reads the master file (schema 5, azurelocal-toolkit `config/variables/`) with a small reader built into Sonar. It needs neither the toolkit nor a YAML module. It reads only these keys:
 
 | infrastructure.yml (schema 5) | Sonar config | Notes |
 | --- | --- | --- |
