@@ -50,6 +50,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 * **config:** the built-in YAML reader for `infrastructure.yml` is stricter and more exact: a key such as `712:` keeps its inline value, unquoted keys are trimmed, `''` inside a single-quoted value no longer ends the comment scan, `|` and `>` block scalars keep blank lines, indentation and `#` lines, duplicate keys are refused, and every error names its line without printing it. Multi-line quoted values and flow collections, `- - a`, text after a closing quote, content after `...`, input over 2 MB and nesting over 40 levels are refused with a clear message. See "What the YAML reader supports and refuses" in the configuration page.
 * **provisioning:** the **Prepare for Validate** step and the per-machine `prepare` field are removed: azurelocal-ztp no longer has a Prepare stage. Prepare events in older event files still show in the log pane.
 
+## [0.5.1](https://github.com/AzureLocal/azurelocal-sonar/compare/v0.5.0...v0.5.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **docs:** put the version placeholder in code so the VitePress build passes AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([f507453](https://github.com/AzureLocal/azurelocal-sonar/commit/f50745354d63ad14f5ddb6d74ce949517dce5588))
+* **docs:** use relative links on the docs home page so lychee can resolve them AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([722da33](https://github.com/AzureLocal/azurelocal-sonar/commit/722da33d8fde15f92a383ed6045a92a2442febc0))
+* **tests:** keep the NUL path case out of the Pester test name AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([338e0b4](https://github.com/AzureLocal/azurelocal-sonar/commit/338e0b44905d2ca69a656a28e716e300186e37c1))
+* **tests:** suppress the fake-credential analyzer rule in NodeUpdate tests AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([a5f388f](https://github.com/AzureLocal/azurelocal-sonar/commit/a5f388fa3581796be8135bcf9e9006d87c6c28fd))
+
 ## [0.5.0](https://github.com/AzureLocal/azurelocal-sonar/compare/v0.4.0...v0.5.0) (2026-11-09)
 
 
