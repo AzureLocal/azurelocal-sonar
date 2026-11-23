@@ -294,26 +294,26 @@ One JSON document to keep or to hand to someone. The page's **Export** button do
 
 | Key | Content |
 | --- | --- |
-| `export` | Metadata: `tool` (`AzL Sonar`), `version`, `server`, `exportedAt`, `snapshots` (entries in `timeline`), `timelineMode` (`change-only`), `timelineMax` (5000), `timelineDropped` (oldest snapshots lost to the cap), `latestStateIncluded` (always `true`), `logRingSize` (5000), `logLinesKept`, `logFirstSeq`, `logLastSeq`, `logLinesDropped` (`logLastSeq - logLinesKept`: lines that left the ring buffer before the export). |
+| `export` | Metadata: `tool` (`AzL Sonar`), `version`, `server`, `exportedAt`, `snapshots` (entries in `timeline`), `timelineMode` (`change-only`), `timelineMax` (5000), `timelineDropped` (oldest snapshots lost to the 5000 cap), `timelineDroppedForSize` (oldest snapshots left out to keep the answer under the size cap), `exportMaxChars` (the size cap, 67108864), `latestStateIncluded` (always `true`), `logRingSize` (5000), `logLinesKept`, `logFirstSeq`, `logLastSeq`, `logLinesDropped` (`logLastSeq - logLinesKept`: lines that left the ring buffer before the export). |
 | `config` | The `/api/config` body. |
 | `guidance` | The `/api/guidance` body. |
 | `state` | The latest state (always kept, whatever the cap did). |
 | `update` | The cluster's own reading of the update against Azure's, from the latest state: `{ sources, local, history, events }`, or `null` when the state has no `update.sources` (no update object yet). `local` is `update.local` without its step tree, `history` and `events` (those are the two lists next to it); the step tree is in `state` and in every `timeline` snapshot. See [update.local](#updatelocal-what-the-cluster-says). |
-| `timeline[]` | State snapshots, oldest first. A snapshot is added only when the state changed (`polledAt` and running-step durations are ignored), at most 5000; older ones are dropped first. |
+| `timeline[]` | State snapshots, oldest first. A snapshot is added only when the state changed (`polledAt` and running-step durations are ignored), at most 5000; older ones are dropped first. Only the newest snapshots that fit under the size cap are sent (see **Size**). |
 | `logs` | The `/api/logs?since=0` body without the 2000-line cap: the whole ring buffer, `truncated` always `false`. |
 
-**Size.** The export is not capped and is built in memory before it is sent. Each snapshot is a full state: on the live run used for this page, 666 snapshots of about 330 KB made a 215 MB answer. Fetch it once, to a file, when you need it, and expect other calls to wait while it is built.
+**Size.** The answer is capped at 64 MB (67,108,864 characters; `exportMaxChars`). `config`, `guidance`, `state`, `update` and `logs` are always sent; the timeline gets what is left, newest snapshots first, and the oldest are left out (counted in `timelineDroppedForSize`). Each snapshot is a full state: on the live run used for this page, 666 snapshots of about 330 KB would have made a 215 MB answer; under the cap about 195 of them, the newest, are sent. The cap is a fixed limit of Sonar, not a config key. The export is still built in memory before it is sent: fetch it once, to a file, when you need it, and expect other calls to wait while it is built.
 
 ```jsonc
 {
   "export": { "tool": "AzL Sonar", "version": "0.4.0", "server": "0123456789abcdef0123456789abcdef", "exportedAt": "2026-11-09T00:05:55Z",
-    "snapshots": 666, "timelineMode": "change-only", "timelineMax": 5000, "timelineDropped": 0, "latestStateIncluded": true,
+    "snapshots": 195, "timelineMode": "change-only", "timelineMax": 5000, "timelineDropped": 0, "timelineDroppedForSize": 471, "exportMaxChars": 67108864, "latestStateIncluded": true,
     "logRingSize": 5000, "logLinesKept": 5000, "logFirstSeq": 250481, "logLastSeq": 255480, "logLinesDropped": 250480 },
   "config": { /* /api/config */ },
   "guidance": { /* /api/guidance */ },
   "state": { /* /api/state */ },
   "update": { "sources": { /* update.sources */ }, "local": { /* update.local without tree, history, events */ }, "history": [ /* runs */ ], "events": [ /* started, finished, failed, node */ ] },
-  "timeline": [ /* 666 states */ ],
+  "timeline": [ /* the newest 195 states */ ],
   "logs": { /* /api/logs?since=0, no cap */ }
 }
 ```
@@ -730,7 +730,7 @@ Each entry of `lines[]` in `/api/logs`, `/api/events` (`log` event) and `/api/ex
 | Field | Meaning |
 | --- | --- |
 | `seq` | Sequence number, from 1, unique and increasing within one Sonar instance (the `server` id). It restarts at 1 when Sonar restarts. This is the cursor for `since`. |
-| `time` | The event time, UTC with milliseconds. See `timeSource` for how it was found. A node-local time (no `Z`, no offset) is converted with the node's UTC offset (`tailer.nodeUtcOffsetMinutes`); a log that writes UTC without saying so is therefore shifted by that offset. Compare with `received` if a file looks hours off. |
+| `time` | The event time, UTC with milliseconds. See `timeSource` for how it was found. A node-local time (no `Z`, no offset) is converted with the node's UTC offset (`tailer.nodeUtcOffsetMinutes`); the exception is `CloudDeployment*.log`, whose lines are UTC without a `Z` and are read as UTC. Another log that writes UTC without saying so would be shifted by that offset: compare with `received` if a file looks hours off. |
 | `received` | When Sonar received the line, UTC. |
 | `timeSource` | `line` (the line's own leading timestamp), `file` (the timestamp in the file name) or `received` (neither: `time` equals `received`, approximate). |
 | `file` | The full path of the file on the node. Lines Sonar adds from an event file carry that file's name. |

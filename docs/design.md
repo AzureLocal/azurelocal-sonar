@@ -123,7 +123,7 @@ Every line gets an **event time** (`Get-AzlSonarLogEventTime`):
 2. else the timestamp in the file name (`Name_20261010-161642.log`, `Name_20261010-234335Z.log`, `PowerShell_transcript.NODE.x.20261010161642.txt`);
 3. else the receive time.
 
-Times with `Z` or an offset are exact. Times without one are node-local and converted with the node's UTC offset (when the offset is unknown they are not used). A time more than a day after the receive time is ignored. The offset is the node's offset now, so a timestamp written on the other side of a daylight-saving change is off by that hour.
+Times with `Z` or an offset are exact. Times without one are node-local and converted with the node's UTC offset (when the offset is unknown they are not used). The exception is the deployment orchestrator log `CloudDeployment*.log`: its name is in node-local time but its lines are UTC without a `Z`, so they are read as UTC. A time more than a day after the receive time is ignored. The offset is the node's offset now, so a timestamp written on the other side of a daylight-saving change is off by that hour.
 
 ## Phase guidance (`data/phase-guidance.json`)
 

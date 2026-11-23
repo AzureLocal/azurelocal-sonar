@@ -693,6 +693,31 @@ Describe 'Get-AzlSonarLogEventTime' {
         $r.Time | Should -Be ([datetime]::SpecifyKind([datetime]'2026-10-10T18:00:00', 'Utc'))
     }
 
+    # D72: the orchestrator log is named in node-local time but its lines are UTC without a zone marker. Real shape
+    # from a UTC-05:00 seed node: file 'CloudDeployment.2026-11-08.17-31-36.0.log' (17:31 local) starts with lines
+    # stamped 22:31 (UTC). Reading them as node-local moved every line 5 h into the future.
+    It 'reads CloudDeployment*.log line times as UTC (<Name>)' -TestCases @(
+        @{ Name = 'Verbose line on a UTC-05:00 node'; Text = '2026-11-08 22:31:40 Verbose  [BareMetal:SetPrerequisitesForDeployment] Starting'; File = 'C:\CloudDeployment\Logs\CloudDeployment.2026-11-08.17-31-36.0.log'; Offset = -300; Expected = '2026-11-08T22:31:40.0000000Z' }
+        @{ Name = 'node offset unknown'; Text = '2026-11-08 22:31:41 Info     [Cloud:Deploy] Action plan started'; File = 'C:\CloudDeployment\Logs\CloudDeployment.2026-11-08.17-31-36.0.log'; Offset = $null; Expected = '2026-11-08T22:31:41.0000000Z' }
+        @{ Name = 'lower-case name, forward slashes'; Text = '2026-11-08 22:31:42 Warning  x'; File = 'C:/CloudDeployment/Logs/clouddeployment.2026-11-08.17-31-36.1.log'; Offset = 120; Expected = '2026-11-08T22:31:42.0000000Z' }
+        @{ Name = 'an explicit offset still wins'; Text = '2026-11-08T17:31:43-05:00 x'; File = 'C:\CloudDeployment\Logs\CloudDeployment.2026-11-08.17-31-36.0.log'; Offset = -300; Expected = '2026-11-08T22:31:43.0000000Z' }
+    ) {
+        param($Text, $File, $Offset, $Expected)
+        $r = InModuleScope AzlSonar -Parameters @{ Text = $Text; File = $File; Offset = $Offset } {
+            param($Text, $File, $Offset)
+            Get-AzlSonarLogEventTime -Text $Text -File $File -UtcOffsetMinutes $Offset -Received ([datetime]::SpecifyKind([datetime]'2026-11-08T22:40:00', 'Utc'))
+        }
+        $r.Source | Should -Be 'line'
+        $r.Time.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture) | Should -Be $Expected
+    }
+
+    It 'keeps other logs in the same folder node-local' {
+        $r = InModuleScope AzlSonar {
+            Get-AzlSonarLogEventTime -Text '2026-11-08 17:31:40 x' -File 'C:\CloudDeployment\Logs\EnvironmentValidatorFull.log' -UtcOffsetMinutes -300 -Received ([datetime]::SpecifyKind([datetime]'2026-11-08T22:40:00', 'Utc'))
+        }
+        $r.Time.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture) | Should -Be '2026-11-08T22:31:40.0000000Z'
+    }
+
     It 'still uses explicit Z and offsets when the node offset is unknown' {
         $r = InModuleScope AzlSonar {
             Get-AzlSonarLogEventTime -Text '2026-10-10T16:16:42Z x' -UtcOffsetMinutes $null -Received ([datetime]::SpecifyKind([datetime]'2026-10-10T18:00:00', 'Utc'))

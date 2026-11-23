@@ -268,6 +268,12 @@ Describe 'Invoke-AzlSonarHttpRequest (real HttpListener on localhost, handler ca
         @($e.logs.lines).Count | Should -Be 3
     }
 
+    It 'reports no snapshot dropped for size under the default cap' {
+        $e = (Invoke-SonarRequest '/api/export').Body | ConvertFrom-Json -Depth 64
+        $e.export.timelineDroppedForSize | Should -Be 0
+        $e.export.exportMaxChars | Should -Be 67108864
+    }
+
     It 'GET /api/unknown is a JSON 404' {
         $r = Invoke-SonarRequest '/api/unknown'
         $r.Status | Should -Be 404
@@ -674,5 +680,49 @@ Describe 'Get-AzlSonarWebVersion' {
         $r.Again | Should -Be $r.First
         $r.Changed | Should -Not -Be $r.First
         $r.Missing | Should -Be ''
+    }
+}
+
+Describe 'Get-AzlSonarExportJson size cap (D72)' {
+    It 'keeps the newest snapshots that fit, drops the oldest first and always keeps the latest state and the logs' {
+        $r = InModuleScope AzlSonar {
+            $shared = Initialize-AzlSonarSharedState
+            $shared.StateJson = '{"phase":"deployment","marker":"latest"}'
+            # Ten 10 KB snapshots (100 KB) under a 48 KB cap.
+            for ($i = 0; $i -lt 10; $i++) { $shared.Timeline.Add('{"n":' + $i + ',"pad":"' + ('x' * 10240) + '"}') }
+            Add-AzlSonarLogLine -Shared $shared -Line @([pscustomobject]@{ file = 'C:\MASLogs\a.log'; text = 'kept line' })
+            $server = @{ Shared = $shared; Version = '0.0.0'; ConfigJson = '{"cluster":"iic-clus01"}'; GuidanceJson = '{}' }
+            $json = Get-AzlSonarExportJson -Server $server -MaxChars 49152
+            @{ Json = $json; Length = $json.Length }
+        }
+        $r.Length | Should -BeLessOrEqual 49152
+        $e = $r.Json | ConvertFrom-Json -Depth 64
+        $count = @($e.timeline).Count
+        $count | Should -BeGreaterThan 0
+        $count | Should -BeLessThan 10
+        @($e.timeline | ForEach-Object { $_.n }) | Should -Be @((10 - $count)..9) -Because 'the newest snapshots are kept, in order'
+        $e.export.snapshots | Should -Be $count
+        $e.export.timelineDroppedForSize | Should -Be (10 - $count)
+        $e.export.exportMaxChars | Should -Be 49152
+        $e.state.marker | Should -Be 'latest'
+        @($e.logs.lines).Count | Should -Be 1
+    }
+
+    It 'exports an empty timeline (still valid JSON) when the fixed parts alone fill the cap' {
+        $json = InModuleScope AzlSonar {
+            $shared = Initialize-AzlSonarSharedState
+            $shared.StateJson = '{"phase":"deployment","pad":"' + ('y' * 4096) + '"}'
+            $shared.Timeline.Add('{"n":0}')
+            $server = @{ Shared = $shared; Version = '0.0.0'; ConfigJson = '{}'; GuidanceJson = '{}' }
+            Get-AzlSonarExportJson -Server $server -MaxChars 4096
+        }
+        $e = $json | ConvertFrom-Json -Depth 64
+        @($e.timeline).Count | Should -Be 0
+        $e.export.timelineDroppedForSize | Should -Be 1
+        $e.export.latestStateIncluded | Should -BeTrue
+    }
+
+    It 'refuses a cap below 1 KB' {
+        { InModuleScope AzlSonar { Get-AzlSonarExportJson -Server @{ Shared = (Initialize-AzlSonarSharedState) } -MaxChars 10 } } | Should -Throw
     }
 }

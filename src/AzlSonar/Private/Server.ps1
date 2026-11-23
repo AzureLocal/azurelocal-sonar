@@ -18,6 +18,7 @@ $script:AzlSonarSseMaxLinesPerEvent = 1000
 $script:AzlSonarSseMaxClients = 4               # live streams served at once (config maxEventStreams); more get 429
 $script:AzlSonarLogsMaxLines = 2000             # lines in one /api/logs answer
 $script:AzlSonarLogsMaxBytes = 2097152          # bytes of lines in one /api/logs answer (2 MB)
+$script:AzlSonarExportMaxBytes = 67108864       # characters in one /api/export answer (64 MB); the oldest snapshots go first
 $script:AzlSonarContentSecurityPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 $script:AzlSonarSseMaxQueuedBytes = 4194304     # bytes queued for one client before it counts as fallen behind
 $script:AzlSonarSseWriteTimeoutSeconds = 15     # one write still in flight after this long drops the client
@@ -373,14 +374,21 @@ function Get-AzlSonarExportJson {
     .DESCRIPTION
         The timeline is change-only and capped: a snapshot is kept only when the state changed (polledAt and running
         durations ignored), at most TimelineMax (5000); older snapshots are dropped first. The latest state is always
-        in 'state'. The export metadata describes both caps: timelineMode, timelineMax, timelineDropped,
-        latestStateIncluded, logRingSize, logLinesKept, logFirstSeq, logLastSeq and logLinesDropped.
+        in 'state'. The answer is also capped in size: at most -MaxChars characters (AzlSonarExportMaxBytes, 64 MB; one
+        snapshot of a big cluster is a few hundred KB, and 666 of them once made a 215 MB answer). The config, the latest
+        state, the update section and the logs are always kept; the timeline keeps the newest snapshots that fit in what
+        is left, and the oldest are dropped first. The export metadata describes every cap: timelineMode, timelineMax,
+        timelineDropped (by the count cap), timelineDroppedForSize, exportMaxChars, latestStateIncluded, logRingSize,
+        logLinesKept, logFirstSeq, logLastSeq and logLinesDropped.
     #>
     [CmdletBinding()]
     [OutputType([string])]
     param(
         [Parameter(Mandatory)]
-        [hashtable]$Server
+        [hashtable]$Server,
+
+        [ValidateRange(1024, [int]::MaxValue)]
+        [int]$MaxChars = $script:AzlSonarExportMaxBytes
     )
 
     $shared = $Server.Shared
@@ -396,29 +404,46 @@ function Get-AzlSonarExportJson {
     $window = Get-AzlSonarLogWindow -Shared $shared -Since 0
     $kept = @($window.Lines).Count
     $firstSeq = if ($kept -gt 0) { [long]$window.Lines[0]['seq'] } else { $null }
+    $body = ',"config":' + $Server.ConfigJson +
+    ',"guidance":' + $Server.GuidanceJson +
+    ',"state":' + $stateJson +
+    ',"update":' + (Get-AzlSonarExportUpdateJson -StateJson $stateJson)
+    $logsJson = Get-AzlSonarLogsJson -Shared $shared -Since 0 -NoLimit
+
+    # Newest snapshots first, while they fit in what the fixed parts leave (1 KB kept for the metadata and the brackets).
+    $budget = [long]$MaxChars - $body.Length - $logsJson.Length - 1024
+    $first = $timeline.Count
+    $used = [long]0
+    for ($i = $timeline.Count - 1; $i -ge 0; $i--) {
+        $size = [long]$timeline[$i].Length + 1
+        if ($used + $size -gt $budget) { break }
+        $used += $size
+        $first = $i
+    }
+    $droppedForSize = $first
+    $keptTimeline = if ($first -lt $timeline.Count) { $timeline[$first..($timeline.Count - 1)] } else { @() }
+
     $meta = ConvertTo-AzlSonarJson ([ordered]@{
-            tool                = 'AzL Sonar'
-            version             = $Server.Version
-            server              = [string]$shared.ServerId
-            exportedAt          = Format-AzlSonarDate ([datetime]::UtcNow)
-            snapshots           = $timeline.Count
-            timelineMode        = 'change-only'
-            timelineMax         = [int]$shared.TimelineMax
-            timelineDropped     = $timelineDropped
-            latestStateIncluded = $true
-            logRingSize         = [int]$shared.RingSize
-            logLinesKept        = $kept
-            logFirstSeq         = $firstSeq
-            logLastSeq          = [long]$window.LastSeq
-            logLinesDropped     = [long]([Math]::Max([long]0, [long]$window.LastSeq - $kept))
+            tool                   = 'AzL Sonar'
+            version                = $Server.Version
+            server                 = [string]$shared.ServerId
+            exportedAt             = Format-AzlSonarDate ([datetime]::UtcNow)
+            snapshots              = @($keptTimeline).Count
+            timelineMode           = 'change-only'
+            timelineMax            = [int]$shared.TimelineMax
+            timelineDropped        = $timelineDropped
+            timelineDroppedForSize = [long]$droppedForSize
+            exportMaxChars         = [long]$MaxChars
+            latestStateIncluded    = $true
+            logRingSize            = [int]$shared.RingSize
+            logLinesKept           = $kept
+            logFirstSeq            = $firstSeq
+            logLastSeq             = [long]$window.LastSeq
+            logLinesDropped        = [long]([Math]::Max([long]0, [long]$window.LastSeq - $kept))
         })
-    return '{"export":' + $meta +
-        ',"config":' + $Server.ConfigJson +
-        ',"guidance":' + $Server.GuidanceJson +
-        ',"state":' + $stateJson +
-        ',"update":' + (Get-AzlSonarExportUpdateJson -StateJson $stateJson) +
-        ',"timeline":[' + ($timeline -join ',') + ']' +
-        ',"logs":' + (Get-AzlSonarLogsJson -Shared $shared -Since 0 -NoLimit) + '}'
+    return '{"export":' + $meta + $body +
+        ',"timeline":[' + (@($keptTimeline) -join ',') + ']' +
+        ',"logs":' + $logsJson + '}'
 }
 
 function Open-AzlSonarSseClient {
@@ -426,8 +451,8 @@ function Open-AzlSonarSseClient {
     .SYNOPSIS
         Turns a request into a Server-Sent Events stream and registers it; the main loop pushes the events.
     .DESCRIPTION
-        At most AzlSonarSseMaxClients (10) streams are served at once; one more gets 503 with Retry-After (the page
-        falls back to polling /api/state and /api/logs). The stream starts with 'retry: 5000' and an 'event: hello'
+        At most maxEventStreams streams are served at once (config key; default AzlSonarSseMaxClients, 4); one more
+        gets 429 with Retry-After (the page falls back to polling /api/state and /api/logs). The stream starts with 'retry: 5000' and an 'event: hello'
         whose data is { server, since }: the back end's instance id and the log sequence the stream continues from.
         Nothing is written synchronously: the text is queued and written with WriteAsync by Invoke-AzlSonarSseWrite.
     #>

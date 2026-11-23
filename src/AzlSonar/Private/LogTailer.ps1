@@ -26,6 +26,11 @@ $script:AzlSonarLineTimeRegex = [regex]::new(
 $script:AzlSonarFileTimeRegex = [regex]::new(
     '(?<!\d)(?<y>20\d{2})(?<mo>\d{2})(?<d>\d{2})[-_.]?(?<h>\d{2})(?<mi>\d{2})(?<s>\d{2})(?<z>Z)?(?!\d)',
     [System.Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant')
+# Log files whose line timestamps are UTC although they carry no Z or offset. The orchestrator log
+# 'CloudDeployment.2026-11-08.17-31-36.0.log' is named in node-local time but writes its lines in UTC
+# ('2026-11-08 22:31:40 Verbose  [BareMetal:...] Starting' on a UTC-05:00 node), so converting those lines
+# with the node offset shifted them by the offset (D72).
+$script:AzlSonarUtcLineFileRegex = [regex]::new('^CloudDeployment[._]', [System.Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant')
 # Zero-count summaries that are not problems: 'error=0', 'Failed: 0', 'warning count=0', 'errors: 0', '0 failed'.
 $script:AzlSonarZeroCountRegex = @(
     [regex]::new('\b(?:errors?|exceptions?|failed|failures?|fatal|warnings?|warn)(?:\s+count)?\s*[:=]\s*0+(?![\w]|[.,]\d)', 'IgnoreCase, CultureInvariant'),
@@ -353,8 +358,9 @@ function Get-AzlSonarLogEventTime {
         and the Windows PowerShell transcript header 'Start time: yyyyMMddHHmmss'. Fallback for lines without one: the
         timestamp in Azure Local log file names ('Name_20261010-161642.log', 'Name_20261010-234335Z.log',
         'PowerShell_transcript.NODE.x.20261010161642.txt'). Times without Z or an offset are node-local and are converted
-        with the node's UTC offset; when it is unknown they are not used. A time more than a day after the receive time
-        is ignored as garbage.
+        with the node's UTC offset; when it is unknown they are not used. Exception: the lines of CloudDeployment*.log
+        (the deployment orchestrator log) are written in UTC without a zone marker, so they are read as UTC. A time more
+        than a day after the receive time is ignored as garbage.
     .OUTPUTS
         Hashtable { Time (UTC DateTime); Source ('line' | 'file' | 'received') }
     #>
@@ -377,15 +383,17 @@ function Get-AzlSonarLogEventTime {
 
     $receivedUtc = $Received.ToUniversalTime()
     $latest = $receivedUtc.AddDays(1)
+    $fileName = if ([string]::IsNullOrEmpty($File)) { '' } else { ($File -split '[\\/]')[-1] }
+    $lineIsUtc = [bool]($fileName -and $script:AzlSonarUtcLineFileRegex.IsMatch($fileName))
     $fromMatch = {
-        param([System.Text.RegularExpressions.Match]$Match, [Nullable[int]]$Offset)
+        param([System.Text.RegularExpressions.Match]$Match, [Nullable[int]]$Offset, [bool]$AssumeUtc = $false)
         $g = $Match.Groups
         $hour = [int]$g['h'].Value
         if ($g['ap'].Success) {
             if ($hour -lt 1 -or $hour -gt 12) { return $null }
             if ($g['ap'].Value -match '^[Pp]') { if ($hour -ne 12) { $hour += 12 } } elseif ($hour -eq 12) { $hour = 0 }
         }
-        $zone = if ($g['z'].Success) { $g['z'].Value } else { '' }
+        $zone = if ($g['z'].Success) { $g['z'].Value } elseif ($AssumeUtc) { 'Z' } else { '' }
         $fraction = if ($g['f'].Success) { $g['f'].Value } else { '' }
         Get-AzlSonarNodeTime -Year ([int]$g['y'].Value) -Month ([int]$g['mo'].Value) -Day ([int]$g['d'].Value) -Hour $hour `
             -Minute ([int]$g['mi'].Value) -Second ([int]$g['s'].Value) -Fraction $fraction -Zone $zone -UtcOffsetMinutes $Offset
@@ -394,13 +402,12 @@ function Get-AzlSonarLogEventTime {
     if (-not [string]::IsNullOrEmpty($Text)) {
         $match = $script:AzlSonarLineTimeRegex.Match($Text)
         if ($match.Success) {
-            $time = & $fromMatch $match $UtcOffsetMinutes
+            $time = & $fromMatch $match $UtcOffsetMinutes $lineIsUtc
             if ($null -ne $time -and $time -le $latest) { return @{ Time = $time; Source = 'line' } }
         }
     }
-    if (-not [string]::IsNullOrEmpty($File)) {
-        $name = ($File -split '[\\/]')[-1]
-        $match = $script:AzlSonarFileTimeRegex.Match($name)
+    if ($fileName) {
+        $match = $script:AzlSonarFileTimeRegex.Match($fileName)
         if ($match.Success) {
             $time = & $fromMatch $match $UtcOffsetMinutes
             if ($null -ne $time -and $time -le $latest) { return @{ Time = $time; Source = 'file' } }
