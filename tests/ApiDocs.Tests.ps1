@@ -286,7 +286,14 @@ Describe 'No real identifier on the page' {
     }
 
     It 'names no real cluster, resource group or node of a lab' {
-        $script:ApiText | Should -Not -Match '(?i)tplabs|tierpoint|kturner|hybridsolutions'
+        # The lab, company and account names are kept as the first 16 hex digits of the SHA-256 of the lower-case word, so this test names none of them.
+        $forbidden = @('13c2755561067d5d', '9946829169d25843', '15560a4f14a9096a')
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $words = @([regex]::Matches($script:ApiText.ToLowerInvariant(), '[a-z0-9]+') | ForEach-Object { $_.Value } | Select-Object -Unique)
+        $hits = @($words | Where-Object { [Convert]::ToHexString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($_))).Substring(0, 16).ToLowerInvariant() -in $forbidden })
+        $sha.Dispose()
+        $hits.Count | Should -Be 0
+        $script:ApiText | Should -Not -Match '(?i)hybridsolutions'
     }
 }
 
