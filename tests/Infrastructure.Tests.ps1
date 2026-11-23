@@ -476,3 +476,40 @@ Describe 'Live change detection of the master file' {
         $result.Again | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Infrastructure file: one events folder shared with the toolkit (D45)' {
+    BeforeAll {
+        $script:DefaultRoot = if ($IsWindows -and $env:ProgramData) { $env:ProgramData } else { [System.IO.Path]::GetTempPath() }
+    }
+
+    It 'reads the OS configuration and ARM feeds from the default folder (ProgramData, AzureLocalToolkit, cluster name, events) when the file sets no folder' {
+        $config = Get-FixtureConfig
+        $folder = [System.IO.Path]::Combine($script:DefaultRoot, 'AzureLocalToolkit', 'example-clus01', 'events')
+        $config.osConfigEventsPath | Should -Be (Join-Path $folder 'os-configuration-events.jsonl')
+        $config.armEventsPath | Should -Be (Join-Path $folder 'arm-deployment-events.jsonl')
+    }
+
+    It 'reads them from deployment.events_directory when the file sets it, a relative path from the folder of the file' {
+        $absolute = New-ModifiedInfrastructure { param($t) $t + "`ndeployment:`n  events_directory: 'D:\Data\azl-events\example-clus01'`n" }
+        $config = Get-FixtureConfig -Path $absolute
+        if ($IsWindows) { $config.osConfigEventsPath | Should -Be 'D:\Data\azl-events\example-clus01\os-configuration-events.jsonl' }
+        $relative = New-ModifiedInfrastructure { param($t) $t + "`ndeployment:`n  events_directory: 'events'`n" }
+        $config = Get-FixtureConfig -Path $relative
+        $config.armEventsPath | Should -Be ([System.IO.Path]::GetFullPath((Join-Path (Join-Path $TestDrive 'events') 'arm-deployment-events.jsonl')))
+    }
+
+    It 'follows the verification gate report directory by the toolkit rule: next to the evidence folder, not inside it' {
+        $config = Get-FixtureConfig
+        $config.verificationEventsPath | Should -Be ([System.IO.Path]::Combine('D:\Data\azl-ztp\example', 'arm-report', 'verification', 'live', 'precluster-verification-events.jsonl'))
+        $set = New-ModifiedInfrastructure { param($t) $t + "`ndeployment:`n  pre_cluster_verification_report_directory: 'gate'`n" }
+        (Get-FixtureConfig -Path $set).verificationEventsPath | Should -Be ([System.IO.Path]::GetFullPath((Join-Path (Join-Path $TestDrive 'gate') 'precluster-verification-events.jsonl')))
+    }
+
+    It 'resolves the same folder as the toolkit when it is importable (skipped otherwise)' -Skip:(-not ((Test-Path "$PSScriptRoot/../../azurelocal-toolkit/scripts/common/infrastructure/AzlInfrastructure.psm1") -and (Get-Module -ListAvailable powershell-yaml))) {
+        Import-Module "$PSScriptRoot/../../azurelocal-toolkit/scripts/common/infrastructure/AzlInfrastructure.psm1" -Force
+        if (-not (Get-Command Resolve-AzlEventsDirectory -ErrorAction SilentlyContinue)) { Set-ItResult -Skipped -Because 'the toolkit checkout predates Resolve-AzlEventsDirectory'; return }
+        $infra = Import-AzlInfrastructure -Path $script:ToolkitCopy -SkipValidation
+        $config = Get-FixtureConfig -Path $script:ToolkitCopy
+        $config.osConfigEventsPath | Should -Be (Join-Path (Resolve-AzlEventsDirectory -Infrastructure $infra -InfrastructureFile $script:ToolkitCopy) 'os-configuration-events.jsonl')
+    }
+}

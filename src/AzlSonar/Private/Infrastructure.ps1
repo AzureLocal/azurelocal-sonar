@@ -391,6 +391,67 @@ function Get-AzlSonarInfrastructureValue {
     return $node
 }
 
+function Get-AzlSonarEventsDirectory {
+    <#
+    .SYNOPSIS
+        The events folder the toolkit's runs write to by default and Sonar reads by default (D45). Pure: no file access.
+    .DESCRIPTION
+        The toolkit's rule (Resolve-AzlEventsDirectory in AzlInfrastructure.psm1) without its -ReportDirectory step, which
+        Sonar cannot know: deployment.events_directory when the file sets it (environment variables expanded; a relative path
+        is relative to -BaseDirectory, the folder of the infrastructure file), else <ProgramData>\AzureLocalToolkit\<cluster.name>\events
+        (on Linux and macOS <temp>/AzureLocalToolkit/<cluster.name>/events).
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowNull()][object]$Tree, [string]$BaseDirectory = '', [string]$ClusterName = '')
+
+    $configured = Get-AzlSonarInfrastructureValue $Tree 'deployment.events_directory'
+    if ($configured -is [string] -and $configured.Trim()) {
+        $path = [Environment]::ExpandEnvironmentVariables($configured.Trim())
+        if (-not [System.IO.Path]::IsPathRooted($path)) {
+            $base = if ($BaseDirectory) { $BaseDirectory } else { (Get-Location).ProviderPath }
+            $path = Join-Path -Path $base -ChildPath $path
+        }
+        return [System.IO.Path]::GetFullPath($path)
+    }
+    $name = if ($ClusterName.Trim()) { $ClusterName.Trim() } else { 'cluster' }
+    $root = if ($IsWindows -and $env:ProgramData) { $env:ProgramData } else { [System.IO.Path]::GetTempPath() }
+    return [System.IO.Path]::Combine($root, 'AzureLocalToolkit', $name, 'events')
+}
+
+function Get-AzlSonarVerificationDirectory {
+    <#
+    .SYNOPSIS
+        The pre-cluster verification gate's report directory, by the toolkit's rule (Resolve-AzlPclReportDirectory). Pure.
+    .DESCRIPTION
+        deployment.pre_cluster_verification_report_directory when set (a relative path is relative to -BaseDirectory), else
+        arm-report\verification\live in the environment data folder: the folder that HOLDS provisioning.simplified.evidence_path,
+        else the one that holds media_path, else -BaseDirectory (the folder of the infrastructure file); without any of them
+        <temp>/azl-precluster-verification.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowNull()][object]$Tree, [string]$BaseDirectory = '')
+
+    $rooted = {
+        param([string]$Path)
+        if ([System.IO.Path]::IsPathRooted($Path) -or -not $BaseDirectory) { return $Path }
+        return [System.IO.Path]::GetFullPath((Join-Path -Path $BaseDirectory -ChildPath $Path))
+    }
+    $configured = Get-AzlSonarInfrastructureValue $Tree 'deployment.pre_cluster_verification_report_directory'
+    if ($configured -is [string] -and $configured.Trim()) { return (& $rooted ([Environment]::ExpandEnvironmentVariables($configured.Trim()))) }
+    foreach ($key in 'provisioning.simplified.evidence_path', 'provisioning.simplified.media_path') {
+        $value = Get-AzlSonarInfrastructureValue $Tree $key
+        $path = if ($null -ne $value) { [Environment]::ExpandEnvironmentVariables([string]$value).Trim() } else { '' }
+        if ($path) {
+            $parent = Split-Path -Parent ($path.TrimEnd('\', '/'))
+            if ($parent) { return (& $rooted ([System.IO.Path]::Combine($parent, 'arm-report', 'verification', 'live'))) }
+        }
+    }
+    if ($BaseDirectory) { return [System.IO.Path]::Combine($BaseDirectory, 'arm-report', 'verification', 'live') }
+    return [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), 'azl-precluster-verification')
+}
+
 function ConvertFrom-AzlSonarInfrastructureTree {
     <#
     .SYNOPSIS
@@ -403,14 +464,14 @@ function ConvertFrom-AzlSonarInfrastructureTree {
         role management and ip_assignment static or dhcp_reservation (schema 5.0 and 5.1 files: nodes[].management.ip_address),
         the first listed node is the seed (schema 5.3 has no seed key),
         provisioning.simplified.evidence_path\ztp-events.jsonl -> ztpEvents.path (simplified route only),
-        provisioning.simplified.evidence_path\os-configuration-events.jsonl -> osConfigEventsPath (the OS configuration event
-        file, next to the ZTP one; on the ISO route only when evidence_path is set),
-        <temp>/azl-arm-<cluster.name>/arm-deployment-events.jsonl -> armEventsPath (the toolkit's default report directory for
-        the ARM Validate and Deploy run).
+        <events folder>\os-configuration-events.jsonl -> osConfigEventsPath and <events folder>\arm-deployment-events.jsonl ->
+        armEventsPath, on both routes (events folder = deployment.events_directory, else <ProgramData>\AzureLocalToolkit\<cluster.name>\events:
+        the folder the toolkit's OS configuration and ARM runs write to by default; Get-AzlSonarEventsDirectory),
         provisioning.simplified.evidence_path\discovery -> discoveryPath (the folder the toolkit's Invoke-HardwareDiscovery.ps1
-        writes with -OutputPath; the same evidence folder rule).
-        <evidence folder>/arm-report/verification/live/precluster-verification-events.jsonl -> verificationEventsPath (the pre-cluster
-        verification gate's report directory; without an evidence folder: the temp folder azl-arm-<cluster.name>).
+        writes with -OutputPath; the same evidence folder rule),
+        <gate report directory>/precluster-verification-events.jsonl -> verificationEventsPath (the toolkit's rule:
+        deployment.pre_cluster_verification_report_directory, else arm-report/verification/live next to the evidence folder,
+        else next to media_path, else in the folder of the infrastructure file; Get-AzlSonarVerificationDirectory).
         Returns { Config; Problems }. Config is $null when there are problems.
     #>
     [CmdletBinding()]
@@ -502,9 +563,7 @@ function ConvertFrom-AzlSonarInfrastructureTree {
     }
 
     $ztpPath = $null
-    $osConfigPath = $null
     $discoveryPath = $null
-    $environmentData = $null   # the evidence folder: where the verification gate's arm-report folder lives
     $eventFile = {
         param($folder, $name)
         $folder = [Environment]::ExpandEnvironmentVariables([string]$folder)
@@ -529,15 +588,13 @@ function ConvertFrom-AzlSonarInfrastructureTree {
             $ztpPath = $evidence.TrimEnd('\', '/') + $separator + 'ztp-events.jsonl'
             $rooted = $ztpPath -match '^([A-Za-z]:[\\/]|\\\\|/)'
             if (-not $rooted -and $BaseDirectory) { $ztpPath = [System.IO.Path]::GetFullPath((Join-Path -Path $BaseDirectory -ChildPath $ztpPath)) }
-            $osConfigPath = & $eventFile $evidence 'os-configuration-events.jsonl'
-            $environmentData = $evidence
             $discoveryPath = & $eventFile $evidence 'discovery'
         }
     }
     else {
         # ISO route: OS configuration still writes its event file; follow it when the file names the evidence folder.
         $isoEvidence = Get-AzlSonarInfrastructureValue $Tree 'provisioning.simplified.evidence_path'
-        if ($isoEvidence) { $osConfigPath = & $eventFile $isoEvidence 'os-configuration-events.jsonl'; $discoveryPath = & $eventFile $isoEvidence 'discovery'; $environmentData = [Environment]::ExpandEnvironmentVariables([string]$isoEvidence) }
+        if ($isoEvidence) { $discoveryPath = & $eventFile $isoEvidence 'discovery' }
     }
 
     # Which account reads a node's logs: the local administrator (identity.local_admin) until the node has reported DomainJoined
@@ -580,14 +637,15 @@ function ConvertFrom-AzlSonarInfrastructureTree {
     if ($null -ne $PollSeconds) { $config['pollSeconds'] = [int]$PollSeconds }
     $config['nodes'] = $nodes.ToArray()
     if ($ztpPath) { $config['ztpEvents'] = [ordered]@{ path = $ztpPath } }
-    if ($osConfigPath) { $config['osConfigEventsPath'] = $osConfigPath }
-    # The toolkit's ARM Validate and Deploy run writes arm-deployment-events.jsonl into its -ReportDirectory, which defaults to
-    # <temp>/azl-arm-<cluster.name> (Invoke-AzlArmDeploymentRun). Sonar follows that default; armEventsPath moves it.
-    $config['armEventsPath'] = Join-Path -Path (Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ('azl-arm-' + [string]$values['cluster.name'])) -ChildPath 'arm-deployment-events.jsonl'
-    # The pre-cluster verification gate writes precluster-verification-events.jsonl into <environment data>/arm-report/verification/live
-    # (environment data = the evidence folder; without one, the temp folder of the toolkit's ARM report directory). verificationEventsPath moves it.
-    $verifyBase = if ($environmentData) { $environmentData } else { Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ('azl-arm-' + [string]$values['cluster.name']) }
-    $config['verificationEventsPath'] = Join-Path -Path (Join-Path -Path (Join-Path -Path (Join-Path -Path $verifyBase -ChildPath 'arm-report') -ChildPath 'verification') -ChildPath 'live') -ChildPath 'precluster-verification-events.jsonl'
+    # D45: the OS configuration run and the ARM Validate and Deploy run write their event feeds into one events folder
+    # (deployment.events_directory, else <ProgramData>\AzureLocalToolkit\<cluster.name>\events), and Sonar reads the same
+    # folder by default, so a plain run and a plain launch meet. osConfigEventsPath and armEventsPath in a config file still win.
+    $eventsDirectory = Get-AzlSonarEventsDirectory -Tree $Tree -BaseDirectory $BaseDirectory -ClusterName $values['cluster.name']
+    $config['osConfigEventsPath'] = Join-Path -Path $eventsDirectory -ChildPath 'os-configuration-events.jsonl'
+    $config['armEventsPath'] = Join-Path -Path $eventsDirectory -ChildPath 'arm-deployment-events.jsonl'
+    # The pre-cluster verification gate writes precluster-verification-events.jsonl into its report directory; Sonar follows the
+    # toolkit's rule for it (Get-AzlSonarVerificationDirectory). verificationEventsPath moves it.
+    $config['verificationEventsPath'] = Join-Path -Path (Get-AzlSonarVerificationDirectory -Tree $Tree -BaseDirectory $BaseDirectory) -ChildPath 'precluster-verification-events.jsonl'
     if ($discoveryPath) { $config['discoveryPath'] = $discoveryPath }
     if ($accounts.Count -gt 0) { $config['logAccounts'] = $accounts }
     # The credential never comes from the infrastructure file (it holds keyvault:// references only).

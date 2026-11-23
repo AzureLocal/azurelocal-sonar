@@ -398,9 +398,10 @@ Describe 'The reader, the config key and the server state' {
         ConvertTo-SonarConfigJson $json | Set-Content -LiteralPath $bad
         { Read-AzlSonarConfig -Path $bad } | Should -Throw '*armEventsPath*'
     }
-    It 'a master file follows the toolkit default report directory of the cluster' {
+    It 'a master file follows the events folder the toolkit writes to by default (D45)' {
         $infra = Read-AzlSonarConfig -InfrastructureFile (Join-Path $script:SonarRepoRoot 'tests/fixtures/infrastructure.3node.yml') 3>$null
-        $infra.armEventsPath | Should -Be (Join-Path (Join-Path ([System.IO.Path]::GetTempPath()) ('azl-arm-' + $infra.clusterName)) 'arm-deployment-events.jsonl')
+        $root = if ($IsWindows -and $env:ProgramData) { $env:ProgramData } else { [System.IO.Path]::GetTempPath() }
+        $infra.armEventsPath | Should -Be ([System.IO.Path]::Combine($root, 'AzureLocalToolkit', $infra.clusterName, 'events', 'arm-deployment-events.jsonl'))
     }
     It 'the state before the first poll, and a poll with a store, both carry an arm object' {
         $path = Join-Path $TestDrive 'poll.json'

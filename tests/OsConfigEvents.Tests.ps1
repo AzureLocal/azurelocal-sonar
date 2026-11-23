@@ -535,11 +535,13 @@ Describe 'osConfigEventsPath in the config' {
         ([regex]::Matches($doc, '(?m)^\| `osConfigEventsPath` \|')).Count | Should -Be 1
         $example | Should -Match 'osConfigEventsPath'
     }
-    It 'is imported from the master file: the evidence folder next to the ZTP event file' {
+    It 'is imported from the master file: the events folder the toolkit writes to by default, next to the ARM feed (D45)' {
         $config = Read-AzlSonarConfig -InfrastructureFile (Join-Path $script:SonarRepoRoot 'tests/fixtures/infrastructure.toolkit-lom-management-ztp.yml') 3>$null
         $config.ztpEventsPath | Should -Match 'ztp-events\.jsonl$'
         $config.osConfigEventsPath | Should -Match 'os-configuration-events\.jsonl$'
-        Split-Path $config.osConfigEventsPath -Parent | Should -Be (Split-Path $config.ztpEventsPath -Parent)
+        $root = if ($IsWindows -and $env:ProgramData) { $env:ProgramData } else { [System.IO.Path]::GetTempPath() }
+        Split-Path $config.osConfigEventsPath -Parent | Should -Be ([System.IO.Path]::Combine($root, 'AzureLocalToolkit', $config.clusterName, 'events'))
+        Split-Path $config.osConfigEventsPath -Parent | Should -Be (Split-Path $config.armEventsPath -Parent)
     }
     It 'the Details pop-down names the file and counts its events' {
         $config = New-SonarConfigObject

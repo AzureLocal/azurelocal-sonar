@@ -46,7 +46,7 @@ Sonar never shows green by accident. If the gate wrote `verdict: Pass` but a che
 
 1. **The gate has run** (or is running) from the toolkit and wrote `precluster-verification-events.jsonl`. Sonar does not run the gate and never changes anything it checks.
 2. **Sonar can read the report directory.** The file is local to the machine that runs the gate; start Sonar on that machine, or point `verificationEventsPath` at a share or a synced copy. Sonar opens it read-only, shared with the writer.
-3. **Sonar knows where the file is.** With the master file (`-InfrastructureFile`) Sonar follows `<evidence folder>/arm-report/verification/live/precluster-verification-events.jsonl`, where the evidence folder is `provisioning.simplified.evidence_path` (without one: `<temp>/azl-arm-<cluster.name>/arm-report/verification/live`). With a config file, or when the gate was given another report directory, set [`verificationEventsPath`](./config.md) to the file or to the folder that holds it:
+3. **Sonar knows where the file is.** With the master file (`-InfrastructureFile`) Sonar follows the toolkit's own rule for the gate's report directory: `deployment.pre_cluster_verification_report_directory`, else `arm-report/verification/live` in the folder that holds `provisioning.simplified.evidence_path` (else `media_path`, else the folder of the master file), and reads `precluster-verification-events.jsonl` there. With a config file, or when the gate was given another report directory, set [`verificationEventsPath`](./config.md) to the file or to the folder that holds it:
 
    ```powershell
    Set-AzlSonarConfig -Path ./config/clus01.json -Key verificationEventsPath -Value 'D:\Data\arm-report\verification\live'

@@ -86,7 +86,7 @@ Connect-AzAccount -Tenant <tenant-id>
 ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml
 ```
 
-The event file is `<provisioning.simplified.evidence_path>/os-configuration-events.jsonl` in the master file, next to the ZTP event file; with a config file or when the toolkit run was given `-EventLogPath`, set `osConfigEventsPath`. Start Sonar on the machine that runs the toolkit (or where that folder is shared).
+The event file is `os-configuration-events.jsonl` in the events folder: `deployment.events_directory` in the master file, else `%ProgramData%\AzureLocalToolkit\<cluster.name>\events`, the folder the toolkit run writes to by default. A run given `-ReportDirectory` writes it into that report directory instead unless the file sets `deployment.events_directory`; with a config file, or when the run was given `-EventLogPath`, set `osConfigEventsPath`. Start Sonar on the machine that runs the toolkit (or where that folder is shared).
 
 **What Sonar shows:** the **OS configuration** mode: a card per machine (method ZTP or ISO, transport, the step it is on, converged, failed or retrying), the run in one sentence with the wipe list, and the machine's steps with the toolkit's text (*current -> desired*), retries, restarts, the guarded network change with its countdown, the domain join, and the versions. The `[osconfig]` lines are in the log pane (file `os-config-events`). The stages, the method and version display, what a stuck step looks like and what to do are in [Running Sonar, stage by stage](./stages.md#os-configuration).
 
@@ -94,8 +94,23 @@ The event file is `<provisioning.simplified.evidence_path>/os-configuration-even
 
 **Access:** Reader on the resource group (Sonar reads the Arc machines' run commands, read-only, to show their state); the log account as in [Log access](./log-access.md#which-account-reads-which-node-local-first-then-the-domain-account): the local administrator until a node is domain-joined, then the domain account.
 
-## Watch Validate
+## Watch the pre-cluster verification
 
+**When:** after OS configuration and before Validate, the toolkit's `Invoke-AzureLocalPreClusterVerification.ps1` (the pre-cluster verification gate) checks Azure, identity, the nodes, the network and storage, and writes `report.json`, `summary.md` and `precluster-verification-events.jsonl` into its report directory. The ARM run refuses Validate without a recent pass.
+
+```powershell
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor Verification
+```
+
+With the master file Sonar finds the event file by the toolkit's own rule: `deployment.pre_cluster_verification_report_directory`, else `arm-report\verification\live` next to `provisioning.simplified.evidence_path` (else next to `media_path`, else in the folder of the master file). With a config file set `verificationEventsPath` (the file, or the folder that holds it).
+
+**What Sonar shows:** the **Verification** mode: the verdict banner (Running, Pass, Fail or Expired), the counts by status, the checks by category with each failing check's remedy, and a skipped check called out as blocking. The `[verify]` lines are in the log pane. [Details](./verification.md).
+
+**What to expect:** the checks arrive as the gate finishes them; the banner turns green or red at `RunCompleted`. A pass older than its `expiresUtc` turns into *Pass expired*: run the gate again before Validate.
+
+**Access:** read access to the gate's report directory. `-Monitor Verification` needs no Azure sign-in and reads no node.
+
+## Watch Validate
 **What Sonar does here.** When you start the ARM Validate the page switches to the **Validation** phase: Azure's validation step tree (`deploymentSettings`), each step with status, start, end, duration and error text, the running step with a live timer. The **Validate** tile says it starts after OS configuration has converged on every machine; that is information, not a gate.
 
 ```powershell

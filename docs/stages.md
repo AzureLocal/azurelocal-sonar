@@ -148,7 +148,7 @@ One JSON object per line (`timestamp`, `node`, `stage`, `step`, `state`, `eviden
 
 Unverified against a live run: the field names above come from the toolkit's source (`AzlOsConfigurationEvents.psm1`, `AzlGuardedChange.psm1`, `AzlDomainJoin.psm1`, `AzlRemotingSession.psm1`) and its design document, not from a recorded run; `runId`, `seq` and `addressSource` are the hardening work in progress.
 
-With the master file the file is `<provisioning.simplified.evidence_path>/os-configuration-events.jsonl`, next to `ztp-events.jsonl`. If the toolkit run was given `-EventLogPath`, or you use a config file, set [`osConfigEventsPath`](./config.md) (`Set-AzlSonarConfig -Key osConfigEventsPath -Value <file>`). Sonar tails the file every 2 seconds, read-only. Without it the **OS configuration** tile stays grey and says how to get the data.
+With the master file the file is `os-configuration-events.jsonl` in the events folder (`deployment.events_directory`, else `%ProgramData%\AzureLocalToolkit\<cluster.name>\events`), where the toolkit run writes it by default. If the toolkit run was given `-EventLogPath`, or `-ReportDirectory` without `deployment.events_directory` in the file, or you use a config file, set [`osConfigEventsPath`](./config.md) (`Set-AzlSonarConfig -Key osConfigEventsPath -Value <file>`). Sonar tails the file every 2 seconds, read-only. Without it the **OS configuration** tile stays grey and says how to get the data.
 
 **In Sonar:** the **OS configuration** tile (between **Provisioning** and **Validate**), the **OS configuration** mode and its lines in the log pane (file `os-config-events`, each tagged `[osconfig]`).
 

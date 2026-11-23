@@ -37,7 +37,7 @@ Connect-AzAccount -Tenant <tenant-id>
 ./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml
 ```
 
-With the master file, Sonar follows the toolkit's default: `arm-deployment-events.jsonl` in `<temp>/azl-arm-<cluster.name>/`. If the toolkit run was given `-ReportDirectory`, or you use a config file, set [`armEventsPath`](./config.md) (`Set-AzlSonarConfig -Key armEventsPath -Value <file>`). Sonar tails the file every 2 seconds. Start Sonar on the machine that runs the toolkit, or where the report directory is shared. The file may not exist yet; Sonar waits for it.
+With the master file, Sonar follows the toolkit's default: `arm-deployment-events.jsonl` in the events folder, `deployment.events_directory` when the file sets it, else `%ProgramData%\AzureLocalToolkit\<cluster.name>\events`. The toolkit run writes there by default too, so a plain run and a plain Sonar launch meet. A run given `-ReportDirectory` writes the feed into that report directory instead unless the file sets `deployment.events_directory`: set the key (the simplest), or with a config file set [`armEventsPath`](./config.md) (`Set-AzlSonarConfig -Key armEventsPath -Value <file>`). Sonar tails the file every 2 seconds. Start Sonar on the machine that runs the toolkit, or where the events folder is shared. The file may not exist yet; Sonar waits for it.
 
 ## What Sonar does not do
 

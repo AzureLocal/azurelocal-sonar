@@ -52,7 +52,7 @@ function Get-AzlSonarConfigKeyName {
     $infrastructure = @{
         cluster = 'cluster.name'; resourceGroup = 'azure.resource_group'; subscription = 'azure.subscription_id'; location = 'azure.location'
         route = 'scenario.os_install'; identity = 'scenario.identity'; nodes = 'nodes[].name'; address = 'nodes[].network_adapters[]'
-        ztpEvents = 'provisioning.simplified.evidence_path'; osConfigEvents = 'provisioning.simplified.evidence_path'; armEvents = 'cluster.name (the toolkit''s default report directory)'; verificationEvents = 'provisioning.simplified.evidence_path (the arm-report folder inside it)'; discovery = 'provisioning.simplified.evidence_path (the discovery folder inside it)'; credential = 'credential.source (Sonar config only)'; pollSeconds = '-PollSeconds'
+        ztpEvents = 'provisioning.simplified.evidence_path'; osConfigEvents = 'deployment.events_directory (default %ProgramData%\AzureLocalToolkit\<cluster.name>\events)'; armEvents = 'deployment.events_directory (default %ProgramData%\AzureLocalToolkit\<cluster.name>\events)'; verificationEvents = 'deployment.pre_cluster_verification_report_directory (default arm-report\verification\live next to provisioning.simplified.evidence_path)'; discovery = 'provisioning.simplified.evidence_path (the discovery folder inside it)'; credential = 'credential.source (Sonar config only)'; pollSeconds = '-PollSeconds'
     }
     $configFile = @{
         cluster = 'clusterName'; resourceGroup = 'resourceGroup'; subscription = 'subscriptionId'; location = 'location'
