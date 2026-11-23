@@ -1108,7 +1108,12 @@ function Start-AzlSonarServer {
         if ($Publishable -and (Test-Path -LiteralPath $recordPath) -and (Get-Item -LiteralPath $recordPath).Length -gt 0) {
             throw "A publishable recording needs a new file (its pseudonyms are only stable inside one recording): $recordPath already holds data."
         }
-        $logCredential = Resolve-AzlSonarCredential -Config $config -Credential $Credential
+        # The log account is only needed by the parts that reach a node (the log tailer, the OEM image probes) and for the
+        # account shown per node in OS configuration. Discovery and Verification read local files only: they never ask for it.
+        $needsLogAccount = $plan.tailer -or $plan.nodeProbe -or $plan.osConfigEvents
+        $logCredential = if ($needsLogAccount) { Resolve-AzlSonarCredential -Config $config -Credential $Credential }
+        elseif ($null -ne $Credential -and $Credential -ne [pscredential]::Empty) { $Credential }
+        else { $null }
 
         $shared = Initialize-AzlSonarSharedState
         # The log account's password is masked by a fingerprint: no plaintext copy of it is kept in Shared.

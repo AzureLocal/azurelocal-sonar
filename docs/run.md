@@ -18,7 +18,7 @@ The Validate, Deployment, Update, Add node and Repair modes start with a **clust
 
 **What Sonar shows:** the **Discovery** mode, a card per machine with its service tag, the ports with their MACs, the suggested management port and the BOSS card, and what to check before ZTP. [Details](./stages.md#discovery).
 
-**Access:** read access to the discovery folder (`discoveryPath`). `-Monitor Discovery` needs no Azure sign-in and reads no node.
+**Access:** read access to the discovery folder (`discoveryPath`). `-Monitor Discovery` needs no Azure sign-in, reads no node and asks for no log account (no credential prompt; `-Credential` is not needed). `-Monitor Verification` is the same.
 
 ## Run one stage on its own (-Monitor)
 

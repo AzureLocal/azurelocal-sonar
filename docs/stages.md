@@ -107,7 +107,7 @@ The screens below use the page's own demo data (`?demo=1&route=simplified`); see
 
 ## Discovery
 
-The first stage of the flow, **before ZTP**: the toolkit's `Invoke-HardwareDiscovery.ps1` reads every node's Dell iDRAC (Redfish, read only) and writes, in its `-OutputPath` folder, one `<ServiceTag>.json` per node and `discovery-summary.json` (written after the last node). Sonar follows that folder (`discoveryPath`; with the master file it is the `discovery` folder inside `provisioning.simplified.evidence_path`). It reads the files, never an iDRAC, and parses a file again only when it changes.
+The first stage of the flow, **before ZTP**: the toolkit's `Invoke-HardwareDiscovery.ps1` reads every node's Dell iDRAC (Redfish, read only) and writes, in its `-OutputPath` folder, one `<ServiceTag>.json` per node and `discovery-summary.json` (written after the last node). Sonar follows that folder (`discoveryPath`; with the master file it is the `discovery` folder inside `provisioning.simplified.evidence_path`). It reads the files, never an iDRAC, and parses a file again only when it changes. Both file versions of the toolkit are read: schemaVersion 1.0 (`NetworkPorts`, `Boss`) and 2.0 (`network.adapters[].ports[]`, `storage.bootDevice`, `bmc.mac`).
 
 Per machine the page shows the **service tag** (the serial number ZTP maps the ownership voucher by), the model and BIOS version, the iDRAC MAC, every network port with its MAC and link state, the **suggested management port** (and whether it is confirmed or only a guess), and the **BOSS card** (drives, and whether a virtual disk exists; a card without one gets it from the toolkit's Phase 02 Task 01 before the OS install). Anything to check before ZTP is listed under the machine.
 

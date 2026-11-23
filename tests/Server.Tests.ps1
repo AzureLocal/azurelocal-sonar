@@ -654,6 +654,35 @@ Describe 'Start-AzlSonarServer end to end (random port, mocked poller and tailer
         Should -Invoke -ModuleName AzlSonar -CommandName Start-AzlSonarWorker -Times 0 -Exactly
     }
 
+    It 'never asks for the log account with -Monitor <Monitor>: it reads local files only (lab finding 2026-11-23)' -ForEach @(
+        @{ Monitor = 'Discovery' }, @{ Monitor = 'Verification' }
+    ) {
+        Mock -ModuleName AzlSonar -CommandName Assert-AzlSonarAzContext -MockWith { throw 'No Azure sign-in is needed.' }
+        Mock -ModuleName AzlSonar -CommandName Resolve-AzlSonarCredential -MockWith { throw 'The log account must not be asked for.' }
+        Mock -ModuleName AzlSonar -CommandName Start-AzlSonarWorker -MockWith { throw 'Workers must not start.' }
+        $port = Get-SonarFreeTcpPort
+        $blocker = [System.Net.HttpListener]::new()
+        $blocker.Prefixes.Add("http://localhost:$port/")
+        $blocker.Start()
+        try {
+            # The taken port stops the start after the credential step: reaching it proves no prompt came first.
+            { Start-AzlSonarServer -ConfigPath $script:SecretConfigPath -Monitor $Monitor -Port $port -NoBrowser } | Should -Throw "*Cannot listen on http://localhost:$port/*"
+        }
+        finally {
+            $blocker.Stop(); $blocker.Close()
+        }
+        Should -Invoke -ModuleName AzlSonar -CommandName Resolve-AzlSonarCredential -Times 0 -Exactly
+        Should -Invoke -ModuleName AzlSonar -CommandName Assert-AzlSonarAzContext -Times 0 -Exactly
+    }
+
+    It 'still asks for the log account with -Monitor <Monitor>, which reads a node' -ForEach @(
+        @{ Monitor = 'Deployment' }, @{ Monitor = 'Provisioning' }, @{ Monitor = 'OsConfiguration' }
+    ) {
+        Mock -ModuleName AzlSonar -CommandName Assert-AzlSonarAzContext -MockWith { }
+        Mock -ModuleName AzlSonar -CommandName Resolve-AzlSonarCredential -MockWith { throw 'asked for the log account' }
+        { Start-AzlSonarServer -ConfigPath $script:SecretConfigPath -Monitor $Monitor -Port (Get-SonarFreeTcpPort) -NoBrowser } | Should -Throw '*asked for the log account*'
+    }
+
     It 'stops before binding when nobody is signed in to Azure' {
         Mock -ModuleName AzlSonar -CommandName Assert-AzlSonarAzContext -MockWith { throw 'No Azure sign-in found in this PowerShell session.' }
         Mock -ModuleName AzlSonar -CommandName Resolve-AzlSonarCredential -MockWith { throw 'must not be reached' }

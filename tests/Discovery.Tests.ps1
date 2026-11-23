@@ -235,6 +235,65 @@ Describe 'what a machine shows: serial, MACs, management port, BOSS card' {
     }
 }
 
+Describe 'schemaVersion 2.0 node files (lab finding 2026-11-23: the BOSS card read as missing)' {
+    BeforeAll {
+        # The 2.0 shape of the toolkit (docs/hardware-discovery.md): lower-case keys, ports under network.adapters[], the
+        # boot device under storage.bootDevice, the iDRAC MAC as bmc.mac. Documentation values only.
+        function script:New-Disc2Json {
+            param([string]$Name, [string]$Tag, [int]$Index, [object]$Kind = 'boss', [bool]$Disk = $true)
+            $mac = { param($n) '00:00:5E:00:53:{0:X2}' -f $n }
+            [ordered]@{
+                schemaVersion = '2.0'; collectedAt = '2026-11-23T21:14:40Z'; bmcAddress = '192.0.2.50'; nodeName = $Name
+                identity = [ordered]@{ manufacturer = 'Example'; model = 'Example R660'; serialNumber = $Tag; serviceTag = $Tag; biosVersion = '2.11.2' }
+                bmc = [ordered]@{ model = '17G Monolithic'; firmwareVersion = '7.20.80.50'; mac = (& $mac (100 + $Index)) }
+                network = [ordered]@{ adapters = @(
+                        [ordered]@{ id = 'NIC.Embedded.1'; model = 'Example 1G'; ports = @(
+                                [ordered]@{ name = 'Embedded NIC 1'; slot = 'Embedded'; mac = (& $mac ($Index * 4 + 1)); linkUp = $true; speedMbps = 1000 }) },
+                        [ordered]@{ id = 'NIC.Slot.3'; model = 'Example 100G'; ports = @(
+                                [ordered]@{ name = 'Slot 3 Port 1'; slot = 'Slot 3'; mac = (& $mac ($Index * 4 + 2)); linkUp = $true; speedMbps = 100000 },
+                                [ordered]@{ name = 'Slot 3 Port 2'; slot = 'Slot 3'; mac = (& $mac ($Index * 4 + 3)); linkUp = $false; speedMbps = $null }) }); hostInterfaces = @() }
+                storage = [ordered]@{ controllers = @(); drives = @(); volumes = @()
+                    bootDevice = [ordered]@{ kind = $Kind; controllerId = $(if ($Kind) { 'BOSS.SL.12-1' } else { $null }); driveIds = $(if ($Kind) { @('Disk.Direct.0-0', 'Disk.Direct.1-1') } else { @() })
+                        volumeId = $null; capacityGiB = $null; hasVirtualDisk = ([bool]$Kind -and $Disk); needsVirtualDisk = ([bool]$Kind -and -not $Disk); detection = 'name' } }
+                warnings = @()
+            } | ConvertTo-Json -Depth 10
+        }
+        $script:Dir2 = Join-Path $TestDrive 'schema2'
+        $null = New-Item -ItemType Directory -Path $script:Dir2 -Force
+        [IO.File]::WriteAllText((Join-Path $script:Dir2 'EXAMPLE1.json'), (New-Disc2Json -Name 'n1' -Tag 'EXAMPLE1' -Index 1))
+        [IO.File]::WriteAllText((Join-Path $script:Dir2 'EXAMPLE2.json'), (New-Disc2Json -Name 'n2' -Tag 'EXAMPLE2' -Index 2 -Disk $false))
+        [IO.File]::WriteAllText((Join-Path $script:Dir2 'EXAMPLE3.json'), (New-Disc2Json -Name 'n3' -Tag 'EXAMPLE3' -Index 3 -Kind $null))
+        $script:S2 = Get-DiscState $script:Dir2 @('n1', 'n2', 'n3')
+    }
+    It 'reads the BOSS card from storage.bootDevice: present with its drives and virtual disk' {
+        $n = @($script:S2.nodes | Where-Object name -eq 'n1')[0]
+        $n.boss.present | Should -BeTrue
+        $n.boss.driveCount | Should -Be 2
+        $n.boss.hasVirtualDisk | Should -BeTrue
+        ($n.notes -join ' ') | Should -Not -Match 'No BOSS card'
+    }
+    It 'says when the BOSS card has no virtual disk, and when the file found no boot card' {
+        $b = @($script:S2.nodes | Where-Object name -eq 'n2')[0]
+        $b.boss.needsVirtualDisk | Should -BeTrue
+        ($b.notes -join ' ') | Should -Match 'no virtual disk'
+        $c = @($script:S2.nodes | Where-Object name -eq 'n3')[0]
+        $c.boss.present | Should -BeFalse
+        ($c.notes -join ' ') | Should -Match 'No BOSS card'
+    }
+    It 'reads every port of every adapter with its MAC, link, speed and the card model, and the iDRAC MAC from bmc.mac' {
+        $n = @($script:S2.nodes | Where-Object name -eq 'n1')[0]
+        @($n.ports).Count | Should -Be 3
+        $n.ports[0].name | Should -Be 'Embedded NIC 1'
+        $n.ports[0].mac | Should -Be '00:00:5E:00:53:05'
+        $n.ports[1].speedMbps | Should -Be 100000
+        $n.ports[1].adapterModel | Should -Be 'Example 100G'
+        $n.ports[2].linkUp | Should -BeFalse
+        $n.bmcMac | Should -Be '00:00:5E:00:53:65'
+        $n.serviceTag | Should -Be 'EXAMPLE1'
+        $n.biosVersion | Should -Be '2.11.2'
+    }
+}
+
 Describe 'the cache: a file is parsed again only when it changes' {
     It 'keeps parsed files by path, parses nothing the second time, and re-reads a changed file' {
         $dir = New-DiscFolder 'cache' $script:Two -Summary

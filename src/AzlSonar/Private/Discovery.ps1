@@ -4,7 +4,10 @@ Set-StrictMode -Version Latest
 # Dell iDRAC (Redfish, read-only) and writes, in its -OutputPath folder:
 #   <ServiceTag>.json          one file per node: NodeName, CollectedAt, Identity{ServiceTag,SerialNumber,Model,BiosVersion},
 #                              Bmc{MacAddress}, NetworkPorts[{Name,Slot,MacAddress,LinkUp,LinkSpeedMbps,AdapterModel}],
-#                              Boss{Present,DriveCount,HasVirtualDisk,NeedsVirtualDisk}, Warnings[]
+#                              Boss{Present,DriveCount,HasVirtualDisk,NeedsVirtualDisk}, Warnings[]   (schemaVersion 1.0)
+#                              schemaVersion 2.0 keeps identity and warnings, and moves the rest: bmc.mac,
+#                              network.adapters[].ports[]{name,slot,mac,linkUp,speedMbps} with the card model on the adapter,
+#                              storage.bootDevice{kind (boss or null),driveIds[],hasVirtualDisk,needsVirtualDisk}
 #   discovery-summary.json     one object per node, written after the last node: NodeName, ServiceTag, Model, BmcMac,
 #                              Ports[{Name,Mac,LinkUp}], ManagementPort, ManagementMac, ManagementPortConfirmed,
 #                              ManagementPortReason, Boss{Present,DriveCount,HasVirtualDisk,NeedsVirtualDisk}, Warnings (count)
@@ -49,17 +52,52 @@ function ConvertFrom-AzlSonarDiscoveryNodeFile {
     [OutputType([hashtable])]
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Json)
 
+    $toPort = {
+        param($p, [string]$adapterModel)
+        $speed = Get-AzlSonarDiscoveryValue $p 'LinkSpeedMbps'
+        if ($null -eq $speed) { $speed = Get-AzlSonarDiscoveryValue $p 'speedMbps' }
+        $mac = Get-AzlSonarDiscoveryValue $p 'MacAddress'
+        if ($null -eq $mac) { $mac = Get-AzlSonarDiscoveryValue $p 'mac' }
+        $model = [string](Get-AzlSonarDiscoveryValue $p 'AdapterModel' '')
+        if (-not $model) { $model = $adapterModel }
+        @{
+            name = [string](Get-AzlSonarDiscoveryValue $p 'Name' ''); slot = [string](Get-AzlSonarDiscoveryValue $p 'Slot' '')
+            mac = ConvertTo-AzlSonarDiscoveryMac $mac
+            linkUp = [bool](Get-AzlSonarDiscoveryValue $p 'LinkUp' $false)
+            speedMbps = $(if ($null -ne $speed -and "$speed" -match '^\d+$') { [long]$speed } else { $null })
+            adapterModel = $model
+        }
+    }
+    # Schema 1.0: NetworkPorts[] at the top. Schema 2.0: network.adapters[].ports[] (the card model on the adapter).
     $ports = @(foreach ($p in @(Get-AzlSonarDiscoveryValue $Json 'NetworkPorts' @())) {
-            if ($p -isnot [System.Collections.IDictionary]) { continue }
-            $speed = Get-AzlSonarDiscoveryValue $p 'LinkSpeedMbps'
-            @{
-                name = [string](Get-AzlSonarDiscoveryValue $p 'Name' ''); slot = [string](Get-AzlSonarDiscoveryValue $p 'Slot' '')
-                mac = ConvertTo-AzlSonarDiscoveryMac (Get-AzlSonarDiscoveryValue $p 'MacAddress')
-                linkUp = [bool](Get-AzlSonarDiscoveryValue $p 'LinkUp' $false)
-                speedMbps = $(if ($null -ne $speed -and "$speed" -match '^\d+$') { [long]$speed } else { $null })
-                adapterModel = [string](Get-AzlSonarDiscoveryValue $p 'AdapterModel' '')
-            }
+            if ($p -is [System.Collections.IDictionary]) { & $toPort $p '' }
         })
+    if ($ports.Count -eq 0) {
+        $ports = @(foreach ($a in @(Get-AzlSonarDiscoveryValue $Json 'network.adapters' @())) {
+                if ($a -isnot [System.Collections.IDictionary]) { continue }
+                $adapterModel = [string](Get-AzlSonarDiscoveryValue $a 'model' '')
+                foreach ($p in @(Get-AzlSonarDiscoveryValue $a 'ports' @())) { if ($p -is [System.Collections.IDictionary]) { & $toPort $p $adapterModel } }
+            })
+    }
+    # Schema 1.0: Boss{Present,DriveCount,HasVirtualDisk,NeedsVirtualDisk}. Schema 2.0: storage.bootDevice{kind,driveIds,...}.
+    $bossBlock = Get-AzlSonarDiscoveryValue $Json 'Boss'
+    $bootDevice = Get-AzlSonarDiscoveryValue $Json 'storage.bootDevice'
+    $boss = if ($bossBlock -is [System.Collections.IDictionary] -or $bootDevice -isnot [System.Collections.IDictionary]) {
+        @{
+            present = [bool](Get-AzlSonarDiscoveryValue $Json 'Boss.Present' $false); driveCount = [int](Get-AzlSonarDiscoveryValue $Json 'Boss.DriveCount' 0)
+            hasVirtualDisk = [bool](Get-AzlSonarDiscoveryValue $Json 'Boss.HasVirtualDisk' $false); needsVirtualDisk = [bool](Get-AzlSonarDiscoveryValue $Json 'Boss.NeedsVirtualDisk' $false)
+        }
+    }
+    else {
+        $isBoss = ([string](Get-AzlSonarDiscoveryValue $bootDevice 'kind' '')) -ieq 'boss'
+        @{
+            present = $isBoss; driveCount = $(if ($isBoss) { @(Get-AzlSonarDiscoveryValue $bootDevice 'driveIds' @()).Count } else { 0 })
+            hasVirtualDisk = ($isBoss -and [bool](Get-AzlSonarDiscoveryValue $bootDevice 'hasVirtualDisk' $false))
+            needsVirtualDisk = ($isBoss -and [bool](Get-AzlSonarDiscoveryValue $bootDevice 'needsVirtualDisk' $false))
+        }
+    }
+    $bmcMac = Get-AzlSonarDiscoveryValue $Json 'Bmc.MacAddress'
+    if ($null -eq $bmcMac) { $bmcMac = Get-AzlSonarDiscoveryValue $Json 'bmc.mac' }
     $warnings = @(foreach ($w in @(Get-AzlSonarDiscoveryValue $Json 'Warnings' @())) { if ($null -ne $w -and "$w".Trim()) { [string]$w } })
     return @{
         name = [string](Get-AzlSonarDiscoveryValue $Json 'NodeName' '')
@@ -67,15 +105,12 @@ function ConvertFrom-AzlSonarDiscoveryNodeFile {
         serial = [string](Get-AzlSonarDiscoveryValue $Json 'Identity.SerialNumber' '')
         model = [string](Get-AzlSonarDiscoveryValue $Json 'Identity.Model' '')
         biosVersion = [string](Get-AzlSonarDiscoveryValue $Json 'Identity.BiosVersion' '')
-        bmcMac = ConvertTo-AzlSonarDiscoveryMac (Get-AzlSonarDiscoveryValue $Json 'Bmc.MacAddress')
+        bmcMac = ConvertTo-AzlSonarDiscoveryMac $bmcMac
         collectedAt = [string](Get-AzlSonarDiscoveryValue $Json 'CollectedAt' '')
         ports = $ports
         management = $null
         managementReason = ''
-        boss = @{
-            present = [bool](Get-AzlSonarDiscoveryValue $Json 'Boss.Present' $false); driveCount = [int](Get-AzlSonarDiscoveryValue $Json 'Boss.DriveCount' 0)
-            hasVirtualDisk = [bool](Get-AzlSonarDiscoveryValue $Json 'Boss.HasVirtualDisk' $false); needsVirtualDisk = [bool](Get-AzlSonarDiscoveryValue $Json 'Boss.NeedsVirtualDisk' $false)
-        }
+        boss = $boss
         warnings = $warnings
         warningCount = $warnings.Count
     }
