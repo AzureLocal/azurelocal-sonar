@@ -429,3 +429,39 @@ Describe 'Sonar reads the feed and nothing else about the run' {
         $src | Should -Not -Match 'Set-Content|Add-Content|Out-File|Remove-Item|New-Item'
     }
 }
+
+Describe 'the event level wins over the words of the text, and offline reads either encoding (N4)' {
+    It 'a PlanCompleted Info line stays Info in the log pane, though its text says "failed"' {
+        $line = New-ArmLine -At (Get-ArmTime 0) -State PlanCompleted -Mode Plan -Evidence 'Plan complete: parameters generated, no precondition failed.' -Extra @{ failedPreconditions = 0 }
+        $records = InModuleScope AzlSonar -Parameters @{ L = $line } {
+            param($L)
+            $shared = Initialize-AzlSonarSharedState
+            $item = ConvertFrom-AzlSonarArmEvent -Line $L
+            $item.level | Should -Be 'info'
+            Add-AzlSonarLogLine -Shared $shared -Line @($item)
+            , $shared.Lines.ToArray()
+        }
+        @($records).Count | Should -Be 1
+        $records[0].level | Should -Be 'info'
+    }
+    It 'an Error event is an error line, and a line with no level of its own is still read by its words' {
+        $err = InModuleScope AzlSonar -Parameters @{ L = (New-ArmLine -At (Get-ArmTime 0) -State ValidationFailed -Level Error -Evidence 'Validation step 3 stopped.') } { param($L) ConvertFrom-AzlSonarArmEvent -Line $L }
+        $err.level | Should -Be 'error'
+        $records = InModuleScope AzlSonar {
+            $shared = Initialize-AzlSonarSharedState
+            Add-AzlSonarLogLine -Shared $shared -Line @(@{ file = 'setup.log'; text = 'Step failed with an exception' })
+            , $shared.Lines.ToArray()
+        }
+        $records[0].level | Should -Be 'error'
+    }
+    It 'reads offline as a JSON bool, a serialised switch { IsPresent } or text' -TestCases @(
+        @{ Value = $true; Expected = $true }
+        @{ Value = @{ IsPresent = $true }; Expected = $true }
+        @{ Value = @{ IsPresent = $false }; Expected = $false }
+        @{ Value = 'true'; Expected = $true }
+        @{ Value = $false; Expected = $false }
+    ) {
+        $line = New-ArmLine -At (Get-ArmTime 0) -State PlanCompleted -Mode Plan -Evidence 'Plan complete.' -Extra @{ failedPreconditions = 0; offline = $Value }
+        (Get-ArmFromLine -Line @((New-ArmLine -At (Get-ArmTime 0) -State RunStarted -Mode Plan), $line)).run.offline | Should -Be $Expected
+    }
+}

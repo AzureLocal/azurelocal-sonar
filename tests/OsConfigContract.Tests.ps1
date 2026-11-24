@@ -522,3 +522,78 @@ Describe 'the event file loop reads a file, a folder with one file per run, or a
         $r | Should -Be @('NodeStarted', 'StepApplying', 'StepApplied')
     }
 }
+
+Describe 'every state and step of the toolkit''s own event registry is known to Sonar (N2)' {
+    # The toolkit's one registry of OS configuration event states (Get-AzlOsConfigurationEventState) and its step order
+    # (Get-AzlOsConfigurationStepOrder), read from the toolkit checkout ($env:AZL_TOOLKIT_ROOT or a sibling folder). On CI the
+    # checkout is required; on a workstation without it the test is skipped.
+    BeforeAll {
+        $script:ToolkitRoot = Get-SonarToolkitRoot
+        $script:ToolkitEvents = if ($script:ToolkitRoot) { Join-Path $script:ToolkitRoot 'scripts/common/node-configuration/AzlOsConfigurationEvents.psm1' } else { $null }
+    }
+
+    It 'has the toolkit checkout (required on CI)' {
+        if (-not $script:ToolkitRoot -and -not (Test-SonarOnCi)) { Set-ItResult -Skipped -Because 'no azurelocal-toolkit checkout (set AZL_TOOLKIT_ROOT)'; return }
+        $script:ToolkitRoot | Should -Not -BeNullOrEmpty -Because 'CI checks out azurelocal-toolkit and sets AZL_TOOLKIT_ROOT'
+        Test-Path -LiteralPath $script:ToolkitEvents -PathType Leaf | Should -BeTrue
+    }
+
+    It 'knows every state the toolkit can write: none is shown as "not known to Sonar"' {
+        if (-not $script:ToolkitRoot -and -not (Test-SonarOnCi)) { Set-ItResult -Skipped -Because 'no azurelocal-toolkit checkout (set AZL_TOOLKIT_ROOT)'; return }
+        $toolkit = Import-Module -Name $script:ToolkitEvents -Force -PassThru -DisableNameChecking
+        try {
+            $registry = & $toolkit { Get-AzlOsConfigurationEventState }
+            $states = @(foreach ($group in $registry.Keys) { @($registry[$group]) })
+        }
+        finally { Remove-Module -ModuleInfo $toolkit -Force -ErrorAction SilentlyContinue }
+        $states.Count | Should -BeGreaterThan 30
+        $unknown = InModuleScope AzlSonar -Parameters @{ S = $states } {
+            param($S)
+            @($S | Where-Object { -not (Get-AzlSonarOsEventInfo -State $_).known })
+        }
+        @($unknown) | Should -BeNullOrEmpty -Because "Sonar must know every state of the toolkit's registry: $(@($unknown) -join ', ')"
+    }
+
+    It 'has a name for every step the toolkit runs' {
+        if (-not $script:ToolkitRoot -and -not (Test-SonarOnCi)) { Set-ItResult -Skipped -Because 'no azurelocal-toolkit checkout (set AZL_TOOLKIT_ROOT)'; return }
+        $toolkit = Import-Module -Name $script:ToolkitEvents -Force -PassThru -DisableNameChecking
+        try { $steps = @(& $toolkit { Get-AzlOsConfigurationStepOrder }) }
+        finally { Remove-Module -ModuleInfo $toolkit -Force -ErrorAction SilentlyContinue }
+        $missing = InModuleScope AzlSonar -Parameters @{ S = $steps } { param($S) @($S | Where-Object { -not $script:AzlSonarOsStep.Contains($_) }) }
+        @($missing) | Should -BeNullOrEmpty -Because "Sonar must name every step of the toolkit: $(@($missing) -join ', ')"
+    }
+}
+
+Describe 'the states added for 2611: call attempts, the SBE copy and an observed commit (N2)' {
+    It 'a failed call attempt is shown, a good one stays in the log pane only' {
+        $s = Get-OccState @(
+            (New-OccLine -At (Get-OccTime 0) -Node '*' -State RunStarted -Run 'r1' -Seq 1)
+            (New-OccLine -At (Get-OccTime 1) -Node n1 -State NodeCallAttempt -Step Transport -Run 'r1' -Seq 2 -Evidence 'Call 1 worked.')
+            (New-OccLine -At (Get-OccTime 2) -Node n1 -State NodeCallAttempt -Step Transport -Run 'r1' -Seq 3 -Level Warning -Evidence 'Call 2 timed out after 300 s.'))
+        $n1 = @($s.nodes | Where-Object name -eq 'n1')[0]
+        $calls = @($n1.timeline | Where-Object state -eq 'NodeCallAttempt')
+        $calls.Count | Should -Be 1
+        $calls[0].message | Should -BeLike '*timed out*'
+        $calls[0].known | Should -BeTrue
+    }
+    It 'the SBE copy progress replaces its previous line' {
+        $s = Get-OccState @(
+            (New-OccLine -At (Get-OccTime 0) -Node '*' -State RunStarted -Run 'r1' -Seq 1)
+            (New-OccLine -At (Get-OccTime 1) -Node n1 -State SbeDeliveryProgress -Step Transport -Run 'r1' -Seq 2 -Evidence '5 percent')
+            (New-OccLine -At (Get-OccTime 2) -Node n1 -State SbeDeliveryProgress -Step Transport -Run 'r1' -Seq 3 -Evidence '10 percent'))
+        $n1 = @($s.nodes | Where-Object name -eq 'n1')[0]
+        $copy = @($n1.timeline | Where-Object state -eq 'SbeDeliveryProgress')
+        $copy.Count | Should -Be 1
+        $copy[0].message | Should -Be '10 percent'
+    }
+    It 'ObservedCommitted applies the Network step, as a warning (the guard did not confirm)' {
+        $s = Get-OccState @(
+            (New-OccLine -At (Get-OccTime 0) -Node '*' -State RunStarted -Run 'r1' -Seq 1)
+            (New-OccLine -At (Get-OccTime 1) -Node n1 -State NetworkChangeStaged -Step Network -Run 'r1' -Seq 2 -Extra @{ changeId = 'c1' })
+            (New-OccLine -At (Get-OccTime 3) -Node n1 -State ObservedCommitted -Step Network -Run 'r1' -Seq 3 -Level Warning -Evidence 'The address is in place on the node.' -Extra @{ changeId = 'c1' }))
+        $n1 = @($s.nodes | Where-Object name -eq 'n1')[0]
+        $net = @($n1.tree | Where-Object { $_.name -like 'Network*' })[0]
+        $net.status | Should -Be 'success'
+        @($n1.unknownStates).Count | Should -Be 0
+    }
+}

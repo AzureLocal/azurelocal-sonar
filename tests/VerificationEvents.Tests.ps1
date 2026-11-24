@@ -455,3 +455,42 @@ Describe 'the page source and the docs agree with the back end' {
         (Get-Content -LiteralPath (Join-Path $script:SonarRepoRoot 'docs/verification.md') -Raw) | Should -Match 'precluster-verification-events.jsonl'
     }
 }
+
+Describe 'a gate result for another infrastructure file (N5)' {
+    BeforeAll {
+        # The state of the pass fixture, as Sonar started with -InfrastructureFile <Path> sees it.
+        function script:Get-VfStateFor {
+            param([string]$Path, [string]$Hash)
+            $lines = @(Get-Content -LiteralPath (Get-VfFixture 'pass'))
+            if ($Hash) { $lines = @($lines | ForEach-Object { $_ -replace '"fileHash":"[^"]*"', ('"fileHash":"' + $Hash + '"') }) }
+            $cfg = [pscustomobject]@{ verificationEventsPath = 'x'; sourceKind = 'infrastructure'; sourcePath = $Path }
+            InModuleScope AzlSonar -Parameters @{ L = $lines; C = $cfg } {
+                param($L, $C)
+                $store = [hashtable]::Synchronized(@{})
+                foreach ($x in $L) { Add-AzlSonarVerificationEvent -Store $store -Line $x }
+                Get-AzlSonarVerificationState -Store $store -Config $C -Now ([datetime]::SpecifyKind([datetime]'2026-11-08T13:00:00', 'Utc'))
+            }
+        }
+        $script:InfraFile = Join-Path $TestDrive 'infrastructure.yml'
+        Set-Content -LiteralPath $script:InfraFile -Value "_metadata:`n  schema_version: `"5.6.31`"`n" -Encoding utf8
+        $script:InfraHash = (Get-FileHash -LiteralPath $script:InfraFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    It 'a Pass the gate wrote for another file is "not for this file" and blocks' {
+        $s = Get-VfStateFor -Path $script:InfraFile
+        $s.status | Should -Be 'otherfile'
+        $s.state | Should -Be 'not for this file'
+        $s.run.fileMatch | Should -BeFalse
+        $s.run.currentFileHash | Should -Be $script:InfraHash
+        @($s.warnings) -join ' ' | Should -Match 'not for this infrastructure file'
+    }
+    It 'the Pass for this file stays a pass (bare hex, as the toolkit writes it, or with a sha256: prefix)' -TestCases @(@{ Prefix = '' }, @{ Prefix = 'sha256:' }) {
+        $s = Get-VfStateFor -Path $script:InfraFile -Hash ($Prefix + $script:InfraHash)
+        $s.status | Should -Be 'pass'
+        $s.run.fileMatch | Should -BeTrue
+    }
+    It 'is not compared when Sonar was started with a config file (no infrastructure file to hash)' {
+        $s = Get-VfState 'pass'
+        $s.status | Should -Be 'pass'
+        $null -eq $s.run.fileMatch | Should -BeTrue
+    }
+}

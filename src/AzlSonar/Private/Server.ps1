@@ -63,6 +63,7 @@ function Initialize-AzlSonarSharedState {
             VerificationEvents = [hashtable]::Synchronized(@{})   # pre-cluster verification gate events: the latest run entry '*' with its checks (Invoke-AzlSonarVerificationEventLoop)
             VerificationInfo   = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the verification event file: events read and the newest event time (/api/details)
             ArmInfo       = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the ARM event file: events read and the newest event time (/api/details)
+            UpdateEvents  = [hashtable]::Synchronized(@{})   # the toolkit's solution update events: the run entry '*' with its stages (Invoke-AzlSonarUpdateEventLoop)
             LogAccount    = [hashtable]::Synchronized(@{})   # per node: immutable records of the account log access uses (never a password); '*breaker' and '*unavailable' hold the account-wide ones
             CredentialLock = [object]::new()   # one lock for the domain credential (read, mask, publish) and for the breaker and the per-node records
             LocalUserName = ''   # the local log account's user name (-Credential or the prompt), for the account shown per node
@@ -1170,6 +1171,10 @@ function Start-AzlSonarServer {
         if ($config.armEventsPath -and $plan.armEvents) {
             # The toolkit's ARM Validate and Deploy event file (JSON Lines): the ARM view of Validate and Deployment and its log lines.
             $workerSpecs.Add(@{ Name = 'ArmEvents'; Command = 'Invoke-AzlSonarArmEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
+        }
+        if ([string](Get-AzlSonarMember $config 'updateEventsPath' '') -and $plan.updateEvents) {
+            # The toolkit's solution update event file (JSON Lines): the offline Update view and its log lines.
+            $workerSpecs.Add(@{ Name = 'UpdateEvents'; Command = 'Invoke-AzlSonarUpdateEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
         }
         if ($config.verificationEventsPath -and $plan.verificationEvents) {
             # The toolkit's pre-cluster verification gate event file (JSON Lines): the Verification view and its log lines.

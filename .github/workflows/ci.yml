@@ -23,6 +23,7 @@ concurrency:
 env:
   PESTER_VERSION: 5.9.1
   PSSA_VERSION: 1.25.0
+  POWERSHELL_YAML_VERSION: 0.4.12
 
 jobs:
   plan:
@@ -52,14 +53,29 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Pester
+      # The contract tests read the toolkit's registry example, generated monitoring template and schema, its loader and
+      # its OS configuration event registry (tests/TestHelpers.ps1 Get-SonarToolkitRoot). On CI they fail, not skip, without it.
+      - name: Check out azurelocal-toolkit (contract tests)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: AzureLocal/azurelocal-toolkit
+          path: _toolkit
+          persist-credentials: false
+          sparse-checkout: |
+            config/variables
+            scripts/common
+      - name: Install Pester and powershell-yaml
         shell: pwsh
         run: |
           Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
           # -SkipPublisherCheck: the runner image ships Pester 3.4 signed by Microsoft; the pinned 5.9.1 has a different publisher.
           Install-Module Pester -RequiredVersion $env:PESTER_VERSION -Scope CurrentUser -Force -SkipPublisherCheck
+          # The toolkit's loader (Import-AzlInfrastructure) reads YAML with powershell-yaml.
+          Install-Module powershell-yaml -RequiredVersion $env:POWERSHELL_YAML_VERSION -Scope CurrentUser -Force
       - name: Pester ${{ matrix.file }}
         shell: pwsh
+        env:
+          AZL_TOOLKIT_ROOT: ${{ github.workspace }}/_toolkit
         run: |
           Import-Module Pester -RequiredVersion $env:PESTER_VERSION
           $config = New-PesterConfiguration

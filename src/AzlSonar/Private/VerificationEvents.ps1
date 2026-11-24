@@ -446,6 +446,34 @@ function Invoke-AzlSonarVerificationEventLoop {
 # The state: the verification object of /api/state
 # ---------------------------------------------------------------------------------------------------------------------
 
+function Get-AzlSonarInfrastructureFileHash {
+    <#
+    .SYNOPSIS
+        SHA-256 (lower case hex) of the infrastructure file Sonar was started with, the toolkit's rule (Get-AzlPclFileHash).
+    .DESCRIPTION
+        '' when the file cannot be read. The hash is kept per path, length and write time, so a poll hashes the file again only
+        after it changed.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowNull()][AllowEmptyString()][string]$Path)
+
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    try {
+        $item = Get-Item -LiteralPath $Path
+        $stamp = "$($item.FullName)|$($item.Length)|$($item.LastWriteTimeUtc.Ticks)"
+        $cache = Get-Variable -Name AzlSonarInfraHashCache -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+        if ($null -ne $cache -and $cache.Stamp -eq $stamp) { return [string]$cache.Hash }
+        $stream = [System.IO.File]::OpenRead($item.FullName)
+        # SHA256.Create().ComputeHash, not the .NET 7 HashData(Stream): PowerShell 7.0 to 7.2 run on older .NET.
+        try { $sha = [System.Security.Cryptography.SHA256]::Create(); try { $hash = ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant() } finally { $sha.Dispose() } }
+        finally { $stream.Dispose() }
+        $script:AzlSonarInfraHashCache = @{ Stamp = $stamp; Hash = $hash }
+        return $hash
+    }
+    catch { return '' }
+}
+
 function Get-AzlSonarVerificationRank {
     # The sort rank of a status word: failed first, then skipped, running, warning, fixed, passed, not applicable; a word the
     # contract does not name sits with the warnings.
@@ -504,13 +532,15 @@ function Get-AzlSonarVerificationState {
     .SYNOPSIS
         The verification object of /api/state, from the verification event store: the verdict, the counts and the checks.
     .DESCRIPTION
-        { configured, hasData, status (notstarted|running|pass|fail|expired), verdict ('' | Pass | Fail, the gate's own word),
-        word, run{runId, started, completed, lastEventAt, events, stale, schema, fileHash, expiresUtc, expiresInSeconds},
+        { configured, hasData, status (notstarted|running|pass|fail|expired|otherfile), verdict ('' | Pass | Fail, the gate's own word),
+        word, run{runId, started, completed, lastEventAt, events, stale, schema, fileHash, currentFileHash, fileMatch, expiresUtc, expiresInSeconds},
         counts{Passed, Failed, Warning, Skipped, NotApplicable, Fixed, Running, ...}, total, reportedCounts, countsMismatch,
         blockers (checks that block), skippedBlocking, categories[{id, name, status, counts, checks[]}] (known order; failed
         checks first inside a category), attention[] (the blocking checks), warnings[], guide }.
         Running: the run has no RunCompleted line. Pass with expiresUtc in the past: expired. A Pass verdict while a check
-        blocks is shown as fail (the verdict and the checks disagree: the gate is never shown green by accident).
+        blocks is shown as fail (the verdict and the checks disagree: the gate is never shown green by accident). Started with
+        -InfrastructureFile, a completed run whose fileHash is not the SHA-256 of that file is otherfile ("not for this file"),
+        which blocks like a fail: the toolkit's ARM run refuses such a result.
     .PARAMETER Store
         Shared.VerificationEvents (Add-AzlSonarVerificationEvent).
     .PARAMETER Config
@@ -589,7 +619,24 @@ function Get-AzlSonarVerificationState {
         if ([int]$run['Schema'] -gt 1) { $warnings.Add("The file uses schema $([int]$run['Schema']); Sonar reads the fields it knows.") }
     }
 
-    $word = switch ($status) { 'running' { 'running' } 'pass' { 'pass' } 'fail' { 'fail' } 'expired' { 'expired' } default { 'waiting' } }
+    # Started with -InfrastructureFile: a gate result is for that file only when it saw the same SHA-256 (the toolkit's ARM run
+    # refuses a result whose fileHash differs). A result for another file blocks, whatever its verdict.
+    $fileMatch = $null
+    $currentHash = ''
+    if ($complete -and [string](Get-AzlSonarMember $Config 'sourceKind' '') -eq 'infrastructure' -and [string]$run['FileHash']) {
+        $currentHash = Get-AzlSonarInfrastructureFileHash -Path ([string](Get-AzlSonarMember $Config 'sourcePath' ''))
+        if ($currentHash) {
+            # The toolkit writes lower case hex (Get-AzlPclFileHash); a 'sha256:' prefix is read too.
+            $seen = ([string]$run['FileHash']).Trim().ToLowerInvariant() -replace '^sha256:', ''
+            $fileMatch = ($currentHash -eq $seen)
+            if (-not $fileMatch) {
+                $status = 'otherfile'
+                $warnings.Add("This gate result is not for this infrastructure file: the gate saw SHA-256 $($seen.Substring(0, [math]::Min(12, $seen.Length)))..., the file Sonar reads has $($currentHash.Substring(0, 12))... Run the gate again on this file before Validate; the ARM run refuses this result.")
+            }
+        }
+    }
+
+    $word = switch ($status) { 'running' { 'running' } 'pass' { 'pass' } 'fail' { 'fail' } 'expired' { 'expired' } 'otherfile' { 'not for this file' } default { 'waiting' } }
 
     # Categories: the known ones in their order, then any other the file names; failed checks first inside each.
     $byCategory = [ordered]@{}
@@ -627,6 +674,9 @@ function Get-AzlSonarVerificationState {
             stale           = $(if ($hasData) { [int]$run['Stale'] } else { 0 })
             schema          = $(if ($hasData) { [int]$run['Schema'] } else { 1 })
             fileHash        = $(if ($hasData) { [string]$run['FileHash'] } else { '' })
+            # The SHA-256 of the infrastructure file Sonar reads, and whether it is the one the gate saw ($null: not compared).
+            currentFileHash = $currentHash
+            fileMatch       = $fileMatch
             expiresUtc      = $(if ($hasData) { [string]$run['ExpiresUtc'] } else { '' })
             expiresInSeconds = $expiresIn
         }

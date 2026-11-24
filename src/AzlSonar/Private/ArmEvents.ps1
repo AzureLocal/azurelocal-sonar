@@ -104,14 +104,45 @@ function ConvertFrom-AzlSonarArmLine {
     }
 }
 
+function ConvertTo-AzlSonarArmBool {
+    <#
+    .SYNOPSIS
+        A flag of the ARM event file as a bool, whatever way the run wrote it.
+    .DESCRIPTION
+        The toolkit writes a switch either as a JSON bool or, when a [switch] was serialised as it is, as an object
+        { IsPresent: bool }. The strings true and false and numbers are read too. Anything else is false.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value) { return $false }
+    if ($Value -is [bool]) { return $Value }
+    if ($Value -is [System.Management.Automation.SwitchParameter]) { return $Value.IsPresent }
+    if ($Value -is [System.Collections.IDictionary]) {
+        foreach ($k in @($Value.Keys)) { if ([string]$k -ieq 'IsPresent') { return (ConvertTo-AzlSonarArmBool -Value $Value[$k]) } }
+        return $false
+    }
+    if ($Value -is [string]) {
+        $parsed = $false
+        if ([bool]::TryParse($Value.Trim(), [ref]$parsed)) { return $parsed }
+        return $false
+    }
+    if ($Value -is [int] -or $Value -is [long] -or $Value -is [double]) { return ([double]$Value -ne 0) }
+    $present = Get-AzlSonarMember $Value 'IsPresent'
+    if ($null -ne $present) { return (ConvertTo-AzlSonarArmBool -Value $present) }
+    return $false
+}
+
 function ConvertFrom-AzlSonarArmEvent {
     <#
     .SYNOPSIS
-        One event line of the ARM event file as a log line { file, text }, or $null when the line is not an event.
+        One event line of the ARM event file as a log line { file, text, level }, or $null when the line is not an event.
     .DESCRIPTION
         The text starts with the event's own UTC timestamp, so the log pane orders it by event time, then
         "[arm] <node> <State> (<step>): <evidence> -> next: <nextAction>", and ends with the level word (error, warning)
-        the pane colours by.
+        for a reader of the text. level is the event's own level (info, warning, error): the log pane colours the line by
+        it before any keyword in the text, so "Plan complete: ... no precondition failed." stays Info.
     #>
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -131,7 +162,7 @@ function ConvertFrom-AzlSonarArmEvent {
     if ($entry.nextAction) { $text += " -> next: $($entry.nextAction)" }
     if ($level -eq 'error' -and $text -notmatch '(?i)\b(error|failed|fatal|exception)\b') { $text += ' (error)' }
     elseif ($level -eq 'warning' -and $text -notmatch '(?i)\bwarn(ing)?\b') { $text += ' (warning)' }
-    return @{ file = $script:AzlSonarArmEventFile; text = $text }
+    return @{ file = $script:AzlSonarArmEventFile; text = $text; level = $level }
 }
 
 function Read-AzlSonarArmEventChunk {
@@ -273,7 +304,7 @@ function Add-AzlSonarArmEvent {
         'PlanCompleted' {
             $new['PlanCompleted'] = $true
             $new['PlanFailed'] = [int]$(if ($data.ContainsKey('failedPreconditions')) { $data['failedPreconditions'] } else { 0 })
-            $new['Offline'] = [bool]$(if ($data.ContainsKey('offline')) { $data['offline'] } else { $false })
+            $new['Offline'] = ConvertTo-AzlSonarArmBool -Value $(if ($data.ContainsKey('offline')) { $data['offline'] } else { $false })
             if ($evt.level -eq 'Error') { $new['Level'] = 'Error'; $new['Message'] = $evt.evidence; $new['NextAction'] = $evt.nextAction }
         }
         'PreconditionChecked' {
@@ -368,7 +399,7 @@ function Add-AzlSonarArmEvent {
             $key = & $phaseKeyOf $_
             $p = & $phaseOfRun $key
             $p['Status'] = 'passed'; $p['Completed'] = $evt.timestamp; $p['Failing'] = $null; $p['KnownIssue'] = ''; $p['Message'] = $evt.evidence; $p['NextAction'] = $evt.nextAction; $p['Level'] = $evt.level
-            if ($data.ContainsKey('skipped') -and [bool]$data['skipped']) { $p['Skipped'] = $true }
+            if ($data.ContainsKey('skipped') -and (ConvertTo-AzlSonarArmBool -Value $data['skipped'])) { $p['Skipped'] = $true }
             $Store[$key] = $p
             if ($_ -eq 'ValidationPassed') { $new['PastValidate'] = $true }
         }

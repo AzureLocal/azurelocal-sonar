@@ -156,3 +156,25 @@ function Get-SonarFreeTcpPort {
     try { return ([System.Net.IPEndPoint]$probe.LocalEndpoint).Port }
     finally { $probe.Stop() }
 }
+
+function Get-SonarToolkitRoot {
+    <#
+        The azurelocal-toolkit checkout the contract tests read (its registry example, the generated monitoring template and
+        schema, the OS configuration event registry): $env:AZL_TOOLKIT_ROOT, else a sibling azurelocal-toolkit folder next to
+        this repository. $null when neither is there; Assert-SonarToolkitRoot turns that into a failure on CI.
+    #>
+    $candidates = @()
+    if ($env:AZL_TOOLKIT_ROOT) { $candidates += $env:AZL_TOOLKIT_ROOT }
+    $candidates += (Join-Path -Path (Split-Path -Path $script:SonarRepoRoot -Parent) -ChildPath 'azurelocal-toolkit')
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path -LiteralPath (Join-Path -Path $c -ChildPath 'config/variables/schema/master-registry.yaml') -PathType Leaf)) {
+            return (Resolve-Path -LiteralPath $c).ProviderPath
+        }
+    }
+    return $null
+}
+
+function Test-SonarOnCi {
+    # True on a CI runner (GitHub Actions sets both).
+    return ($env:GITHUB_ACTIONS -eq 'true' -or $env:CI -eq 'true')
+}

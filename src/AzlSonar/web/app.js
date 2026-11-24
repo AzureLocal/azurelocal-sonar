@@ -1108,7 +1108,7 @@
     }
     var err = firstError(tree);
     lastError = err ? str(err.name) + (arr(err.errors)[0] ? ': ' + firstLine(arr(err.errors)[0], 200) : '') : (str(c.error) && c.exists !== true ? firstLine(c.error, 200) : '');
-    if (!lastError && isObj(state) && str(state.pollError)) lastError = firstLine(state.pollError, 200);
+    if (!lastError && isObj(state)) { var pe = pollErrorText(state.pollError); if (pe) lastError = firstLine(pe, 200); }
     card.kind = failures.length || lastError && st === 'error' ? 'err' : (CLUSTER_STATUS_KIND[st] || 'idle');
     card.lastError = lastError;
     return card;
@@ -1156,6 +1156,7 @@
       var ports = arr(n.ports), up = ports.filter(function (p) { return isObj(p) && p.linkUp === true; }).length;
       if (ports.length) lines.push(ports.length + ' network port' + (ports.length === 1 ? '' : 's') + ', ' + up + ' with link up');
       lines.push(m ? 'Management port: ' + str(m.name) + (str(m.mac) ? ' (' + str(m.mac) + ')' : '') + (m.confirmed ? '' : ' - a guess, confirm it') : 'No management port suggested');
+      if (isObj(n.beacon)) lines.push('Beacon: ' + str(n.beacon.verdict) + ' (' + (Number(n.beacon.fail) || 0) + ' failed, ' + (Number(n.beacon.warn) || 0) + ' warnings)');
       arr(n.notes).slice(0, 2).forEach(function (t) { lines.push('Check: ' + firstLine(t, 140)); });
     }
     var chips = [];
@@ -1168,6 +1169,9 @@
     };
   }
 
+  // Whole days since the newest discovery read (ageSeconds from the back end).
+  function discAgeDays(d) { return Math.floor((Number(isObj(d) ? d.ageSeconds : 0) || 0) / 86400); }
+
   function discHeadline(d, manual) {
     if (!isObj(d) || d.configured !== true) return 'Discovery is not configured: set discoveryPath to the folder of the toolkit\u2019s hardware discovery';
     var total = Number(d.nodesTotal) || 0, ok = Number(d.nodesDiscovered) || 0;
@@ -1176,7 +1180,7 @@
       case 'empty': return 'The discovery folder is there but holds no machine yet';
       case 'partial': return ok + ' of ' + total + ' machine' + (total === 1 ? '' : 's') + ' read; the discovery is still running';
       case 'failed': return arr(d.problems).length ? arr(d.problems).length + ' discovery file' + (arr(d.problems).length === 1 ? '' : 's') + ' could not be read (' + str(d.problems[0].file) + ')' : ok + ' of ' + total + ' machines discovered; ' + (Number(d.nodesFailed) || 0) + ' not';
-      case 'discovered': return str(d.stateText) + '. Next: ' + (manual ? 'OS configuration' : 'ZTP');
+      case 'discovered': return str(d.stateText) + (d.stale === true ? '. The run is ' + discAgeDays(d) + ' days old: run the discovery again' : '. Next: ' + (manual ? 'OS configuration' : 'ZTP'));
       default: return str(d.stateText);
     }
   }
@@ -1432,7 +1436,7 @@
       var dtotal = Number(disc.nodesTotal) || 0, dok = Number(disc.nodesDiscovered) || 0;
       if (str(disc.state) === 'failed') { dst = 'err'; dline = arr(disc.problems).length ? arr(disc.problems).length + ' unreadable' : dok + ' of ' + dtotal + ' discovered, ' + (Number(disc.nodesFailed) || 0) + ' failed'; }
       else if (str(disc.state) === 'partial') { dst = 'run'; dline = dok + ' of ' + dtotal + ' machines read'; }
-      else { dst = 'ok'; dline = dok + ' of ' + dtotal + ' machines'; }
+      else { dst = 'ok'; dline = dok + ' of ' + dtotal + ' machines' + (disc.stale === true ? ' · ' + discAgeDays(disc) + ' days old' : ''); if (disc.stale === true) dtip = firstLine(arr(disc.warnings)[0] || '', 220); }
     } else if (disc && disc.configured === true) {
       dtip = order > provIdx || phase === 'done' ? 'No discovery data in this run.' : modeWhen('discovery', route, manual);
     } else {
@@ -1538,6 +1542,13 @@
     return r;
   }
 
+  // state.pollError is { message, at } from the back end (a plain string from an older one): the text, never [object Object].
+  function pollErrorText(pe) {
+    if (pe === null || pe === undefined || pe === false) return "";
+    if (typeof pe === "object") return str(pe.message);
+    return str(pe);
+  }
+
   function firstLine(text, max) {
     var s = str(text).split(/\r?\n/)[0].trim();
     max = max || 120;
@@ -1578,12 +1589,12 @@
   var VF_STATUS_ORDER = ['Failed', 'Skipped', 'Running', 'Warning', 'Fixed', 'Passed', 'NotApplicable'];
   var VF_STATUS_KIND = { Failed: 'err', Skipped: 'skip', Running: 'run', Warning: 'warn', Fixed: 'ok', Passed: 'ok', NotApplicable: 'idle' };
   var VF_STATUS_TEXT = { Failed: 'Failed', Skipped: 'Skipped', Running: 'Running', Warning: 'Warning', Fixed: 'Fixed', Passed: 'Passed', NotApplicable: 'Not applicable' };
-  var VF_VERDICT = { pass: { text: 'Pass', kind: 'ok' }, fail: { text: 'Fail', kind: 'err' }, running: { text: 'Running', kind: 'run' }, expired: { text: 'Expired', kind: 'err' }, notstarted: { text: 'Waiting', kind: 'idle' } };
+  var VF_VERDICT = { pass: { text: 'Pass', kind: 'ok' }, fail: { text: 'Fail', kind: 'err' }, running: { text: 'Running', kind: 'run' }, expired: { text: 'Expired', kind: 'err' }, otherfile: { text: 'Not for this file', kind: 'err' }, notstarted: { text: 'Waiting', kind: 'idle' } };
   var VF_TREE_STATUS = { Failed: 'error', Skipped: 'skipped', Running: 'running', Warning: 'success', Fixed: 'success', Passed: 'success', NotApplicable: 'notstarted' };
 
   function vfOf(state) { return isObj(state) && isObj(state.verification) ? state.verification : null; }
   function vfHasData(vf) { return isObj(vf) && vf.hasData === true; }
-  // pass, fail, running, expired or notstarted.
+  // pass, fail, running, expired, otherfile (the gate saw another infrastructure file) or notstarted.
   function vfStatus(vf) { var k = isObj(vf) ? str(vf.status).toLowerCase() : ''; return VF_VERDICT[k] ? k : 'notstarted'; }
   function vfCount(vf, name) { var c = isObj(vf) && isObj(vf.counts) ? vf.counts : {}; return Number(c[name]) || 0; }
   function vfPlural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
@@ -1603,6 +1614,7 @@
     switch (st) {
       case 'pass': return 'Verification passed: ' + vfPlural(total, 'check') + (warn ? ', ' + vfPlural(warn, 'warning') : '') + (!isNaN(expires) ? '. Valid until ' + fmtDateTime(expires) : '') + '. Next: Validate';
       case 'expired': return 'The verification pass expired' + (!isNaN(expires) ? ' at ' + fmtDateTime(expires) : '') + '. Run the gate again before Validate';
+      case 'otherfile': return 'This gate result is not for this infrastructure file (it saw another SHA-256): run the gate again on this file before Validate';
       case 'running': return 'The gate is running: ' + vfPlural(total, 'check') + ' so far' + (vfCount(vf, 'Failed') ? ', ' + vfCount(vf, 'Failed') + ' failed' : '');
       case 'fail':
         return 'Verification failed: ' + (blockers ? vfPlural(blockers, 'check') + ' block' + (blockers === 1 ? 's' : '') + ' the cluster deployment' : vfPlural(vfCount(vf, 'Failed'), 'check') + ' failed') +
@@ -1619,6 +1631,7 @@
     var st = vfStatus(vf), total = Number(vf.total) || 0, blockers = Number(vf.blockers) || 0, skipped = Number(vf.skippedBlocking) || 0, tip = vfHeadline(vf);
     if (st === 'pass') return { status: 'ok', line: 'Pass · ' + vfPlural(total, 'check'), tip: tip };
     if (st === 'expired') return { status: 'err', line: 'Pass expired', tip: tip };
+    if (st === 'otherfile') return { status: 'err', line: 'Not for this file', tip: tip };
     if (st === 'running') return { status: 'run', line: 'Running · ' + total + ' so far', tip: tip };
     if (st === 'fail') return { status: 'err', line: 'Fail · ' + (blockers ? blockers + ' blocking' : vfCount(vf, 'Failed') + ' failed') + (skipped ? ' (' + skipped + ' skipped)' : ''), tip: tip };
     return { status: 'idle', line: '', tip: tip };
@@ -1629,7 +1642,7 @@
     var out = [];
     if (!vfHasData(vf)) return out;
     var st = vfStatus(vf), run = isObj(vf.run) ? vf.run : {}, skipped = Number(vf.skippedBlocking) || 0;
-    out.push({ k: 'Verdict', v: VF_VERDICT[st].text + (str(vf.verdict) && str(vf.verdict) !== VF_VERDICT[st].text ? ' (the gate wrote ' + str(vf.verdict) + ')' : ''), warn: st === 'fail' || st === 'expired' });
+    out.push({ k: 'Verdict', v: VF_VERDICT[st].text + (str(vf.verdict) && str(vf.verdict) !== VF_VERDICT[st].text ? ' (the gate wrote ' + str(vf.verdict) + ')' : ''), warn: st === 'fail' || st === 'expired' || st === 'otherfile' });
     VF_STATUS_ORDER.forEach(function (name) {
       var n = vfCount(vf, name);
       if (!n) return;
@@ -1642,6 +1655,7 @@
     if (!isNaN(expires)) out.push({ k: st === 'expired' ? 'Expired' : 'Valid until', v: fmtDateTime(expires), warn: st === 'expired' });
     if (st === 'fail') out.push({ k: 'Next', v: 'Fix the blocking checks below (each shows its remedy) and run the gate again' });
     else if (st === 'expired') out.push({ k: 'Next', v: 'Run the gate again; a pass is valid for a limited time' });
+    else if (st === 'otherfile') out.push({ k: 'Next', v: 'Run the gate again on the infrastructure file Sonar reads; the ARM run refuses a result for another file' });
     return out;
   }
 
@@ -2741,7 +2755,7 @@
       nodeDuration: nodeDuration,
       modeStates: modeStates, activeModeId: activeModeId, modeName: modeName, summaryFor: summaryFor, stepProgress: stepProgress,
       lifecyclePlain: lifecyclePlain, arcInfo: arcInfo, machineWaits: machineWaits, machineList: machineList,
-      discOf: discOf, discNodes: discNodes, discHasData: discHasData, discoveryTreeOf: discoveryTreeOf, discCard: discCard, discHeadline: discHeadline,
+      discOf: discOf, discAgeDays: discAgeDays, discNodes: discNodes, discHasData: discHasData, discoveryTreeOf: discoveryTreeOf, discCard: discCard, discHeadline: discHeadline,
       demoClusterResource: demoClusterResource, clusterCard: clusterCard, clusterLeaves: clusterLeaves, visibleSections: visibleSections, CLUSTER_MODES: CLUSTER_MODES, levelSet: levelSet, levelPasses: levelPasses, toggleLevel: toggleLevel, levelCount: levelCount, demoDiscovery: demoDiscovery, laMonitorPhases: laMonitorPhases, monitorOf: monitorOf, manualInstall: manualInstall, MODE_IDS: MODE_IDS, MODE_TITLE: MODE_TITLE,
       oscGuardedPanels: oscGuardedPanels, oscAddressChip: oscAddressChip, oscTimelineLines: oscTimelineLines, oscFacts: oscFacts,
       oscOf: oscOf, oscNodes: oscNodes, oscHasData: oscHasData, osConfigTreeOf: osConfigTreeOf, oscMethodChip: oscMethodChip, oscVersionLines: oscVersionLines,

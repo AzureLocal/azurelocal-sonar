@@ -395,3 +395,115 @@ Describe 'a manual install (scenario.os_install not simplified)' {
         (InModuleScope AzlSonar -Parameters @{ C = $ztp } { param($C) (Get-AzlSonarInitialState -Config $C).provisioning.manualInstall }) | Should -BeFalse
     }
 }
+
+Describe 'other files in the discovery folder, the hardware inventory, Beacon results and staleness (N6, O5)' {
+    BeforeAll {
+        # A hardware inventory file as the toolkit's Get-HardwareInventory.ps1 writes it (kind hardware-inventory 1.x).
+        function script:New-InventoryJson {
+            param([string[]]$Names, [string]$CollectedAt = '2026-11-07T18:30:00Z')
+            $nodes = for ($i = 0; $i -lt $Names.Count; $i++) {
+                [ordered]@{
+                    name = $Names[$i]; bmcAddress = '192.0.2.60'; status = 'read'; collectedAt = $CollectedAt
+                    identity = [ordered]@{ manufacturer = 'Example'; model = 'Example R760'; serialNumber = "INV$($i + 1)" }
+                    bios = [ordered]@{ version = '1.2.3' }
+                    bmc = [ordered]@{ model = 'Example BMC'; firmwareVersion = '7.0'; mac = ('00-00-5E-00-53-{0:X2}' -f (200 + $i)) }
+                    network = [ordered]@{ portCount = 1; ports = @([ordered]@{ order = 1; adapter = 'NIC.Slot.3'; portNumber = '1'; mac = ('00-00-5E-00-53-{0:X2}' -f (210 + $i)); linkStatus = 'LinkUp'; speedMbps = 25000; model = 'Example 25G' }) }
+                    drives = @([ordered]@{ controller = 'BOSS-N1 Monolithic'; model = 'M.2 480GB' }, [ordered]@{ controller = 'HBA355i'; model = 'NVMe 3.84TB' })
+                    warnings = @()
+                }
+            }
+            [ordered]@{ schemaVersion = '1.0'; kind = 'hardware-inventory'; collectedAt = $CollectedAt; nodes = @($nodes) } | ConvertTo-Json -Depth 10
+        }
+        # AzL Beacon's results document (schemaVersion 1.1).
+        function script:New-BeaconJson {
+            param([string]$HostName, [string]$Serial, [int]$Fail = 0, [bool]$Redacted = $false, [string]$Finished = '2026-11-07T19:00:00Z')
+            $results = @([ordered]@{ category = 'Network'; name = 'DNS-Resolve'; target = 'login.microsoftonline.com'; status = 'Pass'; detail = 'resolved'; remediation = '' })
+            for ($i = 1; $i -le $Fail; $i++) { $results += [ordered]@{ category = 'Arc'; name = "Endpoint-$i"; target = 'example.azure.com'; status = 'Fail'; detail = 'TCP 443 refused'; remediation = 'Open TCP 443 on the firewall.' } }
+            [ordered]@{
+                schemaVersion = '1.1'; tool = [ordered]@{ name = 'AzL Beacon'; version = '1.4.0' }; runId = 'b1'; startedUtc = '2026-11-07T18:55:00Z'; finishedUtc = $Finished; redacted = $Redacted
+                node = [ordered]@{ hostname = $HostName; serialNumber = $Serial }
+                summary = [ordered]@{ total = (1 + $Fail); pass = 1; fail = $Fail; warn = 0; skip = 0; verdict = $(if ($Fail) { 'FAIL' } else { 'PASS' }) }
+                results = $results
+            } | ConvertTo-Json -Depth 8
+        }
+    }
+
+    It 'skips the files of other tools instead of failing: Ranger manifest and snapshot, the Environment Checker report, a redacted Beacon copy' {
+        $dir = New-DiscFolder -Name 'mixed' -Nodes $script:Two -Summary
+        [IO.File]::WriteAllText((Join-Path $dir 'manifest.json'), (@{ run = @{ toolVersion = '2.0.0' }; collectors = @{ cluster = @{} } } | ConvertTo-Json -Depth 4))
+        [IO.File]::WriteAllText((Join-Path $dir 'as-built.json'), (@{ schema = 'as-built-snapshot.v1'; cluster = @{} } | ConvertTo-Json -Depth 4))
+        [IO.File]::WriteAllText((Join-Path $dir 'AzStackHciEnvironmentReport.json'), '[{"Name":"x"}]')
+        [IO.File]::WriteAllText((Join-Path $dir 'validation-20261107-redacted.json'), (New-BeaconJson -HostName '<host>' -Serial '<serial>' -Redacted $true))
+        $s = Get-DiscState -Path $dir
+        $s.state | Should -Be 'discovered'
+        $s.nodesDiscovered | Should -Be 2
+        @($s.problems).Count | Should -Be 0
+        @($s.skipped).Count | Should -Be 4
+        (@($s.skipped | ForEach-Object reason) -join ' | ') | Should -Match 'Ranger manifest'
+        (@($s.skipped | ForEach-Object reason) -join ' | ') | Should -Match 'Ranger as-built snapshot'
+        @($s.warnings | Where-Object { $_ -notmatch 'days ago' }).Count | Should -Be 0 -Because 'only the age of the 2026-11-07 fixture is warned about'
+    }
+
+    It 'a hardware inventory stands in for the machines no discovery file names: serial, BMC MAC, ports, BOSS drives' {
+        $dir = Join-Path $TestDrive 'inventory-only'
+        $null = New-Item -ItemType Directory -Path $dir -Force
+        [IO.File]::WriteAllText((Join-Path $dir 'hardware-inventory-20261107T183000Z.json'), (New-InventoryJson -Names @('n1', 'n2')))
+        $s = Get-DiscState -Path $dir
+        $s.nodesDiscovered | Should -Be 2
+        $n1 = @($s.nodes | Where-Object name -eq 'n1')[0]
+        $n1.serviceTag | Should -Be 'INV1'
+        $n1.bmcMac | Should -Not -BeNullOrEmpty
+        @($n1.ports).Count | Should -Be 1
+        $n1.ports[0].linkUp | Should -BeTrue
+        $n1.boss.present | Should -BeTrue
+        $n1.boss.driveCount | Should -Be 1
+    }
+
+    It 'shows the Beacon results on the machine with the same serial number, also from the beacon subfolder, and a failure is a thing to check' {
+        $dir = New-DiscFolder -Name 'with-beacon' -Nodes $script:Two -Summary
+        $null = New-Item -ItemType Directory -Path (Join-Path $dir 'beacon') -Force
+        [IO.File]::WriteAllText((Join-Path $dir 'beacon/validation-20261107-190000.json'), (New-BeaconJson -HostName 'not-the-name' -Serial 'EXAMPLE2' -Fail 2))
+        [IO.File]::WriteAllText((Join-Path $dir 'validation-20261107-180000.json'), (New-BeaconJson -HostName 'n1' -Serial 'other' -Finished '2026-11-07T18:00:00Z'))
+        $s = Get-DiscState -Path $dir
+        @($s.beacon).Count | Should -Be 2
+        $n2 = @($s.nodes | Where-Object name -eq 'n2')[0]
+        $n2.beacon.verdict | Should -Be 'FAIL'
+        $n2.beacon.fail | Should -Be 2
+        @($n2.beacon.failures).Count | Should -Be 2
+        $n2.state | Should -Be 'attention'
+        (@($n2.notes) -join ' ') | Should -Match 'Beacon found 2 failed checks'
+        @($n2.tree | Where-Object { $_.id -eq 'disc.beacon' }).Count | Should -Be 1
+        @($s.nodes | Where-Object name -eq 'n1')[0].beacon.verdict | Should -Be 'PASS' -Because 'matched by host name'
+        @($s.warnings | Where-Object { $_ -notmatch 'days ago' }).Count | Should -Be 0 -Because 'both Beacon files name a machine'
+    }
+
+    It 'warns about Beacon results that name no machine of the cluster' {
+        $dir = New-DiscFolder -Name 'stray-beacon' -Nodes $script:Two -Summary
+        [IO.File]::WriteAllText((Join-Path $dir 'validation-x.json'), (New-BeaconJson -HostName 'elsewhere' -Serial 'NOPE'))
+        $s = Get-DiscState -Path $dir
+        (@($s.warnings) -join ' ') | Should -Match 'name no machine of this cluster'
+    }
+
+    It 'flags a run older than the stale limit, with its age; a fresh run is not stale' {
+        $dir = New-DiscFolder -Name 'aged' -Nodes $script:Two -Summary
+        $cfg = [pscustomobject]@{ discoveryPath = $dir; nodes = @([pscustomobject]@{ name = 'n1' }, [pscustomobject]@{ name = 'n2' }) }
+        $old = InModuleScope AzlSonar -Parameters @{ C = $cfg } { param($C) Get-AzlSonarDiscoveryState -Config $C -Now ([datetime]::SpecifyKind([datetime]'2026-11-23T18:00:00', 'Utc')) }
+        $old.stale | Should -BeTrue
+        [math]::Floor($old.ageSeconds / 86400) | Should -Be 16
+        (@($old.warnings) -join ' ') | Should -Match 'collected 16 days ago.*run the hardware discovery again'
+        $old.state | Should -Be 'discovered' -Because 'a stale run is a warning; the state stays as read'
+        $fresh = InModuleScope AzlSonar -Parameters @{ C = $cfg } { param($C) Get-AzlSonarDiscoveryState -Config $C -Now ([datetime]::SpecifyKind([datetime]'2026-11-08T18:00:00', 'Utc')) }
+        $fresh.stale | Should -BeFalse
+        $fresh.ageSeconds | Should -Be 86400
+    }
+
+    It 'reads discoveryPath from hardware.discovery.output_directory, relative to the folder of the master file' {
+        $src = Get-Content -LiteralPath (Join-Path $script:SonarRepoRoot 'tests/fixtures/infrastructure.3node.yml') -Raw
+        $dir = Join-Path $TestDrive 'site'
+        $null = New-Item -ItemType Directory -Path $dir -Force
+        $file = Join-Path $dir 'infrastructure.yml'
+        $text = if ($src -match '(?m)^hardware:\s*$') { $src -replace '(?m)^hardware:\s*$', "hardware:`n  discovery:`n    output_directory: `"discovery-run`"" } else { $src + "`nhardware:`n  discovery:`n    output_directory: `"discovery-run`"`n" }
+        Set-Content -LiteralPath $file -Value $text -Encoding utf8
+        (Read-AzlSonarConfig -InfrastructureFile $file 3>$null).discoveryPath | Should -Be ([IO.Path]::GetFullPath((Join-Path $dir 'discovery-run')))
+    }
+}

@@ -1227,6 +1227,9 @@ function Get-AzlSonarDeploymentState {
         # Pre-cluster verification gate events (Shared.VerificationEvents, Add-AzlSonarVerificationEvent). Used when the config follows the gate's event file.
         [AllowNull()]
         [System.Collections.IDictionary]$VerificationEvents,
+        # The toolkit's solution update events (Shared.UpdateEvents, Add-AzlSonarUpdateEvent). Read by the Auto and Update monitors.
+        [AllowNull()]
+        [System.Collections.IDictionary]$UpdateEvents,
         # Shared.DiscoveryCache: the hardware discovery files already parsed (Get-AzlSonarDiscoveryState).
         [AllowNull()]
         [System.Collections.IDictionary]$DiscoveryCache,
@@ -1258,7 +1261,12 @@ function Get-AzlSonarDeploymentState {
 
     # A standalone Update monitor (-Monitor Update) follows a cluster that is already running: no deployment, provisioning or event file is read.
     if ((Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))).monitor -eq 'Update') {
-        return Get-AzlSonarUpdateMonitorState -Config $Config -Now $Now -UpdateContext $UpdateContext
+        $monitorState = Get-AzlSonarUpdateMonitorState -Config $Config -Now $Now -UpdateContext $UpdateContext
+        # The toolkit's update events (K9, N7): the Update view comes from them when Azure reports no update run.
+        $updateEvents = Get-AzlSonarUpdateEventSection -Config $Config -Store $UpdateEvents
+        $monitorState['updateEvents'] = $updateEvents
+        if ($null -ne $updateEvents -and $updateEvents.hasData) { $monitorState['update'] = Merge-AzlSonarUpdateEvent -Update $monitorState['update'] -Events $updateEvents }
+        return $monitorState
     }
 
     $settingsPath = '{0}/providers/Microsoft.AzureStackHCI/clusters/{1}/deploymentSettings/default?api-version={2}' -f $rgPath, [uri]::EscapeDataString($Config.clusterName), $Config.apiVersion
@@ -1430,6 +1438,9 @@ function Get-AzlSonarDeploymentState {
         $phaseOut = $trackSetting
         $activeOut = $trackSetting
     }
+    # The toolkit's update events (Auto and Update): the Update view comes from them when Azure reports no update run.
+    $updateEvents = Get-AzlSonarUpdateEventSection -Config $Config -Store $UpdateEvents
+    if ($null -ne $updateEvents -and $updateEvents.hasData) { $update = Merge-AzlSonarUpdateEvent -Update $update -Events $updateEvents }
 
     return [ordered]@{
         cluster           = $Config.clusterName
@@ -1451,6 +1462,7 @@ function Get-AzlSonarDeploymentState {
         nodes             = $nodes
         edgeMachines      = @($edgeOut)
         update            = $update
+        updateEvents      = $updateEvents
         track             = $trackSetting
         lag               = $lag
         environmentChecker = $environmentChecker
@@ -1501,6 +1513,72 @@ function Publish-AzlSonarState {
     }
 }
 
+function Add-AzlSonarEventSection {
+    <#
+    .SYNOPSIS
+        Rebuilds the sections that come from the toolkit's event files and the discovery files (osConfiguration, arm,
+        verification, discovery) into a state, from the shared stores. No Azure call.
+    .DESCRIPTION
+        Used when an Azure poll fails: the previous state keeps its Azure-derived sections (step trees, machines, update)
+        while these sections still follow their files, so a monitor with no Azure context shows the OS configuration run,
+        the ARM Validate and Deploy events and the gate as they arrive. The route is the one the previous state named (or
+        the configured one); the Arc run commands, which come from Azure, are left out.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$State,
+
+        [Parameter(Mandatory)]
+        [object]$Config,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$Shared,
+
+        [datetime]$Now = [datetime]::UtcNow
+    )
+
+    $stores = $Shared
+    $get = { param($name) if ($stores.Contains($name)) { $stores[$name] } else { $null } }
+    $route = ''
+    $provisioning = if ($State.Contains('provisioning')) { $State['provisioning'] } else { $null }
+    if ($null -ne $provisioning) { $route = [string](Get-AzlSonarMember $provisioning 'route' '') }
+    if ($route -notin 'simplified', 'oem-image') {
+        $configured = [string](Get-AzlSonarMember $Config 'provisioningRoute' 'auto')
+        $route = if ($configured -in 'simplified', 'oem-image') { $configured } else { '' }
+    }
+    $ztpStages = & $get 'ZtpStages'
+    $ztpNodeNames = if ($null -ne $ztpStages) { [string[]]@($ztpStages.Keys | Where-Object { $_ -ne $script:AzlSonarZtpRunKey }) } else { [string[]]@() }
+    $localName = [string](& $get 'LocalUserName')
+    $State['osConfiguration'] = Get-AzlSonarOsConfigurationState -Store (& $get 'OsConfigEvents') -Config $Config -ExpectedRoute $route -ZtpNode $ztpNodeNames -RunCommand @{} -LogAccount (& $get 'LogAccount') -LocalUserName $localName
+    $State['arm'] = Get-AzlSonarArmState -Store (& $get 'ArmEvents') -Config $Config -Now $Now
+    $State['verification'] = Get-AzlSonarVerificationState -Store (& $get 'VerificationEvents') -Config $Config -Now $Now
+    $State['discovery'] = Get-AzlSonarDiscoveryState -Config $Config -Cache (& $get 'DiscoveryCache') -Now $Now
+    # The update events: the previous update object keeps Azure's track when it had one, else it is built from the events again.
+    $updateEvents = Get-AzlSonarUpdateEventSection -Config $Config -Store (& $get 'UpdateEvents')
+    $State['updateEvents'] = $updateEvents
+    if ($null -ne $updateEvents -and $updateEvents.hasData) {
+        $current = if ($State.Contains('update')) { $State['update'] } else { $null }
+        $State['update'] = Merge-AzlSonarUpdateEvent -Update $current -Events $updateEvents
+    }
+}
+
+function Get-AzlSonarUpdateEventSection {
+    <#
+    .SYNOPSIS
+        The updateEvents object of the state (the toolkit's update-events.jsonl, Get-AzlSonarUpdateEventState) for the Auto and
+        Update monitors, or $null for any other monitor. No Azure call.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Config,
+        [AllowNull()][System.Collections.IDictionary]$Store
+    )
+
+    if (-not (Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))).updateEvents) { return $null }
+    return (Get-AzlSonarUpdateEventState -Store $Store -Config $Config)
+}
+
 function Invoke-AzlSonarPollerLoop {
     <#
     .SYNOPSIS
@@ -1527,22 +1605,28 @@ function Invoke-AzlSonarPollerLoop {
             $osEvents = if ($Shared.Contains('OsConfigEvents')) { $Shared['OsConfigEvents'] } else { $null }
             $armEvents = if ($Shared.Contains('ArmEvents')) { $Shared['ArmEvents'] } else { $null }
             $verificationEvents = if ($Shared.Contains('VerificationEvents')) { $Shared['VerificationEvents'] } else { $null }
+            $updateEvents = if ($Shared.Contains('UpdateEvents')) { $Shared['UpdateEvents'] } else { $null }
             $logAccount = if ($Shared.Contains('LogAccount')) { $Shared['LogAccount'] } else { $null }
             $localName = if ($Shared.Contains('LocalUserName')) { [string]$Shared['LocalUserName'] } else { '' }
             $updateContext = if ($Shared.Contains('UpdateLocal')) { $Shared['UpdateLocal'] } else { $null }
             $discoveryCache = if ($Shared.Contains('DiscoveryCache')) { $Shared['DiscoveryCache'] } else { $null }
             # The Discovery monitor reads the discovery files only: no Azure call, no sign-in, no node.
             $state = if (-not (Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))).azure) { Get-AzlSonarInitialState -Config $Config -DiscoveryCache $discoveryCache -VerificationEvents $verificationEvents } else {
-            Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -ArmEvents $armEvents -VerificationEvents $verificationEvents -DiscoveryCache $discoveryCache -LogAccount $logAccount -LocalUserName $localName -UpdateContext $updateContext }
+            Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -ArmEvents $armEvents -VerificationEvents $verificationEvents -UpdateEvents $updateEvents -DiscoveryCache $discoveryCache -LogAccount $logAccount -LocalUserName $localName -UpdateContext $updateContext }
             Publish-AzlSonarState -Shared $Shared -State $state
             try { Register-AzlSonarUpdateRedaction -Shared $Shared } catch { Write-Verbose "Update account redaction: $($_.Exception.Message)" }
         }
         catch {
+            $pollError = $_.Exception.Message
             $previous = $Shared.State
             $state = [ordered]@{}
             if ($null -eq $previous) { $previous = Get-AzlSonarInitialState -Config $Config }
             foreach ($key in $previous.Keys) { $state[$key] = $previous[$key] }
-            $state.pollError = [ordered]@{ message = $_.Exception.Message; at = Format-AzlSonarDate ([datetime]::UtcNow) }
+            # The event-file sections never depend on Azure: a failed poll keeps only the Azure-derived sections of the
+            # previous state and rebuilds OS configuration, ARM, verification and discovery from their stores.
+            try { Add-AzlSonarEventSection -State $state -Config $Config -Shared $Shared }
+            catch { Write-Verbose "Event sections after a failed poll: $($_.Exception.Message)" }
+            $state.pollError = [ordered]@{ message = $pollError; at = Format-AzlSonarDate ([datetime]::UtcNow) }
             Publish-AzlSonarState -Shared $Shared -State $state
         }
         Wait-AzlSonarInterval -Shared $Shared -Seconds $Config.pollSeconds

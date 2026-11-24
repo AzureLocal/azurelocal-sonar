@@ -467,8 +467,9 @@ function ConvertFrom-AzlSonarInfrastructureTree {
         <events folder>\os-configuration-events.jsonl -> osConfigEventsPath and <events folder>\arm-deployment-events.jsonl ->
         armEventsPath, on both routes (events folder = deployment.events_directory, else <ProgramData>\AzureLocalToolkit\<cluster.name>\events:
         the folder the toolkit's OS configuration and ARM runs write to by default; Get-AzlSonarEventsDirectory),
-        provisioning.simplified.evidence_path\discovery -> discoveryPath (the folder the toolkit's Invoke-HardwareDiscovery.ps1
-        writes with -OutputPath; the same evidence folder rule),
+        hardware.discovery.output_directory, else provisioning.simplified.evidence_path\discovery -> discoveryPath (the folder
+        the toolkit's Invoke-HardwareDiscovery.ps1 writes with -OutputPath; a relative output_directory is relative to the
+        folder of the infrastructure file),
         <gate report directory>/precluster-verification-events.jsonl -> verificationEventsPath (the toolkit's rule:
         deployment.pre_cluster_verification_report_directory, else arm-report/verification/live next to the evidence folder,
         else next to media_path, else in the folder of the infrastructure file; Get-AzlSonarVerificationDirectory).
@@ -596,6 +597,18 @@ function ConvertFrom-AzlSonarInfrastructureTree {
         $isoEvidence = Get-AzlSonarInfrastructureValue $Tree 'provisioning.simplified.evidence_path'
         if ($isoEvidence) { $discoveryPath = & $eventFile $isoEvidence 'discovery' }
     }
+    # hardware.discovery.output_directory (registry item R10): the folder the hardware discovery writes, on both routes. It wins
+    # over the evidence folder rule; environment variables are expanded and a relative path is relative to the folder of the
+    # infrastructure file (the rule of deployment.events_directory).
+    $discoveryFolder = Get-AzlSonarInfrastructureValue $Tree 'hardware.discovery.output_directory'
+    if ($discoveryFolder -is [string] -and $discoveryFolder.Trim()) {
+        $folder = [Environment]::ExpandEnvironmentVariables($discoveryFolder.Trim())
+        if (-not [System.IO.Path]::IsPathRooted($folder)) {
+            $base = if ($BaseDirectory) { $BaseDirectory } else { (Get-Location).ProviderPath }
+            $folder = Join-Path -Path $base -ChildPath $folder
+        }
+        $discoveryPath = [System.IO.Path]::GetFullPath($folder)
+    }
 
     # Which account reads a node's logs: the local administrator (identity.local_admin) until the node has reported DomainJoined
     # and DomainAdminsConfigured, then the domain account the operator supplies (identity.active_directory.domain_join_account:
@@ -643,6 +656,8 @@ function ConvertFrom-AzlSonarInfrastructureTree {
     $eventsDirectory = Get-AzlSonarEventsDirectory -Tree $Tree -BaseDirectory $BaseDirectory -ClusterName $values['cluster.name']
     $config['osConfigEventsPath'] = Join-Path -Path $eventsDirectory -ChildPath 'os-configuration-events.jsonl'
     $config['armEventsPath'] = Join-Path -Path $eventsDirectory -ChildPath 'arm-deployment-events.jsonl'
+    # K9: the toolkit's solution update scripts write update-events.jsonl into the same events folder.
+    $config['updateEventsPath'] = Join-Path -Path $eventsDirectory -ChildPath 'update-events.jsonl'
     # The pre-cluster verification gate writes precluster-verification-events.jsonl into its report directory; Sonar follows the
     # toolkit's rule for it (Get-AzlSonarVerificationDirectory). verificationEventsPath moves it.
     $config['verificationEventsPath'] = Join-Path -Path (Get-AzlSonarVerificationDirectory -Tree $Tree -BaseDirectory $BaseDirectory) -ChildPath 'precluster-verification-events.jsonl'

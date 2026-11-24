@@ -205,7 +205,7 @@ Describe 'Get-AzlSonarOsConfigurationState (the state builder)' {
         (& $script:Build @() 'oem-image').nodes[0].method | Should -Be 'Iso'
         (& $script:Build @() '' @('n2')).nodes[1].method | Should -Be 'Ztp'
         (& $script:Build @() '').nodes[0].method | Should -Be ''
-        @($s.nodes[0].tree).Count | Should -Be 14
+        @($s.nodes[0].tree).Count | Should -Be 15 -Because 'the 14 OS configuration steps (NicNames included) and the Arc registration'
         @($s.nodes[0].tree | Where-Object { $_.osc.verifyOnly }).osc.step | Should -Be @('Hostname', 'ArcRegistration')
     }
     It 'is not configured without osConfigEventsPath' {
@@ -404,7 +404,7 @@ Describe 'Get-AzlSonarOsConfigurationState (the state builder)' {
         $s = & $script:Build @((New-OscLine -At (Get-OscTime 0) -Node '*' -State RunStarted -Extra @{ nodes = @('n1') }), (New-OscLine -At (Get-OscTime 0.1) -Node n1 -State NodeStarted))
         $json = InModuleScope AzlSonar -Parameters @{ S = $s } { param($S) ConvertTo-AzlSonarJson ([ordered]@{ osConfiguration = $S }) }
         $o = $json | ConvertFrom-Json -Depth 20
-        $o.osConfiguration.nodes[0].tree.Count | Should -Be 14
+        $o.osConfiguration.nodes[0].tree.Count | Should -Be 15
         $o.osConfiguration.nodes[0].warnings -is [array] | Should -BeTrue
         $o.osConfiguration.nodes[0].tree[0].children -is [array] | Should -BeTrue
     }
@@ -563,7 +563,7 @@ Describe 'the state shape served to the page (/api/state)' {
         $state.Contains('osConfiguration') | Should -BeTrue
         $state.osConfiguration.status | Should -Be 'notstarted'
         $state.osConfiguration.nodesTotal | Should -Be @($cfg.nodes).Count
-        @($state.osConfiguration.nodes)[0].tree.Count | Should -Be 14
+        @($state.osConfiguration.nodes)[0].tree.Count | Should -Be 15
         $state.osConfiguration.Contains('ready') | Should -BeTrue
     }
     It 'the shared state holds the store and the info counters of the event file' {

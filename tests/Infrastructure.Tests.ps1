@@ -153,8 +153,49 @@ Describe 'Infrastructure file: no secret is read' {
     }
 }
 
-Describe 'Infrastructure file: contract with the toolkit' {
-    It 'reads a copy of the toolkit example (lom-management-ztp.yml)' {
+Describe 'Infrastructure file: contract with the toolkit (N8)' {
+    # The toolkit checkout ($env:AZL_TOOLKIT_ROOT, else a sibling azurelocal-toolkit folder) is the source: its current
+    # example, its generated monitoring template and the monitoring schema. CI checks it out, so nothing here is skipped
+    # there; on a workstation without it the toolkit tests are skipped.
+    BeforeAll {
+        $script:ToolkitRoot = Get-SonarToolkitRoot
+        $script:NoToolkit = -not $script:ToolkitRoot -and -not (Test-SonarOnCi)
+        $script:ToolkitExample = if ($script:ToolkitRoot) { Join-Path $script:ToolkitRoot 'config/variables/examples/scenarios/lom-management-ztp.yml' } else { '' }
+        $script:MonitoringTemplate = if ($script:ToolkitRoot) { Join-Path $script:ToolkitRoot 'config/variables/templates/tools/monitoring.yml' } else { '' }
+        $script:MonitoringSchema = if ($script:ToolkitRoot) { Join-Path $script:ToolkitRoot 'config/variables/schema/tools/monitoring.schema.json' } else { '' }
+        # Every key of a YAML tree as a dotted path; a list of mappings adds '[]'.
+        function script:Get-YamlKeyPath {
+            param($Node, [string]$Prefix = '')
+            if ($Node -is [System.Collections.IDictionary]) {
+                foreach ($k in $Node.Keys) {
+                    $p = if ($Prefix) { "$Prefix.$k" } else { [string]$k }
+                    $p
+                    Get-YamlKeyPath -Node $Node[$k] -Prefix $p
+                }
+            }
+            elseif ($Node -is [System.Collections.IList]) { foreach ($item in $Node) { Get-YamlKeyPath -Node $item -Prefix "$Prefix[]" } }
+        }
+        function script:Read-SonarYamlFile {
+            param([string]$Path)
+            InModuleScope AzlSonar -Parameters @{ T = (Get-Content -LiteralPath $Path -Raw) } { param($T) ConvertFrom-AzlSonarYaml -Text $T }
+        }
+        # Is a dotted path (a list item is walked through 'items') a key of a JSON schema? $ref, allOf, anyOf and oneOf are followed.
+        function script:Test-SchemaPath {
+            param($Schema, $Node, [string[]]$Parts)
+            if ($Parts.Count -eq 0) { return $true }
+            if ($Node.Contains('$ref')) {
+                $target = $Schema
+                foreach ($seg in (([string]$Node['$ref']) -replace '^#/', '') -split '/') { $target = $target[$seg] }
+                return (Test-SchemaPath -Schema $Schema -Node $target -Parts $Parts)
+            }
+            foreach ($k in 'allOf', 'anyOf', 'oneOf') { if ($Node.Contains($k)) { foreach ($b in $Node[$k]) { if (Test-SchemaPath -Schema $Schema -Node $b -Parts $Parts) { return $true } } } }
+            if ($Node.Contains('items') -and $Node['items'] -is [System.Collections.IDictionary] -and (Test-SchemaPath -Schema $Schema -Node $Node['items'] -Parts $Parts)) { return $true }
+            if ($Node.Contains('properties') -and $Node['properties'].Contains($Parts[0])) { return (Test-SchemaPath -Schema $Schema -Node $Node['properties'][$Parts[0]] -Parts @($Parts | Select-Object -Skip 1)) }
+            return $false
+        }
+    }
+
+    It 'reads the copy of the toolkit example (lom-management-ztp.yml)' {
         $config = Get-FixtureConfig -Path $script:ToolkitCopy
         $config.clusterName | Should -Be 'iic-lab-azl'
         ($config.nodes | ForEach-Object name) | Should -Be @('iic-lab-n01', 'iic-lab-n02')
@@ -162,12 +203,58 @@ Describe 'Infrastructure file: contract with the toolkit' {
         $config.ztpEventsPath | Should -Match 'ztp-events\.jsonl$'
     }
 
-    It 'agrees with the toolkit loader when it is importable (skipped otherwise)' -Skip:(-not ((Test-Path "$PSScriptRoot/../../azurelocal-toolkit/scripts/common/infrastructure/AzlInfrastructure.psm1") -and (Get-Module -ListAvailable powershell-yaml))) {
-        Import-Module "$PSScriptRoot/../../azurelocal-toolkit/scripts/common/infrastructure/AzlInfrastructure.psm1" -Force
-        $infra = Import-AzlInfrastructure -Path $script:ToolkitCopy
-        $config = Get-FixtureConfig -Path $script:ToolkitCopy
+    It 'has the toolkit checkout (required on CI)' {
+        if ($script:NoToolkit) { Set-ItResult -Skipped -Because 'no azurelocal-toolkit checkout (set AZL_TOOLKIT_ROOT)'; return }
+        $script:ToolkitRoot | Should -Not -BeNullOrEmpty -Because 'CI checks out azurelocal-toolkit and sets AZL_TOOLKIT_ROOT'
+        foreach ($f in $script:ToolkitExample, $script:MonitoringTemplate, $script:MonitoringSchema) { Test-Path -LiteralPath $f -PathType Leaf | Should -BeTrue -Because $f }
+    }
+
+    It 'the fixture is the toolkit''s current example: the same schema version and the same keys' {
+        if ($script:NoToolkit) { Set-ItResult -Skipped -Because 'no azurelocal-toolkit checkout (set AZL_TOOLKIT_ROOT)'; return }
+        $copy = Read-SonarYamlFile -Path $script:ToolkitCopy
+        $current = Read-SonarYamlFile -Path $script:ToolkitExample
+        [string]$copy._metadata.schema_version | Should -Be ([string]$current._metadata.schema_version) -Because 'tests/fixtures/infrastructure.toolkit-lom-management-ztp.yml is a copy of the toolkit''s examples/scenarios/lom-management-ztp.yml: copy it again'
+        $copyKeys = @(Get-YamlKeyPath -Node $copy | Sort-Object -Unique)
+        $currentKeys = @(Get-YamlKeyPath -Node $current | Sort-Object -Unique)
+        $diff = @(Compare-Object -ReferenceObject $currentKeys -DifferenceObject $copyKeys | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" })
+        $diff | Should -BeNullOrEmpty -Because 'the fixture must have the keys of the toolkit''s current example (=> only in the fixture, <= only in the toolkit)'
+    }
+
+    It 'every key Sonar reads is a key of the toolkit''s monitoring schema' {
+        if ($script:NoToolkit) { Set-ItResult -Skipped -Because 'no azurelocal-toolkit checkout (set AZL_TOOLKIT_ROOT)'; return }
+        $schema = Get-Content -LiteralPath $script:MonitoringSchema -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        # The keys ConvertFrom-AzlSonarInfrastructureTree reads (Private/Infrastructure.ps1). Two more are read when present but
+        # are not registered for monitoring yet: hardware.discovery.output_directory (registry item R10) and
+        # provisioning.simplified.media_path (the gate folder fallback); a file without them still works.
+        $reads = @(
+            '_metadata.schema_version', 'azure.subscription_id', 'azure.resource_group', 'azure.location', 'cluster.name'
+            'scenario.os_install', 'scenario.identity', 'deployment.events_directory', 'deployment.pre_cluster_verification_report_directory'
+            'provisioning.simplified.evidence_path', 'provisioning.simplified.site_name', 'identity.local_admin.username'
+            'identity.active_directory.netbios_name', 'identity.active_directory.domain_join_account.username', 'identity.active_directory.domain_join_account.password'
+            'nodes.name', 'nodes.network_adapters.roles', 'nodes.network_adapters.ip_assignment', 'nodes.network_adapters.ip_address', 'nodes.management.ip_address'
+        )
+        $missing = @($reads | Where-Object { -not (Test-SchemaPath -Schema $schema -Node $schema -Parts ($_ -split '\.')) })
+        $missing | Should -BeNullOrEmpty -Because 'a monitoring cut of the master file must keep every key Sonar reads'
+    }
+
+    It 'reads the toolkit''s generated monitoring template (templates/tools/monitoring.yml)' {
+        if ($script:NoToolkit) { Set-ItResult -Skipped -Because 'no azurelocal-toolkit checkout (set AZL_TOOLKIT_ROOT)'; return }
+        $config = Read-AzlSonarConfig -InfrastructureFile $script:MonitoringTemplate 3>$null
+        $config.clusterName | Should -Not -BeNullOrEmpty
+        @($config.nodes).Count | Should -BeGreaterThan 0
+        $config.armEventsPath | Should -Match 'arm-deployment-events\.jsonl$'
+        $config.updateEventsPath | Should -Match 'update-events\.jsonl$'
+    }
+
+    It 'agrees with the toolkit loader on the management addresses' {
+        if ($script:NoToolkit) { Set-ItResult -Skipped -Because 'no azurelocal-toolkit checkout (set AZL_TOOLKIT_ROOT)'; return }
+        if (-not (Get-Module -ListAvailable powershell-yaml) -and -not (Test-SonarOnCi)) { Set-ItResult -Skipped -Because 'the toolkit loader needs powershell-yaml'; return }
+        Import-Module (Join-Path $script:ToolkitRoot 'scripts/common/infrastructure/AzlInfrastructure.psm1') -Force
+        $infra = Import-AzlInfrastructure -Path $script:ToolkitExample
+        $config = Get-FixtureConfig -Path $script:ToolkitExample
         $expected = @($infra.nodes | ForEach-Object { (Get-AzlManagementAdapter -Infrastructure $infra -Node $_).IpAddress })
         @($config.nodes | ForEach-Object address) | Should -Be $expected
+        $config.clusterName | Should -Be ([string]$infra.cluster.name)
     }
 }
 
@@ -505,9 +592,11 @@ Describe 'Infrastructure file: one events folder shared with the toolkit (D45)' 
         (Get-FixtureConfig -Path $set).verificationEventsPath | Should -Be ([System.IO.Path]::GetFullPath((Join-Path (Join-Path $TestDrive 'gate') 'precluster-verification-events.jsonl')))
     }
 
-    It 'resolves the same folder as the toolkit when it is importable (skipped otherwise)' -Skip:(-not ((Test-Path "$PSScriptRoot/../../azurelocal-toolkit/scripts/common/infrastructure/AzlInfrastructure.psm1") -and (Get-Module -ListAvailable powershell-yaml))) {
-        Import-Module "$PSScriptRoot/../../azurelocal-toolkit/scripts/common/infrastructure/AzlInfrastructure.psm1" -Force
-        if (-not (Get-Command Resolve-AzlEventsDirectory -ErrorAction SilentlyContinue)) { Set-ItResult -Skipped -Because 'the toolkit checkout predates Resolve-AzlEventsDirectory'; return }
+    It 'resolves the same folder as the toolkit (the toolkit checkout is required on CI)' {
+        $root = Get-SonarToolkitRoot
+        if ((-not $root -or -not (Get-Module -ListAvailable powershell-yaml)) -and -not (Test-SonarOnCi)) { Set-ItResult -Skipped -Because 'no azurelocal-toolkit checkout (set AZL_TOOLKIT_ROOT) or no powershell-yaml'; return }
+        Import-Module (Join-Path $root 'scripts/common/infrastructure/AzlInfrastructure.psm1') -Force
+        Get-Command Resolve-AzlEventsDirectory -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty -Because 'the toolkit resolves the events folder (D45)'
         $infra = Import-AzlInfrastructure -Path $script:ToolkitCopy -SkipValidation
         $config = Get-FixtureConfig -Path $script:ToolkitCopy
         $config.osConfigEventsPath | Should -Be (Join-Path (Resolve-AzlEventsDirectory -Infrastructure $infra -InfrastructureFile $script:ToolkitCopy) 'os-configuration-events.jsonl')

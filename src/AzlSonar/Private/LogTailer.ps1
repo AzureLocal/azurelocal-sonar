@@ -902,13 +902,15 @@ function Add-AzlSonarLogLine {
         $text = Protect-AzlSonarText -Text ([string](Get-AzlSonarMember $item 'text' '')) -Secret $Shared.Redact
         $file = [string](Get-AzlSonarMember $item 'file' '')
         $eventTime = Get-AzlSonarLogEventTime -Text $text -File $file -UtcOffsetMinutes $UtcOffsetMinutes -Received $received
+        # A line from an event file carries its event's own level, which wins over any keyword in the text.
+        $givenLevel = ([string](Get-AzlSonarMember $item 'level' '')).ToLowerInvariant()
         [ordered]@{
             seq        = [long]0
             time       = $eventTime.Time.ToString($format, $culture)
             received   = $receivedText
             timeSource = $eventTime.Source
             file       = $file
-            level      = Get-AzlSonarLineLevel $text
+            level      = $(if ($givenLevel -in 'info', 'warning', 'error') { $givenLevel } else { Get-AzlSonarLineLevel $text })
             text       = $text
         }
     }

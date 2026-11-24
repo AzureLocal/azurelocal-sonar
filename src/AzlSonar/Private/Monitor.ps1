@@ -48,7 +48,7 @@ function Get-AzlSonarMonitorPlan {
         What a monitor needs: which sources are read and which log access is listed.
     .DESCRIPTION
         { monitor, standalone, azure (poll the Azure resources), ztpEvents, osConfigEvents, nodeProbe (OEM image route
-        probes), tailer (the seed node's log), armEvents (the toolkit's ARM Validate and Deploy event file; Validate and Deployment only), verificationEvents (the pre-cluster verification gate's event file; Auto and Verification only), cluster (the cluster resource, for the cluster card of Validate, Deployment, Update, AddNode and Repair), discovery (the discovery files), phases (the log access phases listed) }.
+        probes), tailer (the seed node's log), updateEvents (the toolkit's update-events.jsonl; Auto and Update only), armEvents (the toolkit's ARM Validate and Deploy event file; Validate and Deployment only), verificationEvents (the pre-cluster verification gate's event file; Auto and Verification only), cluster (the cluster resource, for the cluster card of Validate, Deployment, Update, AddNode and Repair), discovery (the discovery files), phases (the log access phases listed) }.
         Auto is today's behaviour: everything. Discovery reads the discovery files only (no Azure sign-in, no node). Provisioning
         reads Azure and the ZTP event file. OsConfiguration reads the OS configuration event file (and the Arc run commands in
         Azure) but not the node logs. Verification reads the gate's event file only (no Azure sign-in, no node, no log tailer). Validate, Deployment, Update, AddNode and Repair read the Azure resources of their
@@ -60,8 +60,10 @@ function Get-AzlSonarMonitorPlan {
 
     $name = Get-AzlSonarMonitorName -Value $Monitor
     if (-not $name) { $name = 'Auto' }
-    $plan = [ordered]@{ monitor = $name; standalone = ($name -ne 'Auto'); azure = $true; ztpEvents = $true; osConfigEvents = $true; nodeProbe = $true; tailer = $true; discovery = $true; armEvents = $true; verificationEvents = $true; cluster = $true
+    $plan = [ordered]@{ monitor = $name; standalone = ($name -ne 'Auto'); azure = $true; ztpEvents = $true; osConfigEvents = $true; nodeProbe = $true; tailer = $true; discovery = $true; armEvents = $true; verificationEvents = $true; updateEvents = $true; cluster = $true
         phases = @('provisioning', 'arc-registration', 'validation', 'deployment', 'post-deployment', 'update', 'add-node', 'repair') }
+    # The toolkit's solution update event file is read by Auto and Update only.
+    if ($name -notin 'Auto', 'Update') { $plan.updateEvents = $false }
     switch ($name) {
         'Discovery' { $plan.verificationEvents = $false; $plan.azure = $false; $plan.cluster = $false; $plan.armEvents = $false; $plan.ztpEvents = $false; $plan.osConfigEvents = $false; $plan.nodeProbe = $false; $plan.tailer = $false; $plan.phases = @() }
         'Provisioning' { $plan.verificationEvents = $false; $plan.cluster = $false; $plan.armEvents = $false; $plan.osConfigEvents = $false; $plan.discovery = $false; $plan.tailer = $false; $plan.phases = @('provisioning', 'arc-registration') }

@@ -41,6 +41,7 @@ Sonar never shows green by accident. If the gate wrote `verdict: Pass` but a che
 | Pass | green, *Pass · N checks* | Every blocking check passed, was fixed or does not apply. Warnings do not block. |
 | Fail | red, *Fail · N blocking* | At least one check blocks. The banner lists them; each carries its remedy. |
 | Expired | red, *Pass expired* | The pass is older than its `expiresUtc`. Run the gate again before Validate. |
+| Not for this file | red, *Not for this file* | Sonar was started with `-InfrastructureFile` and the gate's `fileHash` is not the SHA-256 of that file: the result is for another file (or the file changed since). The toolkit's ARM run refuses it. Run the gate again on this file before Validate. |
 
 ## Prerequisites
 
@@ -97,5 +98,5 @@ One JSON object per line (JSON Lines), schema 1. Sonar reads the fields it knows
 
 - It never runs, fixes or re-runs a check, and never changes a node, Azure or Active Directory.
 - It does not decide the verdict: it shows the gate's, except that it never shows a Pass next to a blocking check.
-- It does not read `report.json` or `summary.md`, and does not compare `fileHash` with the infrastructure file.
+- It does not read `report.json` or `summary.md`. It compares `fileHash` only with the infrastructure file it was started with (`-InfrastructureFile`); with a config file there is nothing to compare.
 - **Unverified against a live gate run.** This mode is built to the contract above and tested with fixtures written to it; the first run against the real gate may need the field names or the default folder adjusted.

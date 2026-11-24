@@ -63,6 +63,10 @@
   // (default <temp>/azl-arm-<cluster>). Relative paths are relative to this file. Without it the Validate and Deployment modes show
   // only what Azure reports and there are no [arm] log lines.
   "armEventsPath": "D:\\Data\\azl-arm\\example\\arm-deployment-events.jsonl",
+  // Optional. The event file the toolkit's solution update scripts write: update-events.jsonl in the events folder. Read by the Auto
+  // and Update monitors: [update] log lines, and the Update view from the file when Azure reports no update run. Relative paths are
+  // relative to this file.
+  "updateEventsPath": "D:\\Data\\azl-events\\example\\update-events.jsonl",
   // Optional. The event file (or the folder that holds it) of the toolkit's pre-cluster verification gate: precluster-verification-events.jsonl in its
   // report directory (default <environment data>/arm-report/verification/live). Relative paths are relative to this file. Without it the Verification
   // mode shows nothing and there are no [verify] log lines.

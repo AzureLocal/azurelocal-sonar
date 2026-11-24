@@ -2107,6 +2107,15 @@ test('cluster card: the cluster resource as Azure reports it, the machines, and 
   eq(failed.rows[0], { k: 'Azure says', v: 'not read: The client does not have authorization', warn: true });
 });
 
+test('cluster card: a failed poll shows the poll error message, never [object Object]', function () {
+  var s = { phase: 'validation', activePhase: 'validation', cluster: 'clus01', clusterResource: clusterRes(), pollError: { message: 'Run Connect-AzAccount to login.', at: '2026-11-24T06:35:46Z' } };
+  eq(m.clusterCard(s, 'validate').lastError, 'Run Connect-AzAccount to login.');
+  s.pollError = 'An older back end sent a string';
+  eq(m.clusterCard(s, 'validate').lastError, 'An older back end sent a string');
+  s.pollError = null;
+  eq(m.clusterCard(s, 'validate').lastError, '');
+});
+
 test('cluster card (Validate): pass and fail counts, failures first, and the last error', function () {
   var tree = [stepN('1', 'Validate deployment prerequisites', 'error', [], [
     stepN('1.1', 'Validate hardware', 'success'), stepN('1.2', 'Validate network', 'success'),
@@ -2722,6 +2731,23 @@ test('Update view in the page: hostile text in the cluster’s step error, node 
     eq(textOf(dom.byId['live-notes']).indexOf(HOSTILE[0]) >= 0, true, 'the hostile text shows as text');
     staticIcons(dom, 'update summary with the cluster’s reading');
   });
+});
+
+test('Discovery: a stale run says how old it is and to run it again; Beacon results show on the machine card (N6, O5)', function () {
+  function st(d) { return { phase: 'provisioning', activePhase: 'provisioning', provisioning: provNone(), discovery: d }; }
+  var withBeacon = discNode('n1', 'attention', { beacon: { verdict: 'FAIL', fail: 2, warn: 1, pass: 30, skip: 0, total: 33, failures: [] }, notes: ['Beacon found 2 failed checks on this machine: fix them before ZTP.'] });
+  var stale = discState('discovered', [withBeacon], { stateText: 'All 1 machine discovered; 1 to check before ZTP', ready: true, summaryFound: true, stale: true, ageSeconds: 16 * 86400 + 5,
+    warnings: ['The discovery was collected 16 days ago, more than 7 days: run the hardware discovery again before ZTP.'] });
+  eq(m.discAgeDays(stale), 16);
+  var sm = m.summaryFor(st(stale), 'discovery');
+  eq(sm.headline, 'All 1 machine discovered; 1 to check before ZTP. The run is 16 days old: run the discovery again');
+  var tile = tileOf(m.modeStates(st(stale)), 'discovery');
+  eq(tile.line, '1 of 1 machines · 16 days old');
+  eq(/16 days ago/.test(tile.tip), true);
+  eq(sm.cards[0].lines.indexOf('Beacon: FAIL (2 failed, 1 warnings)') >= 0, true);
+  var fresh = discState('discovered', [discNode('n1', 'discovered')], { stateText: 'All 1 machine discovered', ready: true, summaryFound: true, stale: false, ageSeconds: 3600 });
+  eq(m.summaryFor(st(fresh), 'discovery').headline, 'All 1 machine discovered. Next: ZTP');
+  eq(tileOf(m.modeStates(st(fresh)), 'discovery').line, '1 of 1 machines');
 });
 
 process.stdout.write(JSON.stringify(cases));

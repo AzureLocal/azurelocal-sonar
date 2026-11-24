@@ -9,7 +9,9 @@ Set-StrictMode -Version Latest
 # NodeReconnected (an older NodeRestarting counts as NodeReconnecting). Step events: StepPlanned, StepSkipped,
 # StepApplying, StepApplied, StepFailed, StepVerified. Guarded network change (step Network): NetworkChangeStaged,
 # NetworkChangeVerifying, NetworkChangeAwaitingConfirm, NetworkChangeCommitted, NetworkChangeRepaired,
-# NetworkChangeRolledBack, NetworkChangeRefused. Sonar follows that file (local, read-only), shows each
+# NetworkChangeRolledBack, NetworkChangeRefused, ObservedCommitted (the guard's status was not read, the change is in place).
+# Transport (step Transport): StaleRunCommandDeleted, NodeCallAttempt (one per call attempt), SbeDeliveryProgress (the SBE
+# package copy). The steps include NicNames (opt-in adapter renames). Sonar follows that file (local, read-only), shows each
 # event in the log pane (file 'os-config-events') and builds the OS configuration mode from it: one machine per node, one
 # step per OS configuration step (Get-AzlSonarOsConfigurationState).
 #
@@ -37,6 +39,7 @@ $script:AzlSonarRunCommandApiVersion = '2026-09-01'
 # and registered the machine with Azure Arc). Arc: the step runs as an Arc Run Command when the node is reached that way.
 $script:AzlSonarOsStep = [ordered]@{
     RemoteManagement = @{ Name = 'Remote management'; Description = 'WinRM, remote desktop and ping are on, so the node can be managed.' }
+    NicNames         = @{ Name = 'Adapter names'; Description = 'Opt-in: the OS adapters whose port has an os_name_override in the master file are renamed (found by MAC). Without an override nothing is renamed.' }
     Network          = @{ Name = 'Network (management address)'; Description = 'The static management address on the port with the management MAC, DHCP off on the other ports.' }
     Dns              = @{ Name = 'DNS servers'; Description = 'The DNS servers of the management port.' }
     Time             = @{ Name = 'Time (NTP)'; Description = 'The NTP peers the node keeps its clock with.' }
@@ -101,6 +104,12 @@ $script:AzlSonarOsEventInfo = @{
     TrustedHostsChanged          = @('remoting', 'TrustedHosts changed on the runner', 'idle')
     TrustedHostsRestored         = @('remoting', 'TrustedHosts restored', 'ok')
     StaleRunCommandDeleted       = @('transport', 'Stale run command deleted', 'warn')
+    # One per attempt of a call to a node (payload, durationSeconds, address, callState, error); a failed attempt is a Warning.
+    NodeCallAttempt              = @('transport', 'Call to the node', 'idle')
+    # The SBE package copy, every 5 percent (file, percent, sentBytes, totalBytes).
+    SbeDeliveryProgress          = @('transport', 'SBE package copy', 'run')
+    # The guard's status could not be read, but a read of the node shows the change's items in place (step Network).
+    ObservedCommitted            = @('guarded', 'Network change in place (observed on the node; the guard did not confirm)', 'warn')
 }
 
 function Get-AzlSonarOsEventInfo {
@@ -757,9 +766,10 @@ function Get-AzlSonarOsStepStage {
             'DomainJoined' { $s.stage = 'applied'; $s.end = $e.when; $s.evidence = $e.evidence; $s.level = $e.level; $s.errors = @() }
             'DomainAdminsConfigured' { $s.stage = 'applied'; $s.end = $e.when; $s.evidence = $e.evidence; $s.level = $e.level; $s.errors = @() }
             'DomainJoinFailed' { $s.stage = 'failed'; $s.end = $e.when; $s.evidence = $e.evidence; $s.level = 'Error'; $s.nextAction = $e.nextAction; $s.errors = @($e.evidence) }
-            { $_ -like 'NetworkChange*' } {
+            { $_ -like 'NetworkChange*' -or $_ -eq 'ObservedCommitted' } {
                 # The guarded change of the management network: commit confirmed (design section 4). Written for the Network step.
-                $g = $_.Substring('NetworkChange'.Length)
+                # ObservedCommitted: the guard's status could not be read, but the change's items are in place on the node.
+                $g = if ($_ -eq 'ObservedCommitted') { 'ObservedCommitted' } else { $_.Substring('NetworkChange'.Length) }
                 $s.guarded = $g; $s.evidence = $e.evidence; $s.level = $e.level; $s.nextAction = $e.nextAction
                 if ($data.ContainsKey('changeId')) { $s.changeId = [string]$data['changeId'] }
                 foreach ($k in 'group', 'oldAddress', 'newAddress', 'items', 'verdict') { if ($data.ContainsKey($k) -and $null -ne $data[$k] -and "$($data[$k])" -ne '') { $s[$k] = [string]$data[$k] } }
@@ -776,6 +786,7 @@ function Get-AzlSonarOsStepStage {
                     }
                     'Repaired' { $s.stage = 'changing'; $s.repairs = [int]$(if ($s.ContainsKey('repairs')) { $s['repairs'] } else { 0 }) + 1; $s.rung = (@($(if ($data.ContainsKey('rung') -and $null -ne $data['rung']) { $data['rung'] }) | ForEach-Object { [string]$_ } | Where-Object { $_ }) -join ', ') }
                     'Committed' { $s.stage = 'applied'; $s.end = $e.when; $s.errors = @() }
+                    'ObservedCommitted' { $s.stage = 'applied'; $s.end = $e.when; $s.errors = @(); if ($s.level -ne 'Error') { $s.level = 'Warning' } }
                     'RolledBack' {
                         $s.stage = 'rolledback'; $s.end = $e.when; $s.level = 'Error'
                         $reason = if ($data.ContainsKey('reason') -and $data['reason']) { [string]$data['reason'] } else { $e.evidence }
@@ -897,7 +908,7 @@ function ConvertTo-AzlSonarOsConfigNode {
     $unknownSeen = [ordered]@{}
     $remoting = [ordered]@{ bootstrap = $null; firewall = $null; listener = $null }
     foreach ($e in $events) {
-        $stepName = if ($e.state -like 'NetworkChange*' -and -not $e.step) { 'Network' } elseif ($e.state -like 'DomainJoin*' -or $e.state -eq 'DomainAdminsConfigured') { 'DomainJoin' } else { $e.step }
+        $stepName = if (($e.state -like 'NetworkChange*' -or $e.state -eq 'ObservedCommitted') -and -not $e.step) { 'Network' } elseif ($e.state -like 'DomainJoin*' -or $e.state -eq 'DomainAdminsConfigured') { 'DomainJoin' } else { $e.step }
         if ($stepName -and $byStep.ContainsKey($stepName)) { $byStep[$stepName].Add($e) }
         switch ($e.state) {
             'NodeRetry' { $retries++ }
@@ -914,7 +925,10 @@ function ConvertTo-AzlSonarOsConfigNode {
             $message = "Waiting for $what$secs"
         }
         $item = [ordered]@{ at = $e.timestamp; state = $e.state; label = $einfo.label; group = $einfo.group; known = $einfo.known; status = $einfo.status; step = $e.step; level = $e.level; seq = $e.seq; message = (Protect-AzlSonarText -Text $message) }
-        if ($e.state -eq 'NodeWaiting' -and $timeline.Count -gt 0 -and $timeline[$timeline.Count - 1].state -eq 'NodeWaiting') { $timeline[$timeline.Count - 1] = $item } else { $timeline.Add($item) }
+        # A heartbeat and the SBE copy progress replace their previous line; a call attempt that worked stays in the log pane only.
+        $quietCall = $e.state -eq 'NodeCallAttempt' -and $e.level -notin 'Warning', 'Error'
+        if ($e.state -in 'NodeWaiting', 'SbeDeliveryProgress' -and $timeline.Count -gt 0 -and $timeline[$timeline.Count - 1].state -eq $e.state) { $timeline[$timeline.Count - 1] = $item }
+        elseif (-not $quietCall) { $timeline.Add($item) }
         if (-not $einfo.known) {
             $c = if ($unknownSeen.Contains($e.state)) { [int]$unknownSeen[$e.state].count } else { 0 }
             $unknownSeen[$e.state] = [ordered]@{ state = $e.state; count = $c + 1; at = $e.timestamp; level = $e.level; message = (Protect-AzlSonarText -Text $einfo.message) }

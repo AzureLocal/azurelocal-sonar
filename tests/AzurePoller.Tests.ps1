@@ -465,6 +465,34 @@ Describe 'Invoke-AzlSonarPollerLoop keeps pollError on ARM failure' {
         $result.State.pollError.message | Should -BeLike '*Connect-AzAccount*'
     }
 
+    It 'builds the ARM, OS configuration and verification sections from their event stores when the poll throws (N1)' {
+        # A Validate monitor with no Az context: the toolkit's event files still show their run.
+        Mock -ModuleName AzlSonar -CommandName Invoke-AzRestMethod -MockWith { throw 'Run Connect-AzAccount to login.' }
+        $armLines = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'fixtures/arm-deployment-events.sample.jsonl') | Where-Object { $_ })
+        $osLine = @(
+            (@{ timestamp = '2026-11-07T19:00:00Z'; node = '*'; stage = 'OsConfiguration'; state = 'RunStarted'; evidence = 'Run started.'; level = 'Info'; runId = 'r1'; seq = 1; mode = 'Apply' } | ConvertTo-Json -Compress)
+            (@{ timestamp = '2026-11-07T19:01:00Z'; node = 'node01'; stage = 'OsConfiguration'; step = 'Dns'; state = 'StepApplied'; evidence = 'DNS set.'; level = 'Info'; runId = 'r1'; seq = 2 } | ConvertTo-Json -Compress))
+        $result = InModuleScope AzlSonar -Parameters @{ Config = $script:Config; Arm = $armLines; Os = $osLine } {
+            param($Config, $Arm, $Os)
+            $cfg = [pscustomobject]@{}
+            foreach ($p in $Config.PSObject.Properties) { $cfg | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value }
+            $cfg | Add-Member -NotePropertyName armEventsPath -NotePropertyValue 'x.jsonl' -Force
+            $cfg | Add-Member -NotePropertyName osConfigEventsPath -NotePropertyValue 'y.jsonl' -Force
+            $shared = Initialize-AzlSonarSharedState
+            # The previous state is from before the events arrived: it has no ARM or OS configuration data.
+            $shared.State = Get-AzlSonarInitialState -Config $cfg
+            foreach ($l in $Arm) { Add-AzlSonarArmEvent -Store $shared['ArmEvents'] -Line $l }
+            foreach ($l in $Os) { Add-AzlSonarOsConfigEvent -Store $shared['OsConfigEvents'] -Line $l }
+            Invoke-AzlSonarPollerLoop -Shared $shared -Config $cfg
+            $shared
+        }
+        $result.State.pollError.message | Should -BeLike '*Connect-AzAccount*'
+        $result.State.arm.hasData | Should -BeTrue -Because 'the ARM section follows its file, not Azure'
+        $result.State.osConfiguration.run.events | Should -BeGreaterThan 0 -Because 'the OS configuration section follows its file too'
+        $result.State.Contains('verification') | Should -BeTrue
+        $result.State.Contains('discovery') | Should -BeTrue
+    }
+
     It 'clears pollError on the next good poll' {
         Mock -ModuleName AzlSonar -CommandName Invoke-AzRestMethod -MockWith {
             if ($Path -match 'deploymentSettings') { return [pscustomobject]@{ StatusCode = 404; Content = '' } }

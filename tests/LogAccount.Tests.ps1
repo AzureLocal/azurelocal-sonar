@@ -768,7 +768,7 @@ Describe 'DomainJoin in the OS configuration steps' {
     }
     It 'sits after the computer name and before the unused adapters, as the design orders it' {
         $s = & $script:BuildJoin @($script:Start)
-        @($s.nodes[0].tree).Count | Should -Be 14
+        @($s.nodes[0].tree).Count | Should -Be 15 -Because 'the 14 OS configuration steps (NicNames included) and the Arc registration'
         $steps = @($s.nodes[0].tree).osc.step
         $steps.IndexOf('DomainJoin') | Should -Be ($steps.IndexOf('Hostname') + 1)
     }

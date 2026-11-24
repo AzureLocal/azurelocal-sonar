@@ -143,6 +143,11 @@ function Test-AzlSonarConfig {
         $problems.Add('armEventsPath must be the path of the ARM deployment event file (JSON Lines written by the toolkit''s Invoke-AzureLocalArmDeployment.ps1), for example ./arm-deployment-events.jsonl.')
     }
 
+    $updateEventsPath = Get-AzlSonarMember $Config 'updateEventsPath'
+    if ($null -ne $updateEventsPath -and ($updateEventsPath -isnot [string] -or [string]::IsNullOrWhiteSpace($updateEventsPath))) {
+        $problems.Add('updateEventsPath must be the path of the solution update event file (JSON Lines written by the toolkit''s update scripts), for example ./update-events.jsonl.')
+    }
+
     $verificationEventsPath = Get-AzlSonarMember $Config 'verificationEventsPath'
     if ($null -ne $verificationEventsPath -and ($verificationEventsPath -isnot [string] -or [string]::IsNullOrWhiteSpace($verificationEventsPath))) {
         $problems.Add('verificationEventsPath must be the path of the pre-cluster verification event file (JSON Lines, precluster-verification-events.jsonl, written by the toolkit''s verification gate) or the folder that holds it, for example ./arm-report/verification/live/precluster-verification-events.jsonl.')
@@ -456,6 +461,11 @@ function Read-AzlSonarConfig {
     if ($armEventsPath -and -not [System.IO.Path]::IsPathRooted($armEventsPath) -and $baseDirectory) {
         $armEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $armEventsPath))
     }
+    # updateEventsPath: the solution update event file of the toolkit's update scripts; relative to the config file's folder.
+    $updateEventsPath = [string](Get-AzlSonarMember $raw 'updateEventsPath' '')
+    if ($updateEventsPath -and -not [System.IO.Path]::IsPathRooted($updateEventsPath) -and $baseDirectory) {
+        $updateEventsPath = [System.IO.Path]::GetFullPath((Join-Path -Path ($baseDirectory) -ChildPath $updateEventsPath))
+    }
     # verificationEventsPath: the pre-cluster verification gate's event file (or the folder that holds it); relative to the config file's folder.
     $verificationEventsPath = [string](Get-AzlSonarMember $raw 'verificationEventsPath' '')
     if ($verificationEventsPath -and -not [System.IO.Path]::IsPathRooted($verificationEventsPath) -and $baseDirectory) {
@@ -507,6 +517,7 @@ function Read-AzlSonarConfig {
         ztpEventsPath  = $ztpEventsPath
         osConfigEventsPath = $osConfigEventsPath
         armEventsPath  = $armEventsPath
+        updateEventsPath = $updateEventsPath
         verificationEventsPath = $verificationEventsPath
         discoveryPath  = $discoveryPath
         logAccounts    = $logAccountsNormalised
