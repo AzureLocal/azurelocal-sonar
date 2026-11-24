@@ -6,7 +6,7 @@ Set-StrictMode -Version Latest
 # deployment rewrites it, deploymentSettings still shows the previous state. This file reads what else is known
 #   - the newest running ARM deployment in the resource group (Microsoft.Resources/deployments),
 #   - the node log as the tailer received it (the role:interface that runs now, the Environment Checker files),
-# and labels the mismatch instead of hiding it. It also says which stage of Deploy mode is running: Learn (12.2609, latest):
+# and labels the mismatch instead of hiding it. It also says which stage of Deploy mode is running: Learn (12.2611, latest):
 # "a limited Environment Checker run, a full Environment Checker run, and cloud deployment starts".
 #
 # Gap 5 (S-13): the update track. clusters/updateSummaries (overall state), clusters/updates (the update that installs)
@@ -120,7 +120,7 @@ function Get-AzlSonarEnvironmentCheckerStage {
     .SYNOPSIS
         Which part of Deploy mode runs now: the limited Environment Checker, the full one, or cloud deployment.
     .DESCRIPTION
-        Learn (12.2609, latest): once Deploy mode starts, "there's a limited Environment Checker run, a full Environment
+        Learn (12.2611, latest): once Deploy mode starts, "there's a limited Environment Checker run, a full Environment
         Checker run, and cloud deployment starts". Azure reports no step for the two checks, so the stage comes from the
         deployment step tree (any step = cloud deployment) and the node log files (see Get-AzlSonarLogHintFromLine).
         stage: none | validate | starting | limited | full | cloud-deployment. source says where it was read.
@@ -270,8 +270,10 @@ function ConvertTo-AzlSonarUpdateStep {
     }
 }
 
-$script:AzlSonarSbeContentGuide = 'https://learn.microsoft.com/azure/azure-local/update/solution-builder-extension?view=azloc-2610#the-additionalcontentrequired-update-state'
-$script:AzlSonarUpdateFailureGuide = 'https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2?view=azloc-2610#troubleshoot-update-failures'
+$script:AzlSonarSbeContentGuide = 'https://learn.microsoft.com/azure/azure-local/update/solution-builder-extension?view=azloc-2611#the-additionalcontentrequired-update-state'
+$script:AzlSonarUpdateFailureGuide = 'https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2?view=azloc-2611'
+$script:AzlSonarUpdatePhasesGuide = 'https://learn.microsoft.com/azure/azure-local/update/update-phases-23h2?view=azloc-2611#preparation-phase'
+$script:AzlSonarOemValidationGuide = 'https://learn.microsoft.com/azure/azure-local/release-information-23h2?view=azloc-2611#feature-release-availability-timing'
 # An Auto session that opens on a deployment that finished longer ago than this lands on the Update view when an update waits.
 $script:AzlSonarOldDeploymentHours = 24
 
@@ -284,7 +286,9 @@ function Get-AzlSonarUpdateStateInfo {
         phase is the update phase vocabulary of /api/state (installing, preparing, failed, waiting, available, idle). level is
         run, error, warn, ok or neutral. An unknown state keeps its raw word and is neutral, never green.
         States are from the Learn update-phases and REST reference; AdditionalContentRequired (SBE content to import) was
-        seen on a live 12.2610 cluster.
+        seen on a live 12.2610 cluster. HealthCheckExpired (Learn 2611: a ReadyToInstall update after three days) and
+        PendingOEMValidation, ScheduledToInstall and InstallingPerSchedule (REST state enum, Latest) are unverified against
+        a live run.
     #>
     [CmdletBinding()]
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
@@ -294,6 +298,7 @@ function Get-AzlSonarUpdateStateInfo {
     $info = [ordered]@{ raw = $raw; kind = 'unknown'; phase = 'idle'; level = 'neutral'; word = $(if ($raw) { $raw } else { 'Unknown' }); nextAction = $null }
     switch -Regex ($raw) {
         '^(Installing|InstallationInProgress)$' { $info.kind = 'running'; $info.phase = 'installing'; $info.level = 'run'; $info.word = 'Installing' }
+        '^InstallingPerSchedule$' { $info.kind = 'running'; $info.phase = 'installing'; $info.level = 'run'; $info.word = 'Installing (scheduled)' }
         '^(Preparing|PreparationInProgress)$' { $info.kind = 'running'; $info.phase = 'preparing'; $info.level = 'run'; $info.word = 'Preparing' }
         '^Downloading$' { $info.kind = 'running'; $info.phase = 'preparing'; $info.level = 'run'; $info.word = 'Downloading' }
         '^HealthChecking$' { $info.kind = 'running'; $info.phase = 'preparing'; $info.level = 'run'; $info.word = 'Checking health' }
@@ -310,6 +315,18 @@ function Get-AzlSonarUpdateStateInfo {
         '^HasPrerequisite$' {
             $info.kind = 'waiting'; $info.phase = 'waiting'; $info.level = 'warn'; $info.word = 'Needs another update first'
             $info.nextAction = [ordered]@{ text = 'Another update must be installed before this one.'; guide = $null }
+        }
+        '^PendingOEMValidation$' {
+            $info.kind = 'waiting'; $info.phase = 'waiting'; $info.level = 'warn'; $info.word = 'Waiting for the hardware vendor'
+            $info.nextAction = [ordered]@{ text = 'The hardware vendor has not yet validated this update for this hardware. It can be installed once they do; a feature release usually follows the Microsoft release by a few weeks.'; guide = $script:AzlSonarOemValidationGuide }
+        }
+        '^HealthCheckExpired$' {
+            $info.kind = 'ready'; $info.phase = 'available'; $info.level = 'neutral'; $info.word = 'Ready (readiness check expired)'
+            $info.nextAction = [ordered]@{ text = 'The readiness check passed more than three days ago and has expired; starting the update runs it again before installing. Sonar only watches: start the update from Azure.'; guide = $script:AzlSonarUpdatePhasesGuide }
+        }
+        '^ScheduledToInstall$' {
+            $info.kind = 'ready'; $info.phase = 'available'; $info.level = 'neutral'; $info.word = 'Scheduled to install'
+            $info.nextAction = [ordered]@{ text = 'The update is scheduled and starts at its scheduled time. Sonar only watches.'; guide = $null }
         }
         '^(Ready|ReadyToInstall)$' {
             $info.kind = 'ready'; $info.phase = 'available'; $info.level = 'neutral'; $info.word = 'Ready to install'

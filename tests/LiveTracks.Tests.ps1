@@ -309,7 +309,7 @@ Describe 'The update track (updateSummaries, updates, updateRuns)' {
     }
 }
 
-Describe 'Guidance: 12.2609 timing and the update, add-node and repair cards' {
+Describe 'Guidance: 12.2611 timing and the update, add-node and repair cards' {
     It 'carries the Learn timing for Validate (about 10 minutes) and Deploy (2.5 to 3 hours, limited then full Environment Checker)' {
         $g = Get-AzlSonarPhaseGuidance -IdentityModel LocalIdentity
         $g.phases.validation.timing | Should -Match 'about 10 minutes'
@@ -322,7 +322,7 @@ Describe 'Guidance: 12.2609 timing and the update, add-node and repair cards' {
     It 'has an update card for both identity models, marked unverified' -TestCases @(@{ Model = 'LocalIdentity' }, @{ Model = 'ActiveDirectory' }) {
         $g = Get-AzlSonarPhaseGuidance -IdentityModel $Model
         $g.phases.update.verified | Should -BeFalse
-        $g.phases.update.commands | Should -Contain 'Get-CauReport (Cluster-Aware Updating run details)'
+        $g.phases.update.commands | Should -Contain 'Get-CauReport -Detailed (Cluster-Aware Updating run details)'
     }
 }
 
@@ -484,6 +484,10 @@ Describe 'The update verdict: a summary that says AppliedSuccessfully is not an 
         It '<State> -> kind <Kind>, phase <Phase>, level <Level>, word <Word>' -TestCases @(
             @{ State = 'AdditionalContentRequired'; Kind = 'waiting'; Phase = 'waiting'; Level = 'warn'; Word = 'Waiting for content' }
             @{ State = 'HasPrerequisite'; Kind = 'waiting'; Phase = 'waiting'; Level = 'warn'; Word = 'Needs another update first' }
+            @{ State = 'PendingOEMValidation'; Kind = 'waiting'; Phase = 'waiting'; Level = 'warn'; Word = 'Waiting for the hardware vendor' }
+            @{ State = 'HealthCheckExpired'; Kind = 'ready'; Phase = 'available'; Level = 'neutral'; Word = 'Ready (readiness check expired)' }
+            @{ State = 'ScheduledToInstall'; Kind = 'ready'; Phase = 'available'; Level = 'neutral'; Word = 'Scheduled to install' }
+            @{ State = 'InstallingPerSchedule'; Kind = 'running'; Phase = 'installing'; Level = 'run'; Word = 'Installing (scheduled)' }
             @{ State = 'Ready'; Kind = 'ready'; Phase = 'available'; Level = 'neutral'; Word = 'Ready to install' }
             @{ State = 'ReadyToInstall'; Kind = 'ready'; Phase = 'available'; Level = 'neutral'; Word = 'Ready to install' }
             @{ State = 'Downloading'; Kind = 'running'; Phase = 'preparing'; Level = 'run'; Word = 'Downloading' }
@@ -501,6 +505,16 @@ Describe 'The update verdict: a summary that says AppliedSuccessfully is not an 
             $info.phase | Should -Be $Phase
             $info.level | Should -Be $Level
             $info.word | Should -Be $Word
+        }
+
+        It '<State> links the Learn 2611 page that explains it' -TestCases @(
+            @{ State = 'PendingOEMValidation'; Guide = '^https://learn\.microsoft\.com/azure/azure-local/release-information-23h2\?view=azloc-2611#feature-release-availability-timing$' }
+            @{ State = 'HealthCheckExpired'; Guide = '^https://learn\.microsoft\.com/azure/azure-local/update/update-phases-23h2\?view=azloc-2611#preparation-phase$' }
+            @{ State = 'AdditionalContentRequired'; Guide = '^https://learn\.microsoft\.com/azure/azure-local/update/solution-builder-extension\?view=azloc-2611#the-additionalcontentrequired-update-state$' }
+            @{ State = 'InstallationFailed'; Guide = '^https://learn\.microsoft\.com/azure/azure-local/update/update-troubleshooting-23h2\?view=azloc-2611$' }
+        ) {
+            $info = InModuleScope AzlSonar -Parameters @{ S = $State } { param($S) Get-AzlSonarUpdateStateInfo -State $S }
+            $info.nextAction.guide | Should -Match $Guide
         }
 
         It 'an unknown update state is shown as the raw word, neutral, never green' {

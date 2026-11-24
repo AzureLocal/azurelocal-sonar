@@ -31,7 +31,7 @@ Prefer a live MCP answer over anything written here.
 - PowerShell 7.4+ only: `Set-StrictMode -Version Latest`, `$ErrorActionPreference = 'Stop'`. Never Windows PowerShell 5.1, never Bash.
 - Markdown for documentation. The docs site is VitePress with dead-link checking on (`ignoreDeadLinks` stays off).
 - Commit format: `type(scope): short description` (`feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`).
-- Release wording: the Azure Local release is called **12.2609 (latest)** in everything public.
+- Release wording: the Azure Local release is called **12.2611 (latest)** in everything public.
 - No customer, event or test-environment names in anything public (docs, tests, fixtures, examples, screenshots).
 
 ## Repo rules (specific to Sonar)

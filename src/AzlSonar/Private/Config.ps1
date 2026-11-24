@@ -478,7 +478,7 @@ function Read-AzlSonarConfig {
         # The Azure region (optional; shown on the page's Details only, never used to reach Azure).
         location       = [string](Get-AzlSonarMember $raw 'location' '')
         clusterName    = [string]$raw.clusterName
-        # GA versions, current on Microsoft Learn for 12.2609 (latest); a preview version stays configurable. The fallback is
+        # GA versions, current on Microsoft Learn for 12.2611 (latest); a preview version stays configurable. The fallback is
         # tried once when the first is not accepted ('' = no fallback).
         apiVersion     = [string](Get-AzlSonarMember $raw 'apiVersion' '2026-10-01')
         apiVersionFallback = [string](Get-AzlSonarMember $raw 'apiVersionFallback' '2025-10-01')

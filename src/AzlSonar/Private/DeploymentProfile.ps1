@@ -1,6 +1,6 @@
 Set-StrictMode -Version Latest
 
-# Azure Local 12.2609 (latest) deployment shapes that change what an operator should expect (hardening 2610, gap 3).
+# Azure Local 12.2611 (latest) deployment shapes that change what an operator should expect (hardening 2610, gap 3).
 # The step tree is rendered from deploymentSettings whatever the shape is, so there is no new step logic: the config says
 # which shape this is, and the page and the guidance say what Learn says about it.
 #   identity   Local Identity with Azure Key Vault (previously AD-less), with or without Internal DNS (preview); Active Directory
@@ -37,7 +37,7 @@ function Get-AzlSonarDeploymentProfile {
     if ($pattern -eq 'RackAware') {
         $notes.Add('Rack aware cluster: two racks (two rooms or buildings) with at most 1 ms round trip between them; a dedicated storage network intent; a cloud witness is required; new deployments only (Learn).')
         if ($identity -eq 'LocalIdentity') {
-            $warnings.Add('Learn is not consistent about rack aware with Local Identity: the portal deployment article says a rack aware cluster can only be deployed with Active Directory in this release, while the Local Identity overview lists rack aware clustering as supported. Check the current Learn page before you rely on this combination.')
+            $warnings.Add('Learn is not consistent about rack aware with Local Identity: the rack aware portal deployment article asks only for Active Directory settings, while the Local Identity overview lists rack aware clustering as supported. Check the current Learn page before you rely on this combination.')
         }
     }
     if ($architecture -eq 'disaggregated') {

@@ -220,7 +220,7 @@ Azure Local is updated about once a month. The **Update** tile and mode follow t
 | Tab | When | Label |
 | --- | --- | --- |
 | Grey (neutral) | No update has run and nothing is installing. Informational checks are listed but do not colour it. | *No update has run* |
-| Amber | An update cannot start yet (*Waiting for content*, *Needs another update first*), or a readiness check of severity Warning failed. | *Waiting for content*, *Readiness warning* |
+| Amber | An update cannot start yet (*Waiting for content*, *Needs another update first*, *Waiting for the hardware vendor*), or a readiness check of severity Warning failed. | *Waiting for content*, *Readiness warning* |
 | Blue (running) | An update is preparing or installing. | *Step 2 of 5* |
 | Red | An update failed (`InstallationFailed`, `PreparationFailed`, `HealthCheckFailed`, `DownloadFailed`, `ScanFailed`), or a readiness check of severity Critical or Error failed. | *Failed*, *Readiness check failed* |
 | Green | An update run finished and the summary is `AppliedSuccessfully` again. | *Done* |
@@ -231,9 +231,12 @@ Azure Local is updated about once a month. The **Update** tile and mode follow t
 | --- | --- | --- |
 | `AdditionalContentRequired` | *Waiting for content*: the update package must be added (SBE side-load). The panel links the Learn page that explains how to import the hardware vendor's Solution Builder Extension files. | Amber |
 | `HasPrerequisite` | *Needs another update first* | Amber |
+| `PendingOEMValidation` | *Waiting for the hardware vendor*: the vendor has not yet validated the update for this hardware. The panel links the Learn page on feature release availability. Unverified against a live run. | Amber |
 | `Ready`, `ReadyToInstall` | *Ready to install*; Sonar only watches, the update is started from Azure | Neutral |
+| `HealthCheckExpired` | *Ready (readiness check expired)*: Learn 2611 says a `ReadyToInstall` update moves to this state after three days, and starting it runs the health check again. Unverified against a live run. | Neutral |
+| `ScheduledToInstall` | *Scheduled to install* (REST state; unverified against a live run) | Neutral |
 | `Downloading`, `Preparing`, `HealthChecking`, `ScanInProgress` | *Preparing* | Running |
-| `Installing` | *Installing* | Running |
+| `Installing`, `InstallingPerSchedule` | *Installing*, *Installing (scheduled)* (`InstallingPerSchedule` is a REST state, unverified against a live run) | Running |
 | `InstallationFailed`, `PreparationFailed`, `HealthCheckFailed`, `DownloadFailed`, `ScanFailed` | The failure, the failing step and its error. The Learn page on update failures is linked. | Red |
 | `Installed` | *Installed* | Green (history) |
 | `Obsolete`, `Invalid`, `Recalled` | *Superseded by a newer version*, *Does not match this hardware*, *Recalled* | Neutral |

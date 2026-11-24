@@ -2340,7 +2340,7 @@ test('Verification page: hostile text stays text; only a documentation https sou
 
 // ---------------------------------------------------------------- the Update tab: a summary that says AppliedSuccessfully is not an update that ran
 
-var LEARN_SBE = 'https://learn.microsoft.com/azure/azure-local/update/solution-builder-extension?view=azloc-2610#the-additionalcontentrequired-update-state';
+var LEARN_SBE = 'https://learn.microsoft.com/azure/azure-local/update/solution-builder-extension?view=azloc-2611#the-additionalcontentrequired-update-state';
 // What /api/state update reads for the live cluster (sanitised): AppliedSuccessfully, never updated, one SBE update waiting for content,
 // two Informational readiness checks.
 function liveUpdate(extra) {

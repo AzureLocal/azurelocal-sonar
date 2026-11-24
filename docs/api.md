@@ -174,12 +174,12 @@ The phase guidance for the configured identity model, from `data/phase-guidance.
       "logPaths": [ "C:\\CloudContent\\MASLogs", "C:\\MASLogs", "C:\\Observability", "C:\\CloudDeployment\\Logs (appears later in the run)" ],
       "when": "During and after cloud deployment on the seed node. ...",
       "how": "Use WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential until the domain join completes. ...",
-      "timing": "Learn (12.2609 latest): once Deploy mode starts, a limited Environment Checker run ... ",
+      "timing": "Learn (12.2611 latest): once Deploy mode starts, a limited Environment Checker run ... ",
       "commands": [],
       "verified": false,
       "confirmedOn": null,
       "observed": "Seen live 10 Oct 2026 on a Local Identity Deploy pass: ...",
-      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-prep-active-directory?view=azloc-2609#considerations-for-large-scale-deployments"
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-prep-active-directory?view=azloc-2611#considerations-for-large-scale-deployments"
     }
   }
 }
@@ -457,7 +457,7 @@ The cluster resource, read once a deployment settings object exists (before that
 
 ```json
 { "verified": false, "status": "notstarted", "phase": "waiting", "level": "warn", "label": "Waiting for content", "ran": false,
-  "nextAction": { "text": "The update package must be added (SBE side-load): ...", "guide": "https://learn.microsoft.com/azure/azure-local/update/solution-builder-extension?view=azloc-2610#the-additionalcontentrequired-update-state" },
+  "nextAction": { "text": "The update package must be added (SBE side-load): ...", "guide": "https://learn.microsoft.com/azure/azure-local/update/solution-builder-extension?view=azloc-2611#the-additionalcontentrequired-update-state" },
   "summary": { "state": "AppliedSuccessfully", "healthState": "Success", "currentVersion": "12.2610.1004.50", "currentSbeVersion": "", "currentOemVersion": "",
     "hardwareModel": "", "oemFamily": "", "lastChecked": "2026-11-06T09:14:00Z", "lastUpdated": null,
     "checkCounts": { "total": 3, "failed": 2, "critical": 0, "error": 0, "warning": 0, "informational": 2, "other": 0 },
@@ -473,7 +473,7 @@ The cluster resource, read once a deployment settings object exists (before that
 | --- | --- |
 | `verified` | `false`: the track is built from the Microsoft Learn reference; the readiness checks and `AdditionalContentRequired` were seen on a live cluster, a whole update was not yet followed. |
 | `status` | `notstarted`, `running`, `success` or `error`. `success` only when a real update run finished `Succeeded` (or `summary.lastUpdated` is set together with an update in state `Installed` when Azure keeps no run) and `summary.state` is `AppliedSuccessfully`. A summary that says `AppliedSuccessfully` with no run is `notstarted`. |
-| `phase` | `idle`, `available` (an update is ready or `UpdateAvailable`), `waiting` (`AdditionalContentRequired` or `HasPrerequisite`: it cannot start yet), `preparing`, `installing`, `failed` or `attention`. |
+| `phase` | `idle`, `available` (an update is ready or `UpdateAvailable`), `waiting` (`AdditionalContentRequired`, `HasPrerequisite` or `PendingOEMValidation`: it cannot start yet), `preparing`, `installing`, `failed` or `attention`. |
 | `level` | The colour of the Update tab: `neutral`, `run`, `warn`, `error` or `ok`. The worst of `status`/`phase` and the failed checks: Critical and Error checks give `error`, Warning checks `warn`, Informational checks nothing. |
 | `label` | The plain-word verdict, for example `No update has run`, `Waiting for content`, `Installing 12.2611.1002.10`, `Update failed`, `Update succeeded (12.2611.1002.10)`. |
 | `ran` | `true` when an update run exists, or `summary.lastUpdated` is set with an installed update. |

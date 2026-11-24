@@ -13,7 +13,7 @@
       ],
       "available": "Bootstrap logs exist once the Azure Stack HCI OS is installed and bootstrap/Arc registration starts. Arc agent and extension logs exist from Arc agent install onward. Before the OS is installed, the maintenance environment keeps its logs under /var/log; get them through the Configurator app support package.",
       "access": "WinRM to the node IP (NTLM): add the node to the workstation's TrustedHosts or use HTTPS 5986, and always pass -Credential. A non-built-in local admin may also need LocalAccountTokenFilterPolicy=1 on the node (not stated for Azure Local). Alternatives: the Configurator app support package, or RDP (Learn's route for the bootstrap logs).",
-      "source": "https://learn.microsoft.com/azure/azure-local/deploy/troubleshoot-simplified-machine-provisioning?view=azloc-2609",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/troubleshoot-simplified-machine-provisioning?view=azloc-2611",
       "verified": false
     },
     {
@@ -28,7 +28,7 @@
       ],
       "available": "Bootstrap logs exist once the Azure Stack HCI OS is installed and bootstrap/Arc registration starts. Arc agent and extension logs exist from Arc agent install onward.",
       "access": "Nodes are normally still in a workgroup at this point, so use WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential. Use Kerberos by host name only if the nodes were joined to the domain beforehand.",
-      "source": "https://learn.microsoft.com/azure/azure-local/manage/troubleshoot-deployment-configurator-app?view=azloc-2609",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/troubleshoot-deployment-configurator-app?view=azloc-2611",
       "verified": false
     },
     {
@@ -46,7 +46,7 @@
         "Collect-ArcBootstrapSupportLogs (on the node, when a failure persists: collects the logs to share)"
       ],
       "access": "WinRM to the node IP (NTLM): add the node to the workstation's TrustedHosts or use HTTPS 5986, and always pass -Credential. A non-built-in local admin may also need LocalAccountTokenFilterPolicy=1 on the node. RDP or the console also work at this stage.",
-      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-without-azure-arc-gateway?view=azloc-2609#handle-preinstalled-or-outdated-os-images-during-azure-arc-registration",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-without-azure-arc-gateway?view=azloc-2611",
       "verified": false,
       "observed": "Seen live 10 Oct 2026 on a 2609 Local Identity node (read later, during Deploy, as the deployment local admin): C:\\Windows\\System32\\Bootstrap\\Logs holds setup.log, arcInstallLog-*.txt and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.*. Not yet checked during an Arc registration itself or with the built-in Administrator. Read live 11 Oct 2026 on an OEM-image node (module AzureEdgeBootstrap 1.0.0): the cmdlet names Get-ArcBootstrapStatus and Get-ArcZeroDaySolutionUpdateStatus, their { Version, Response } shape and the step names (Update: Scan, Download, Install; Bootstrap: NetworkConfig, RemoteConfig, WebProxy, TimeServer, HostName, ArcConfiguration with ArtifactsUpload, ConnectivityValidation, ArcRegistration, ArcExtensionInstall). Status values other than NotStarted, the Errors[] entry shape and Collect-ArcBootstrapSupportLogs are from Learn only."
     },
@@ -65,7 +65,7 @@
         "Collect-ArcBootstrapSupportLogs (on the node, when a failure persists: collects the logs to share)"
       ],
       "access": "The nodes are normally still in a workgroup: WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential. Kerberos by host name only if the nodes were joined to the domain beforehand.",
-      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-without-azure-arc-gateway?view=azloc-2609#handle-preinstalled-or-outdated-os-images-during-azure-arc-registration",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-without-azure-arc-gateway?view=azloc-2611",
       "verified": false,
       "observed": "Seen live 10 Oct 2026 on a 2609 Local Identity node (read later, during Deploy, as the deployment local admin): C:\\Windows\\System32\\Bootstrap\\Logs holds setup.log, arcInstallLog-*.txt and AzStackHci.ArcConnection.Debug.log\\PowerShell_transcript.*. Not yet checked during an Arc registration itself or with the built-in Administrator. Read live 11 Oct 2026 on an OEM-image node (module AzureEdgeBootstrap 1.0.0): the cmdlet names Get-ArcBootstrapStatus and Get-ArcZeroDaySolutionUpdateStatus, their { Version, Response } shape and the step names (Update: Scan, Download, Install; Bootstrap: NetworkConfig, RemoteConfig, WebProxy, TimeServer, HostName, ArcConfiguration with ArtifactsUpload, ConnectivityValidation, ArcRegistration, ArcExtensionInstall). Status values other than NotStarted, the Errors[] entry shape and Collect-ArcBootstrapSupportLogs are from Learn only."
     },
@@ -81,9 +81,9 @@
       ],
       "available": "Environment Checker output is written to C:\\CloudDeployment\\Logs when validation runs as part of deployment, and each run overwrites the file. Standalone checker runs write to $HOME\\.AzStackHci instead. Learn documents C:\\MASLogs\\LcmEceLiteLogs for upgrade validation only; for deployment it is unverified. The mandatory Arc extensions (AzureEdgeDeviceManagement, AzureEdgeLifecycleManager, AzureEdgeRemoteSupport, AzureEdgeTelemetryAndDiagnostics) install during Validate; their logs are under C:\\ProgramData\\GuestConfig\\extension_logs on each node.",
       "access": "WinRM to the seed node by IP: TrustedHosts or HTTPS 5986, -Credential, and an account in local Administrators. CredSSP is not needed.",
-      "source": "https://learn.microsoft.com/azure/azure-local/manage/use-environment-checker?view=azloc-2609",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/use-environment-checker?view=azloc-2611",
       "verified": false,
-      "timing": "Learn (ARM template flow, 12.2609 latest): Validate mode takes about 10 minutes (the portal wizard and the rack aware template say about 15 minutes for one or two machines, longer for bigger deployments). Do not select Try again while validation tasks are running."
+      "timing": "Learn (ARM template flow, 12.2611 latest): Validate mode takes about 10 minutes (the portal wizard and the rack aware template say about 15 minutes for one or two machines, longer for bigger deployments). Do not select Try again while validation tasks are running."
     },
     {
       "phase": "validation",
@@ -97,9 +97,9 @@
       ],
       "available": "Environment Checker output is written to C:\\CloudDeployment\\Logs when validation runs as part of deployment, and each run overwrites the file. C:\\MASLogs\\LcmEceLiteLogs is documented for upgrade validation only. The mandatory Arc extensions (AzureEdgeDeviceManagement, AzureEdgeLifecycleManager, AzureEdgeRemoteSupport, AzureEdgeTelemetryAndDiagnostics) install during Validate; their logs are under C:\\ProgramData\\GuestConfig\\extension_logs on each node.",
       "access": "Nodes are not yet joined to the domain unless that was done before deployment, so use WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential.",
-      "source": "https://learn.microsoft.com/azure/azure-local/manage/use-environment-checker?view=azloc-2609",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/use-environment-checker?view=azloc-2611",
       "verified": false,
-      "timing": "Learn (ARM template flow, 12.2609 latest): Validate mode takes about 10 minutes (the portal wizard and the rack aware template say about 15 minutes for one or two machines, longer for bigger deployments). Do not select Try again while validation tasks are running."
+      "timing": "Learn (ARM template flow, 12.2611 latest): Validate mode takes about 10 minutes (the portal wizard and the rack aware template say about 15 minutes for one or two machines, longer for bigger deployments). Do not select Try again while validation tasks are running."
     },
     {
       "phase": "deployment",
@@ -113,11 +113,11 @@
       ],
       "available": "During and after cloud deployment on the seed node (watch progress from the seed machine). Learn does not name the deployment log files or describe how they rotate. The limited and full Environment Checker runs happen first.",
       "access": "WinRM to the seed node by IP: TrustedHosts or HTTPS 5986, -Credential, and an account in local Administrators. Fallbacks (both are Azure writes, so opt-in only): Arc run command (preview, output capped at 4 KB, needs runCommands/write) or Arc SSH (needs Owner or Contributor and sshd running on the node).",
-      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-local-identity-with-key-vault-template?view=azloc-2609",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-local-identity-with-key-vault-template?view=azloc-2611",
       "verified": true,
       "observed": "Seen live 10 Oct 2026 on a Local Identity Deploy pass: logs written to C:\\CloudContent\\MASLogs, C:\\MASLogs and C:\\Observability; C:\\CloudDeployment\\Logs did not exist yet ~10 min in.",
       "confirmedOn": "Azure Local 2609 (Local Identity)",
-      "timing": "Learn (12.2609 latest): once Deploy mode starts, a limited Environment Checker run and then a full Environment Checker run happen first, then cloud deployment starts; after a few minutes you can watch it in the portal. The whole deployment takes 2.5 to 3 hours and several steps take 40-50 minutes or more. Begin cloud deployment takes 45-60 minutes. The longest step is Deploy Moc and ARB Stack: 40-45 minutes. Azure can lag behind the node: the step list may say Deploy not started while the seed node is already working (Sonar labels that)."
+      "timing": "Learn (12.2611 latest): once Deploy mode starts, a limited Environment Checker run and then a full Environment Checker run happen first, then cloud deployment starts; after a few minutes you can watch it in the portal. The whole deployment takes 2.5 to 3 hours and several steps take 40-50 minutes or more. Begin cloud deployment takes 45-60 minutes. The longest step is Deploy Moc and ARB Stack: 40-45 minutes. Azure can lag behind the node: the step list may say Deploy not started while the seed node is already working (Sonar labels that)."
     },
     {
       "phase": "deployment",
@@ -131,10 +131,10 @@
       ],
       "available": "During and after cloud deployment on the seed node. Learn does not name the deployment log files or describe how they rotate.",
       "access": "Use WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential until the domain join completes. After that, Kerberos by host name with the LCM user works without TrustedHosts.",
-      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-prep-active-directory?view=azloc-2609#considerations-for-large-scale-deployments",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-prep-active-directory?view=azloc-2611#considerations-for-large-scale-deployments",
       "verified": false,
       "observed": "Seen live 10 Oct 2026 on a Local Identity Deploy pass: logs written to C:\\CloudContent\\MASLogs, C:\\MASLogs and C:\\Observability; C:\\CloudDeployment\\Logs did not exist yet ~10 min in.",
-      "timing": "Learn (12.2609 latest): once Deploy mode starts, a limited Environment Checker run and then a full Environment Checker run happen first, then cloud deployment starts; after a few minutes you can watch it in the portal. The whole deployment takes 2.5 to 3 hours and several steps take 40-50 minutes or more. Begin cloud deployment takes 45-60 minutes. The longest step is Deploy Moc and ARB Stack: 40-45 minutes. Azure can lag behind the node: the step list may say Deploy not started while the seed node is already working (Sonar labels that)."
+      "timing": "Learn (12.2611 latest): once Deploy mode starts, a limited Environment Checker run and then a full Environment Checker run happen first, then cloud deployment starts; after a few minutes you can watch it in the portal. The whole deployment takes 2.5 to 3 hours and several steps take 40-50 minutes or more. Begin cloud deployment takes 45-60 minutes. The longest step is Deploy Moc and ARB Stack: 40-45 minutes. Azure can lag behind the node: the step list may say Deploy not started while the seed node is already working (Sonar labels that)."
     },
     {
       "phase": "post-deployment",
@@ -147,7 +147,7 @@
       ],
       "available": "The logs stay on the nodes after deployment. On-demand collection (Send-DiagnosticData or the portal's Send logs) works once the AzureEdgeTelemetryAndDiagnostics extension is installed, and needs the Azure Stack HCI Administrator role. For deployment failures, use standalone collection with Send-AzStackHciDiagnosticData.",
       "access": "WinRM by IP with TrustedHosts (or HTTPS 5986) and -Credential. RDP is turned off after deployment. Learn lists Arc SSH (sshd enabled on each node) as the remote route for Local Identity clusters.",
-      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-local-identity-with-key-vault?view=azloc-2609#post-deployment-steps",
+      "source": "https://learn.microsoft.com/azure/azure-local/deploy/deployment-local-identity-with-key-vault?view=azloc-2611#post-deployment-steps",
       "verified": false
     },
     {
@@ -161,7 +161,7 @@
       ],
       "available": "The logs stay on the nodes after deployment. On-demand collection (Send-DiagnosticData or the portal's Send logs) needs the AzureEdgeTelemetryAndDiagnostics extension and the Azure Stack HCI Administrator role.",
       "access": "WinRM with Kerberos by host name and a domain account (no TrustedHosts needed). Connecting by IP falls back to NTLM and needs TrustedHosts or HTTPS. RDP is turned off after deployment.",
-      "source": "https://learn.microsoft.com/azure/azure-local/concepts/security-features?view=azloc-2609#local-built-in-user-accounts",
+      "source": "https://learn.microsoft.com/azure/azure-local/concepts/security-features?view=azloc-2611#local-built-in-user-accounts",
       "verified": false
     },
     {
@@ -178,10 +178,10 @@
       "commands": [
         "Start-MonitoringActionplanInstanceToComplete -ActionPlanInstanceID <id> (on a node, as the deployment user)",
         "Get-ActionPlanInstance -ActionPlanInstanceID <id> | Out-File log.txt (capture a failure)",
-        "Get-CauReport (Cluster-Aware Updating run details)"
+        "Get-CauReport -Detailed (Cluster-Aware Updating run details)"
       ],
       "access": "WinRM to the seed node by IP (TrustedHosts or HTTPS 5986, -Credential) or, once the nodes are domain-joined, Kerberos by host name. Sonar only reads.",
-      "source": "https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2?view=azloc-2609#troubleshoot-update-failures",
+      "source": "https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2?view=azloc-2611",
       "verified": false,
       "observed": "Built from Microsoft Learn and the REST reference only: unverified against a live run."
     },
@@ -199,10 +199,10 @@
       "commands": [
         "Start-MonitoringActionplanInstanceToComplete -ActionPlanInstanceID <id> (on a node, as the deployment user)",
         "Get-ActionPlanInstance -ActionPlanInstanceID <id> | Out-File log.txt (capture a failure)",
-        "Get-CauReport (Cluster-Aware Updating run details)"
+        "Get-CauReport -Detailed (Cluster-Aware Updating run details)"
       ],
       "access": "WinRM to the seed node by IP (TrustedHosts or HTTPS 5986, -Credential) or, once the nodes are domain-joined, Kerberos by host name. Sonar only reads.",
-      "source": "https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2?view=azloc-2609#troubleshoot-update-failures",
+      "source": "https://learn.microsoft.com/azure/azure-local/update/update-troubleshooting-23h2?view=azloc-2611",
       "verified": false,
       "observed": "Built from Microsoft Learn and the REST reference only: unverified against a live run."
     },
@@ -226,7 +226,7 @@
         "Sync-AzureStackHCI"
       ],
       "access": "WinRM to the existing seed node by IP or by host name (domain-joined: Kerberos). The incoming node is still in a workgroup until it is added; use TrustedHosts or HTTPS 5986 and -Credential for it.",
-      "source": "https://learn.microsoft.com/azure/azure-local/manage/add-server?view=azloc-2609",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/add-server?view=azloc-2611",
       "verified": false,
       "observed": "Built from Microsoft Learn and the REST reference only: unverified against a live run. Azure does not publish an update-run style resource for this operation in the REST reference; set track to add-node in the config and Sonar shows the Arc machine and the node log."
     },
@@ -250,7 +250,7 @@
         "Sync-AzureStackHCI"
       ],
       "access": "WinRM to the existing seed node by IP or by host name (domain-joined: Kerberos). The incoming node is still in a workgroup until it is added; use TrustedHosts or HTTPS 5986 and -Credential for it.",
-      "source": "https://learn.microsoft.com/azure/azure-local/manage/add-server?view=azloc-2609",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/add-server?view=azloc-2611",
       "verified": false,
       "observed": "Built from Microsoft Learn and the REST reference only: unverified against a live run. Azure does not publish an update-run style resource for this operation in the REST reference; set track to add-node in the config and Sonar shows the Arc machine and the node log."
     },
@@ -273,7 +273,7 @@
         "Get-VirtualDisk | Get-StorageJob"
       ],
       "access": "WinRM to a member node by host name (Kerberos) or by IP with TrustedHosts or HTTPS 5986 and -Credential. The node being repaired is reachable by IP only until it has rejoined.",
-      "source": "https://learn.microsoft.com/azure/azure-local/manage/repair-server?view=azloc-2609",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/repair-server?view=azloc-2611",
       "verified": false,
       "observed": "Built from Microsoft Learn and the REST reference only: unverified against a live run. Set track to repair in the config and Sonar shows the Arc machine and the node log."
     },
@@ -296,7 +296,7 @@
         "Get-VirtualDisk | Get-StorageJob"
       ],
       "access": "WinRM to a member node by host name (Kerberos) or by IP with TrustedHosts or HTTPS 5986 and -Credential. The node being repaired is reachable by IP only until it has rejoined.",
-      "source": "https://learn.microsoft.com/azure/azure-local/manage/repair-server?view=azloc-2609",
+      "source": "https://learn.microsoft.com/azure/azure-local/manage/repair-server?view=azloc-2611",
       "verified": false,
       "observed": "Built from Microsoft Learn and the REST reference only: unverified against a live run. Set track to repair in the config and Sonar shows the Arc machine and the node log."
     }
