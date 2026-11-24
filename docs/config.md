@@ -210,6 +210,7 @@ Sonar follows five files written by the other tools. Move one by changing the ke
 | ARM Validate and Deploy (`arm-deployment-events.jsonl`) | `deployment.events_directory` | `armEventsPath` | the same events folder |
 | Solution update (`update-events.jsonl`) | `deployment.events_directory` | `updateEventsPath` | the same events folder |
 | Pre-cluster verification (`precluster-verification-events.jsonl`) | `deployment.pre_cluster_verification_report_directory` | `verificationEventsPath` | `arm-report\verification\live` next to the evidence folder |
+| Pre-cluster verification Plan (`precluster-plan-events.jsonl`) | `deployment.events_directory` | none: Sonar looks in the events folder of the other feeds, then in the folder of `verificationEventsPath` | the same events folder |
 | Hardware discovery (`<ServiceTag>.json`, `discovery-summary.json`) | `provisioning.simplified.evidence_path` (the `discovery` folder in it) | `discoveryPath` | the `discovery` folder in the evidence folder (on the simplified route ZTP's default evidence folder; on the ISO route only when `evidence_path` is set) |
 
 `deployment.events_directory` is shared: the toolkit's OS configuration and ARM runs write there by default and Sonar reads there by default, so setting it in the master file moves both sides at once. A toolkit run given `-ReportDirectory` writes its feed into that report directory unless the key is set; set the key when a pipeline passes `-ReportDirectory`. With a config file, for example:

@@ -1180,6 +1180,10 @@ function Start-AzlSonarServer {
             # The toolkit's pre-cluster verification gate event file (JSON Lines): the Verification view and its log lines.
             $workerSpecs.Add(@{ Name = 'VerificationEvents'; Command = 'Invoke-AzlSonarVerificationEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
         }
+        if ($plan.verificationEvents -and (Resolve-AzlSonarVerificationPlanFile -Config $config)) {
+            # The gate's Plan feed (precluster-plan-events.jsonl in the events folder): planned, informational, never a verdict.
+            $workerSpecs.Add(@{ Name = 'VerificationPlanEvents'; Command = 'Invoke-AzlSonarVerificationPlanEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
+        }
         if ($InfrastructureFile) {
             # Logs a notice when the master file's node set changes (restart Sonar to track it).
             $workerSpecs.Add(@{ Name = 'InfrastructureWatch'; Command = 'Invoke-AzlSonarInfrastructureWatchLoop'; Arguments = @{ Shared = $shared; Config = $config; Path = $config.sourcePath } })

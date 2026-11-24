@@ -123,7 +123,7 @@ function Add-AzlSonarUpdateEvent {
     $run = @{}
     if ($newRun) {
         $run = @{ RunId = $e.runId; Mode = $e.mode; Cluster = $e.cluster; Started = $e.timestamp; Completed = $null; ExitCode = $null; Failed = $false
-            Events = 0; Stale = 0; LastEventAt = $e.timestamp; Update = ''; Version = ''; Message = ''; NextAction = ''; Order = [string[]]@(); Steps = @{} }
+            Events = 0; Stale = 0; LastEventAt = $e.timestamp; Update = ''; Version = ''; Verdict = ''; Message = ''; NextAction = ''; Order = [string[]]@(); Steps = @{} }
     }
     else { foreach ($k in $old.Keys) { $run[$k] = $old[$k] } }
     $run['Events'] = [int]$run['Events'] + 1
@@ -132,9 +132,12 @@ function Add-AzlSonarUpdateEvent {
     if ($e.cluster -and -not $run['Cluster']) { $run['Cluster'] = $e.cluster }
     foreach ($k in 'update', 'updateName') { if ($e.data.ContainsKey($k) -and $e.data[$k]) { $run['Update'] = [string]$e.data[$k] } }
     if ($e.data.ContainsKey('version') -and $e.data['version']) { $run['Version'] = [string]$e.data['version'] }
-    # The run's message and next action: the newest error or next action that says something (a closing RunCompleted with no
-    # text keeps the failure that came before it).
-    if (($e.level -eq 'Error' -or $e.nextAction) -and $e.evidence) { $run['Message'] = $e.evidence }
+    # The Check script's own verdict (UpToDate, UpdateAvailable, AttentionNeeded ...) comes with its closing line.
+    if ($e.data.ContainsKey('verdict') -and $e.data['verdict']) { $run['Verdict'] = [string]$e.data['verdict'] }
+    # The run's message and next action: the newest error or next action that says something. A closing RunCompleted or RunFailed
+    # only restates the verdict, so it never replaces what an earlier line said (the failed update, the environment state).
+    $closing = $e.state -in 'RunCompleted', 'RunFailed'
+    if (($e.level -eq 'Error' -or $e.nextAction) -and $e.evidence -and (-not $closing -or -not $run['Message'])) { $run['Message'] = $e.evidence }
     if ($e.nextAction) { $run['NextAction'] = $e.nextAction }
     switch ($e.state) {
         'RunCompleted' {
@@ -142,10 +145,19 @@ function Add-AzlSonarUpdateEvent {
             if ($e.data.ContainsKey('exitCode') -and "$($e.data['exitCode'])" -match '^-?\d+$') { $run['ExitCode'] = [int]$e.data['exitCode'] }
             if ($e.level -eq 'Error' -or ($null -ne $run['ExitCode'] -and [int]$run['ExitCode'] -ne 0)) { $run['Failed'] = $true }
         }
-        'RunFailed' { $run['Completed'] = $e.timestamp; $run['Failed'] = $true }
+        'RunFailed' {
+            $run['Completed'] = $e.timestamp; $run['Failed'] = $true
+            # The toolkit's RunFailed carries the exit code too (1: the cluster could not be read, or the Check's verdict is AttentionNeeded; 2: a value is wrong).
+            if ($e.data.ContainsKey('exitCode') -and "$($e.data['exitCode'])" -match '^-?\d+$') { $run['ExitCode'] = [int]$e.data['exitCode'] }
+        }
     }
-    if ($e.state -notin 'RunStarted', 'RunCompleted', 'RunFailed' -or $e.step) {
+    # The run's own lines are the run, not a stage of it (the toolkit writes them with step 'Run').
+    if ($e.state -notin 'RunStarted', 'RunCompleted', 'RunFailed' -or ($e.step -and $e.step -ne 'Run')) {
         $id = if ($e.step) { $e.step } else { $e.state }
+        # The toolkit writes one 'Update' line per update it found or planned: each update is its own stage, not the last one over the others.
+        $updateOf = ''
+        foreach ($k in 'updateName', 'update') { if ($e.data.ContainsKey($k) -and $e.data[$k]) { $updateOf = [string]$e.data[$k]; break } }
+        if ($id -eq 'Update' -and $updateOf) { $id = "Update $updateOf" }
         $steps = @{}; foreach ($k in $run['Steps'].Keys) { $steps[$k] = $run['Steps'][$k] }
         $order = [System.Collections.Generic.List[string]]::new([string[]]@($run['Order']))
         $prev = if ($steps.ContainsKey($id)) { $steps[$id] } else { $null }
@@ -202,7 +214,7 @@ function Get-AzlSonarUpdateEventState {
     .DESCRIPTION
         { configured, hasData, status (notstarted|running|success|error), phase (preparing, installing, failed, available,
         idle), level (run|error|ok|neutral), label, plan (true for a Check, Plan or WhatIf run: nothing was installed),
-        run{runId, mode, cluster, started, completed, exitCode, lastEventAt, events, stale, update, version, message,
+        run{runId, mode, verdict, cluster, started, completed, exitCode, lastEventAt, events, stale, update, version, message,
         nextAction}, tree (one step per stage), counts }.
     #>
     [CmdletBinding()]
@@ -230,18 +242,36 @@ function Get-AzlSonarUpdateEventState {
     $anyError = @($tree | Where-Object { $_.status -eq 'error' }).Count -gt 0
     $done = $null -ne $run['Completed']
     $status = if ($done) { if ([bool]$run['Failed'] -or $anyError) { 'error' } else { 'success' } } elseif ($anyError) { 'error' } else { 'running' }
-    $phase = switch ($status) { 'error' { 'failed' } 'running' { $(if ($plan) { 'preparing' } else { 'installing' }) } default { $(if ($plan) { $(if ($run['Update']) { 'available' } else { 'idle' }) } else { 'idle' }) } }
-    $level = switch ($status) { 'error' { 'error' } 'running' { 'run' } 'success' { 'ok' } default { 'neutral' } }
+    # The Check script's verdict says more than the stages do: an update that is running on the cluster is not "available".
+    $verdict = [string]$run['Verdict']
+    # An install the script submitted (it does not wait): the update is now running on the cluster and Azure shows its steps.
+    $submitted = -not $plan -and $status -eq 'success' -and @($run['Steps'].Values | Where-Object { $_['State'] -eq 'UpdateStarted' }).Count -gt 0
+    # An update that is already running when the script looks (Check: verdict UpdateRunning, UpdateFollow lines; the install script: UpdateAlreadyRunning) is running, whatever the mode.
+    $already = $status -eq 'success' -and ($verdict -eq 'UpdateRunning' -or @($run['Steps'].Values | Where-Object { $_['State'] -in 'UpdateAlreadyRunning', 'UpdateFollow' }).Count -gt 0)
+    $running = $already -or $submitted
+    $phase = switch ($status) { 'error' { 'failed' } 'running' { $(if ($plan) { 'preparing' } else { 'installing' }) } default { $(if ($running) { 'installing' } elseif ($plan) { $(if ($run['Update']) { 'available' } else { 'idle' }) } else { 'idle' }) } }
+    # A finished Check or WhatIf run that found an update is neutral (Azure's own "Update available" is too): the update waits for an
+    # order. One that found nothing to do is ok.
+    $offered = $plan -and $status -eq 'success' -and [bool]$run['Update']
+    $level = switch ($status) { 'error' { 'error' } 'running' { 'run' } 'success' { $(if ($running) { 'run' } elseif ($offered) { 'neutral' } else { 'ok' }) } default { 'neutral' } }
     $what = if ($run['Update']) { "$($run['Update'])$(if ($run['Version'] -and $run['Version'] -ne $run['Update']) { " ($($run['Version']))" })" } else { 'the solution update' }
     $label = switch ($status) {
         'running' { $(if ($plan) { "Checking $what (toolkit $mode run, read from the update events)" } else { "Installing $what (read from the update events)" }) }
         'error' { "The toolkit's update run failed$(if ($run['Message']) { ": $($run['Message'])" })" }
-        default { $(if ($plan) { "Plan complete for $what; nothing was installed (toolkit $mode run)" } else { "Update run complete for $what" }) }
+        default {
+            if ($submitted) { "Update $what was started; the toolkit script does not wait: Azure and the cluster show its progress" }
+            elseif ($running) { "An update is running on the cluster ($what); the toolkit's $mode run started nothing" }
+            elseif (-not $plan) { "Update run complete for $what" }
+            elseif ($mode -eq 'Check' -and $verdict -eq 'AdditionalContentRequired') { "An update waits for SBE content from the hardware vendor ($what); nothing was installed (toolkit Check run)" }
+            elseif ($mode -eq 'Check' -and $offered) { "Update available: $what; nothing was installed (toolkit Check run)" }
+            elseif ($mode -eq 'Check') { "Up to date: no update is offered; nothing was installed (toolkit Check run)" }
+            else { "Plan complete for $what; nothing was installed (toolkit $mode run)" }
+        }
     }
     return [ordered]@{
         configured = $configured; hasData = $true; status = $status; phase = $phase; level = $level; label = (Protect-AzlSonarText -Text $label); plan = $plan
         run = [ordered]@{
-            runId = [string]$run['RunId']; mode = $mode; cluster = [string]$run['Cluster']; started = [string]$run['Started']; completed = $run['Completed']; exitCode = $run['ExitCode']
+            runId = [string]$run['RunId']; mode = $mode; verdict = [string]$run['Verdict']; cluster = [string]$run['Cluster']; started = [string]$run['Started']; completed = $run['Completed']; exitCode = $run['ExitCode']
             lastEventAt = [string]$run['LastEventAt']; events = [int]$run['Events']; stale = [int]$run['Stale']; update = [string]$run['Update']; version = [string]$run['Version']
             message = (Protect-AzlSonarText -Text ([string]$run['Message'])); nextAction = (Protect-AzlSonarText -Text ([string]$run['NextAction']))
         }

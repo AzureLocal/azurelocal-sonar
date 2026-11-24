@@ -106,6 +106,8 @@ With the master file Sonar finds the event file by the toolkit's own rule: `depl
 
 **What Sonar shows:** the **Verification** mode: the verdict banner (Running, Pass, Fail or Expired), the counts by status, the checks by category with each failing check's remedy, and a skipped check called out as blocking. The `[verify]` lines are in the log pane. [Details](./verification.md).
 
+**Before the gate has run:** `-Mode Plan` writes `precluster-plan-events.jsonl` into the events folder and the Verification tile reads *Planned · 91 of 100 checks* (grey): which checks would run, no verdict. See [the Plan](./verification.md#the-plan-before-the-gate-has-run).
+
 **What to expect:** the checks arrive as the gate finishes them; the banner turns green or red at `RunCompleted`. A pass older than its `expiresUtc` turns into *Pass expired*: run the gate again before Validate.
 
 **Access:** read access to the gate's report directory. `-Monitor Verification` needs no Azure sign-in and reads no node.

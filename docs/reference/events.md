@@ -24,6 +24,26 @@ Sonar's replay shows only the kinds above, and a tool that wants them shown in t
 The step tree a page needs is described in the schema (`step`: `id`, `name`, `status`, `start`, `end`, `durationSeconds`,
 `errors[]`, `children[]`; `status` is one of `notstarted`, `running`, `success`, `error`, `skipped`, `unknown`).
 
+## The toolkit's feeds in the events folder (input to Sonar)
+
+These are not Sonar's recording format above. They are the files azurelocal-toolkit appends to the one events folder (`deployment.events_directory`, else `%ProgramData%\AzureLocalToolkit\<cluster.name>\events`) and Sonar follows, read only. They share one envelope (`toolkitEvent` in the schema): `timestamp`, `node` (`*` for the run), `stage`, `step`, `state`, `evidence`, `level`, `nextAction`, `runId`, `mode`, `cluster`, then the fields of the event (`exitCode`, `result`, `verdict`, `updateName`, `version`, `applies`, `total`, `blocking`).
+
+| File | Written by | `stage` / `mode` | Sonar shows |
+| --- | --- | --- | --- |
+| `update-events.jsonl` | `Get-AvailableSolutionUpdate.ps1`; `Start-AzureLocalSolutionUpdate.ps1` | `SolutionUpdate` / `Check`, `WhatIf` or `Install` | The **Update** tile and mode with no Azure: a Check or `-WhatIf` run as *update available / up to date, nothing was installed*, an install as started. [Stages](../stages.md#update). |
+| `precluster-plan-events.jsonl` | `Invoke-AzureLocalPreClusterVerification.ps1 -Mode Plan` | `PreClusterVerification` / `Plan` | The **Verification** tile as *Planned*: which checks would run. A plan has **no verdict** and is never shown as Fail. [Verification](../verification.md#the-plan-before-the-gate-has-run). |
+
+`update-events.jsonl`: `RunStarted` (step `Run`), `EnvironmentRead` (step `Environment`), `DiscoveryPolled` (step `Discovery`), one `Update<Next>` (`UpdateStart`, `UpdateFollow`, `UpdateImportSbe`, `UpdateWouldStart`, `UpdateStarted` ...) or `UpdateAttention` line per update (step `Update`, with `updateName` and `version`), `EnvironmentAttention`, then `RunCompleted`, or `RunFailed`, with `exitCode` and, for a Check, `verdict` (`UpToDate`, `UpdateAvailable`, `AdditionalContentRequired`, `UpdateRunning`, `AttentionNeeded`).
+
+`precluster-plan-events.jsonl`: `RunStarted` (step `Run`), one `CategoryPlanned` per category (step `azure`, `identity`, `nodes`, `network`, `storage`, `readiness`; `applies`, `total`, `blocking`), then `RunCompleted` (`exitCode` 0, `result` `Planned`). The gate's own file, `precluster-verification-events.jsonl`, is a different feed (it has `runId`, `seq`, `ts`, `type`, `checkId`, `status` and a verdict) and is described in [Verification](../verification.md).
+
+```json
+{"timestamp":"2026-11-24T21:16:07.2388664Z","node":"*","stage":"SolutionUpdate","step":"Run","state":"RunStarted","evidence":"Checking the update state of cluster 'clus01' (read only; nothing is started or changed).","level":"Info","nextAction":"","runId":"df286b74e419","mode":"Check","cluster":"clus01","result":"Running"}
+{"timestamp":"2026-11-24T21:16:13.8195578Z","node":"*","stage":"PreClusterVerification","step":"azure","state":"CategoryPlanned","evidence":"23 of 24 checks apply (22 blocking).","level":"Info","nextAction":"","runId":"afe9c07e45d1","mode":"Plan","cluster":"clus01","applies":23,"blocking":22,"total":24}
+```
+
+Sonar's tests read the toolkit's real output of both feeds (`tests/fixtures/toolkit-events`) and validate every line against `toolkitEvent`.
+
 ## A minimal feed
 
 ```json

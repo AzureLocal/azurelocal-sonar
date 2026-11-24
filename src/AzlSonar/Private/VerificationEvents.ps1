@@ -536,7 +536,9 @@ function Get-AzlSonarVerificationState {
         word, run{runId, started, completed, lastEventAt, events, stale, schema, fileHash, currentFileHash, fileMatch, expiresUtc, expiresInSeconds},
         counts{Passed, Failed, Warning, Skipped, NotApplicable, Fixed, Running, ...}, total, reportedCounts, countsMismatch,
         blockers (checks that block), skippedBlocking, categories[{id, name, status, counts, checks[]}] (known order; failed
-        checks first inside a category), attention[] (the blocking checks), warnings[], guide }.
+        checks first inside a category), attention[] (the blocking checks), warnings[], guide, plan{configured, hasData, status
+        (notplanned|planning|planned|incomplete), applies, total, blocking, categories[], ...} (the gate's Plan: no verdict, never a Fail;
+        Get-AzlSonarVerificationPlanState) }.
         Running: the run has no RunCompleted line. Pass with expiresUtc in the past: expired. A Pass verdict while a check
         blocks is shown as fail (the verdict and the checks disagree: the gate is never shown green by accident). Started with
         -InfrastructureFile, a completed run whose fileHash is not the SHA-256 of that file is otherfile ("not for this file"),
@@ -690,5 +692,7 @@ function Get-AzlSonarVerificationState {
         attention       = $attention
         warnings        = $warnings.ToArray()
         guide           = $script:AzlSonarVerifyGuide
+        # The gate's PLAN (precluster-plan-events.jsonl; VerificationPlanEvents.ps1): which checks would run. Planned, informational, never a verdict.
+        plan            = (Get-AzlSonarVerificationPlanState -Store $Store -Config $Config)
     }
 }

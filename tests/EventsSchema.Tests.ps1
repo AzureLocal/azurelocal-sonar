@@ -74,3 +74,62 @@ Describe 'events.schema.json' {
         $r.Cluster | Should -Be 'clus01'
     }
 }
+
+Describe 'events.schema.json: the toolkit feeds in the events folder (input to Sonar)' {
+    BeforeAll {
+        # A def of the schema as a schema of its own (Test-Json takes a root schema): the file's $defs travel with the $ref.
+        function script:Test-Def {
+            param([string]$Json, [string]$Def)
+            $doc = Get-Content -LiteralPath $script:Schema -Raw | ConvertFrom-Json -Depth 64 -AsHashtable
+            $root = [ordered]@{ '$schema' = $doc['$schema']; '$ref' = "#/`$defs/$Def"; '$defs' = $doc['$defs'] }
+            Test-Json -Json $Json -Schema (ConvertTo-Json -InputObject $root -Depth 64) -ErrorAction SilentlyContinue
+        }
+        $script:ToolkitFixtures = Join-Path -Path $PSScriptRoot -ChildPath 'fixtures/toolkit-events'
+    }
+
+    It 'describes every line the toolkit writes to update-events.jsonl and precluster-plan-events.jsonl (its real output)' {
+        $files = @(Get-ChildItem -LiteralPath $script:ToolkitFixtures -Filter '*.jsonl')
+        $files.Count | Should -BeGreaterThan 4
+        $bad = @()
+        foreach ($file in $files) {
+            foreach ($line in (Get-Content -LiteralPath $file.FullName | Where-Object { $_ })) { if (-not (Test-Def -Json $line -Def 'toolkitEvent')) { $bad += "$($file.Name): $line" } }
+        }
+        $bad | Should -BeNullOrEmpty
+    }
+
+    It 'rejects a line without the envelope and a level the toolkit never writes' -TestCases @(
+        @{ Json = '{"node":"*","stage":"SolutionUpdate","state":"RunStarted"}' }
+        @{ Json = '{"timestamp":"2026-11-24T21:16:07.2388664Z","node":"*","stage":"SolutionUpdate"}' }
+        @{ Json = '{"timestamp":"2026-11-24T21:16:07.2388664Z","node":"*","stage":"SolutionUpdate","state":"RunStarted","level":"Fatal"}' }
+    ) {
+        (Test-Def -Json $Json -Def 'toolkitEvent') | Should -BeFalse
+    }
+
+    It 'describes the plan Sonar serves and refuses to call a plan pass or fail' {
+        Import-SonarTestModule
+        $lines = @(Get-Content -LiteralPath (Join-Path $script:ToolkitFixtures 'gate-plan.precluster-plan-events.jsonl'))
+        $json = InModuleScope AzlSonar -Parameters @{ L = $lines } {
+            param($L)
+            $store = [hashtable]::Synchronized(@{})
+            foreach ($x in $L) { Add-AzlSonarVerificationPlanEvent -Store $store -Line $x }
+            ConvertTo-Json -InputObject (Get-AzlSonarVerificationPlanState -Store $store -Config ([pscustomobject]@{ armEventsPath = 'C:\ev\arm.jsonl' })) -Depth 8
+        }
+        (Test-Def -Json $json -Def 'verificationPlan') | Should -BeTrue
+        $failing = ($json | ConvertFrom-Json -AsHashtable); $failing['status'] = 'fail'
+        (Test-Def -Json (ConvertTo-Json -InputObject $failing -Depth 8) -Def 'verificationPlan') | Should -BeFalse
+        $withVerdict = ($json | ConvertFrom-Json -AsHashtable); $withVerdict['verdict'] = 'Pass'
+        (Test-Def -Json (ConvertTo-Json -InputObject $withVerdict -Depth 8) -Def 'verificationPlan') | Should -BeFalse
+    }
+
+    It 'describes the update events Sonar serves' {
+        Import-SonarTestModule
+        $lines = @(Get-Content -LiteralPath (Join-Path $script:ToolkitFixtures 'check-available.update-events.jsonl'))
+        $json = InModuleScope AzlSonar -Parameters @{ L = $lines } {
+            param($L)
+            $store = [hashtable]::Synchronized(@{})
+            foreach ($x in $L) { Add-AzlSonarUpdateEvent -Store $store -Line $x }
+            ConvertTo-Json -InputObject (Get-AzlSonarUpdateEventState -Store $store -Config ([pscustomobject]@{ updateEventsPath = 'x' })) -Depth 8
+        }
+        (Test-Def -Json $json -Def 'updateEventsState') | Should -BeTrue
+    }
+}

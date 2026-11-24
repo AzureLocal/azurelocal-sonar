@@ -7,6 +7,7 @@ Before the toolkit submits Validate, its **pre-cluster verification gate** check
 | `precluster-verification-events.jsonl` | One JSON object per line: the run starting, every check as it finishes, the run completing with its verdict. | **Follows it** (local, read-only). |
 | `report.json` | The finished report, with the file hash the verdict is for. | Not read. |
 | `summary.md` | The same in words, for a person. | Not read. |
+| `precluster-plan-events.jsonl` | Written by `-Mode Plan` only, into the **events folder** (`deployment.events_directory`, else `<ProgramData>\AzureLocalToolkit\<cluster.name>\events`; the report directory when the run is given `-ReportDirectory` without that setting). One event per category of the plan. A plan reads nothing and has **no verdict**. | **Follows it** as the gate's *Plan* ([below](#the-plan-before-the-gate-has-run)). |
 
 Sonar follows the events file and shows it as the **Verification** tile and mode, between **OS configuration** and **Validate**. The mode answers one question: *can the cluster deployment start, and if not, what blocks it?*
 
@@ -18,6 +19,25 @@ Sonar follows the events file and shows it as the **Verification** tile and mode
 - **The checks, by category.** Azure, Identity, Nodes, Network, Storage, Readiness; inside a category the failed checks come first. Each check shows its status, the machine it ran on, what was found (`message`), what to do (`remedy`) and the `source` of the rule. A source that is an `https` link to a documentation site (learn.microsoft.com, azurelocal.cloud, github.com) is a link; anything else is shown as text.
 - **Skipped is its own state.** A **Skipped** check is not *Not applicable*. It means the gate could not check it, so it cannot pass: it is marked *Skipped: blocks the gate*, counted apart, and keeps the verdict at Fail. A *Not applicable* check is grey and does not block.
 - **The log pane.** Each event is a line tagged `[verify]` (file `verification-events`) with the event's own time. A Failed check is an error line; Skipped and Warning are warning lines.
+
+## The Plan, before the gate has run
+
+`Invoke-AzureLocalPreClusterVerification.ps1 -Mode Plan` lists the checks that apply to this environment without reading anything. Besides `plan.json` and `plan.md` it appends the plan to `precluster-plan-events.jsonl` in the shared events folder, in the envelope every toolkit feed uses (`timestamp`, `node` `*`, `stage` `PreClusterVerification`, `step`, `state`, `evidence`, `level`, `nextAction`, `runId`, `mode` `Plan`, `cluster`, then the fields of the event):
+
+| `state` (`step`) | Meaning |
+| --- | --- |
+| `RunStarted` (`Run`) | The plan starts. |
+| `CategoryPlanned` (the category: `azure`, `identity`, `nodes`, `network`, `storage`, `readiness`) | One per category: `applies` (checks that apply to this environment), `total` (checks in the category) and `blocking` (checks that apply and block the gate). |
+| `RunCompleted` (`Run`) | `exitCode` 0 and `result` `Planned`; `evidence` is the one-line plan and `nextAction` the command that runs the checks. |
+
+It is a separate file from `precluster-verification-events.jsonl` because a plan has no verdict. Sonar shows it as **planned** and informational, and never as Pass or Fail:
+
+- **Before the gate has run** the tile reads *Planned · 91 of 100 checks* (grey), the summary box says *Planned: 91 of 100 checks apply (81 blocking). Nothing was read or checked; run the gate to get a verdict*, the steps list one row per category (*23 of 24 checks apply, 22 blocking*), and the panel *Plan: nothing was read, no verdict* carries the command that runs the checks.
+- **Once the gate has written a run** its verdict is the answer and the tile, banner and checks are the gate's. The plan stays as one line in the facts (*Plan: 91 of 100 checks apply*). A plan never replaces or hides a verdict, and a newer plan does not clear an earlier pass.
+- A plan still being written is *Planning*; one that reports a non-zero exit code or a `RunFailed` line is *plan incomplete*, a note that says it is not a gate result.
+- Like the gate's file, the latest plan run is shown (a `RunStarted` with another `runId` starts over; a line of an older run is counted and ignored), and the log pane gets one `[verify-plan]` line per event (file `verification-plan-events`).
+
+Sonar finds the file with no setting of its own: in the folder that holds the other toolkit feeds (`updateEventsPath`, else `armEventsPath`, else `osConfigEventsPath`), else in the folder of the gate's event file (`verificationEventsPath`) when the file is there.
 
 ## Which run is shown
 

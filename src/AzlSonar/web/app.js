@@ -1590,7 +1590,7 @@
   var VF_STATUS_KIND = { Failed: 'err', Skipped: 'skip', Running: 'run', Warning: 'warn', Fixed: 'ok', Passed: 'ok', NotApplicable: 'idle' };
   var VF_STATUS_TEXT = { Failed: 'Failed', Skipped: 'Skipped', Running: 'Running', Warning: 'Warning', Fixed: 'Fixed', Passed: 'Passed', NotApplicable: 'Not applicable' };
   var VF_VERDICT = { pass: { text: 'Pass', kind: 'ok' }, fail: { text: 'Fail', kind: 'err' }, running: { text: 'Running', kind: 'run' }, expired: { text: 'Expired', kind: 'err' }, otherfile: { text: 'Not for this file', kind: 'err' }, notstarted: { text: 'Waiting', kind: 'idle' } };
-  var VF_TREE_STATUS = { Failed: 'error', Skipped: 'skipped', Running: 'running', Warning: 'success', Fixed: 'success', Passed: 'success', NotApplicable: 'notstarted' };
+  var VF_TREE_STATUS = { Failed: 'error', Skipped: 'skipped', Running: 'running', Warning: 'success', Fixed: 'success', Passed: 'success', NotApplicable: 'notstarted', Planned: 'notstarted' };
 
   function vfOf(state) { return isObj(state) && isObj(state.verification) ? state.verification : null; }
   function vfHasData(vf) { return isObj(vf) && vf.hasData === true; }
@@ -1605,8 +1605,28 @@
   // The chip of the summary box: Pass, Fail, Running or Expired.
   function vfChip(vf) { var v = VF_VERDICT[vfStatus(vf)]; return { kind: v.kind, text: v.text }; }
 
+  // The gate's PLAN (state.verification.plan, from the toolkit's precluster-plan-events.jsonl): which checks would run. It reads nothing and
+  // has no verdict, so it is only ever planned or planning, informational, and never a Pass or a Fail. It stands alone only while the gate
+  // has written no run; a run's verdict is the answer once there is one (the plan is then one fact line).
+  function vfPlanOf(vf) { var p = isObj(vf) && isObj(vf.plan) ? vf.plan : null; return p && p.hasData === true ? p : null; }
+  function vfPlanAlone(vf) { return !vfHasData(vf) && vfPlanOf(vf) !== null; }
+  function vfPlanText(p) {
+    var applies = Number(p.applies) || 0, total = Number(p.total) || 0;
+    return applies + ' of ' + total + ' check' + (total === 1 ? '' : 's') + (applies === 1 ? ' applies' : ' apply') + (Number(p.blocking) ? ' (' + Number(p.blocking) + ' blocking)' : '');
+  }
+  function vfPlanHeadline(p) {
+    var st = str(p.status);
+    if (st === 'planning') return 'The gate is planning: ' + vfPlanText(p) + ' so far. Nothing is read or checked by a plan';
+    if (st === 'incomplete') return 'The plan did not finish cleanly: ' + vfPlanText(p) + '. A plan checks nothing, so this is not a gate result';
+    return 'Planned: ' + vfPlanText(p) + '. Nothing was read or checked; run the gate to get a verdict';
+  }
+  // The word of the plan: Planned, Planning (no closing line yet) or Plan incomplete (a non-zero exit code); never a verdict.
+  function vfPlanWord(p) { var st = str(p.status); return st === 'planning' ? 'Planning' : (st === 'incomplete' ? 'Plan incomplete' : 'Planned'); }
+  function vfPlanLine(p) { return vfPlanWord(p) + ' \u00b7 ' + (Number(p.applies) || 0) + ' of ' + (Number(p.total) || 0) + ' checks'; }
+
   // One sentence for the summary box.
   function vfHeadline(vf) {
+    if (vfPlanAlone(vf)) return vfPlanHeadline(vfPlanOf(vf));
     if (!vfHasData(vf)) return '';
     var st = vfStatus(vf), total = Number(vf.total) || 0, blockers = Number(vf.blockers) || 0, skipped = Number(vf.skippedBlocking) || 0, run = isObj(vf.run) ? vf.run : {};
     var warn = vfCount(vf, 'Warning'), expires = parseTime(run.expiresUtc);
@@ -1626,6 +1646,8 @@
   // The tile of the flow: { status, line, tip }.
   function vfTile(state) {
     var vf = vfOf(state);
+    // A plan only: grey and informational (the gate has not run; a plan has no verdict).
+    if (vfPlanAlone(vf)) return { status: 'idle', line: vfPlanLine(vfPlanOf(vf)), tip: vfPlanHeadline(vfPlanOf(vf)) };
     if (!vf || vf.configured !== true) return { status: 'idle', line: '', tip: 'Set verificationEventsPath to follow the toolkit’s pre-cluster verification gate.' };
     if (!vfHasData(vf)) return { status: 'idle', line: '', tip: '' };
     var st = vfStatus(vf), total = Number(vf.total) || 0, blockers = Number(vf.blockers) || 0, skipped = Number(vf.skippedBlocking) || 0, tip = vfHeadline(vf);
@@ -1639,7 +1661,14 @@
 
   // Facts under the headline: the counts by status (failed first), the run and what to do next. [{ k, v, warn }].
   function vfFacts(vf) {
-    var out = [];
+    var out = [], plan = vfPlanOf(vf);
+    if (vfPlanAlone(vf)) {
+      out.push({ k: 'Result', v: vfPlanWord(plan) + ': no verdict (the gate has not run)', warn: false });
+      out.push({ k: 'Checks', v: vfPlanText(plan), warn: false });
+      if (isObj(plan.run) && str(plan.run.runId)) out.push({ k: 'Plan run', v: str(plan.run.runId) });
+      if (str(plan.nextAction)) out.push({ k: 'Next', v: firstLine(plan.nextAction, 260) });
+      return out;
+    }
     if (!vfHasData(vf)) return out;
     var st = vfStatus(vf), run = isObj(vf.run) ? vf.run : {}, skipped = Number(vf.skippedBlocking) || 0;
     out.push({ k: 'Verdict', v: VF_VERDICT[st].text + (str(vf.verdict) && str(vf.verdict) !== VF_VERDICT[st].text ? ' (the gate wrote ' + str(vf.verdict) + ')' : ''), warn: st === 'fail' || st === 'expired' || st === 'otherfile' });
@@ -1653,6 +1682,7 @@
     if (str(run.runId)) out.push({ k: 'Run', v: str(run.runId) });
     var expires = parseTime(run.expiresUtc);
     if (!isNaN(expires)) out.push({ k: st === 'expired' ? 'Expired' : 'Valid until', v: fmtDateTime(expires), warn: st === 'expired' });
+    if (plan) out.push({ k: 'Plan', v: vfPlanText(plan) + (str(plan.status) === 'planned' ? '' : ' (' + str(plan.word || plan.status) + ')') });
     if (st === 'fail') out.push({ k: 'Next', v: 'Fix the blocking checks below (each shows its remedy) and run the gate again' });
     else if (st === 'expired') out.push({ k: 'Next', v: 'Run the gate again; a pass is valid for a limited time' });
     else if (st === 'otherfile') out.push({ k: 'Next', v: 'Run the gate again on the infrastructure file Sonar reads; the ARM run refuses a result for another file' });
@@ -1661,6 +1691,15 @@
 
   // The verdict banner(s): [{ node, title, kind, rows[{k,v}], until }] (the shape of the guarded network change panels).
   function vfPanels(vf) {
+    if (vfPlanAlone(vf)) {
+      var plan = vfPlanOf(vf), prow = [];
+      arr(plan.categories).filter(isObj).forEach(function (c) {
+        prow.push({ k: str(c.name) || str(c.id), v: (Number(c.applies) || 0) + ' of ' + (Number(c.total) || 0) + ' apply' + (Number(c.blocking) ? ' (' + Number(c.blocking) + ' blocking)' : '') });
+      });
+      if (str(plan.nextAction)) prow.push({ k: 'Next', v: firstLine(plan.nextAction, 260) });
+      arr(plan.warnings).slice(0, 3).forEach(function (w) { prow.push({ k: 'Note', v: firstLine(w, 220) }); });
+      return [{ node: '', title: 'Plan: nothing was read, no verdict', kind: 'idle', rows: prow, until: '' }];
+    }
     if (!vfHasData(vf)) return [];
     var st = vfStatus(vf), v = VF_VERDICT[st], rows = [];
     var attention = arr(vf.attention).filter(isObj);
@@ -1678,6 +1717,12 @@
   // The checks as a tree: one item per category, one child per check (failed first, as the back end sorted them).
   function vfTreeOf(state) {
     var vf = vfOf(state);
+    if (vfPlanAlone(vf)) {
+      return arr(vfPlanOf(vf).categories).filter(isObj).map(function (c) {
+        var line = (Number(c.applies) || 0) + ' of ' + (Number(c.total) || 0) + ' checks apply' + (Number(c.blocking) ? ', ' + Number(c.blocking) + ' blocking' : '');
+        return { id: 'plan:' + str(c.id), name: str(c.name) || str(c.id), description: line, status: 'notstarted', start: null, end: null, errors: [], children: [], vf: { kind: 'plan', status: 'Planned', blocks: false, line: line } };
+      });
+    }
     if (!vfHasData(vf)) return [];
     return arr(vf.categories).filter(isObj).map(function (cat) {
       var checks = arr(cat.checks).filter(isObj), counts = isObj(cat.counts) ? cat.counts : {};
@@ -1784,7 +1829,8 @@
       if (!isNaN(vst)) out.startedAt = vst;
       if (!isNaN(vend) && me.status !== 'run') out.endedAt = vend;
       if (vfHasData(vf)) out.chip = vfChip(vf);
-      out.headline = vfHasData(vf) ? vfHeadline(vf) : me.tip;
+      else if (vfPlanAlone(vf)) { out.chip = { kind: 'idle', text: vfPlanWord(vfPlanOf(vf)) }; var vpr = isObj(vfPlanOf(vf).run) ? vfPlanOf(vf).run : {}, vps = parseTime(vpr.started); if (!isNaN(vps)) out.startedAt = vps; }
+      out.headline = vfHasData(vf) || vfPlanAlone(vf) ? vfHeadline(vf) : me.tip;
       out.facts = vfFacts(vf);
       out.panels = vfPanels(vf);
       out.cards = [];
@@ -2065,6 +2111,7 @@
     });
     var vfA = vfOf(s);
     if (vfHasData(vfA)) arr(vfA.warnings).slice(0, 2).forEach(function (w) { out.push({ kind: 'verify', text: 'Verification: ' + firstLine(w, 220) }); });
+    else if (vfPlanOf(vfA)) arr(vfPlanOf(vfA).warnings).slice(0, 2).forEach(function (w) { out.push({ kind: 'verify', text: 'Verification plan: ' + firstLine(w, 220) }); });
     var armA = armOf(s);
     if (armHasData(armA)) {
       arr(armA.hints).filter(isObj).forEach(function (h) {
@@ -2763,7 +2810,7 @@
       oscDemoState: oscDemoState, oscDemoLines: oscDemoLines,
       armOf: armOf, armHasData: armHasData, armPhaseOf: armPhaseOf, armPhaseHasData: armPhaseHasData, armTreeOf: armTreeOf, armActiveMode: armActiveMode,
       armTile: armTile, armHeadline: armHeadline, armFacts: armFacts, armOverall: armOverall, armDemoState: armDemoState, armDemoLines: armDemoLines,
-      vfOf: vfOf, vfHasData: vfHasData, vfStatus: vfStatus, vfChip: vfChip, vfHeadline: vfHeadline, vfTile: vfTile, vfFacts: vfFacts, vfPanels: vfPanels, vfTreeOf: vfTreeOf, vfIconKey: vfIconKey, VF_STATUS_ORDER: VF_STATUS_ORDER, MODE_IDS: MODE_IDS
+      vfOf: vfOf, vfPlanOf: vfPlanOf, vfPlanAlone: vfPlanAlone, vfHasData: vfHasData, vfStatus: vfStatus, vfChip: vfChip, vfHeadline: vfHeadline, vfTile: vfTile, vfFacts: vfFacts, vfPanels: vfPanels, vfTreeOf: vfTreeOf, vfIconKey: vfIconKey, VF_STATUS_ORDER: VF_STATUS_ORDER, MODE_IDS: MODE_IDS
     };
     return;
   }

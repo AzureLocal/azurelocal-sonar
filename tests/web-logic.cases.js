@@ -2306,6 +2306,65 @@ test('Verification: a missing or partial verification object never throws', func
   });
 });
 
+// The gate's PLAN (the toolkit's precluster-plan-events.jsonl): planned and informational, never a verdict, never a Fail.
+function vfPlanState(extra, withRun) {
+  var plan = { configured: true, hasData: true, planned: true, status: 'planned', word: 'planned', file: 'precluster-plan-events.jsonl', applies: 91, total: 100, blocking: 81,
+    categories: [{ id: 'azure', name: 'Azure', applies: 23, total: 24, blocking: 22, evidence: '' }, { id: 'identity', name: 'Identity', applies: 19, total: 24, blocking: 18, evidence: '' }],
+    message: 'Plan: 91 of 100 checks apply to clus01.', nextAction: 'Run the checks: & Invoke-AzureLocalPreClusterVerification.ps1 -Mode Verify',
+    run: { runId: 'plan1', cluster: 'clus01', started: '2026-11-24T21:16:13.798Z', completed: '2026-11-24T21:16:13.863Z', exitCode: 0, events: 8, stale: 0 }, warnings: [] };
+  if (extra) Object.keys(extra).forEach(function (k) { plan[k] = extra[k]; });
+  var base = withRun ? vfState('pass') : { phase: 'provisioning', activePhase: 'provisioning', provisioning: { route: 'simplified', ztpComplete: true, nodes: [] }, verification: { configured: true, hasData: false, status: 'notstarted', state: 'waiting', verdict: '', counts: {}, total: 0, blockers: 0, categories: [], attention: [], warnings: [] } };
+  base.verification.plan = plan;
+  return base;
+}
+
+test('Verification plan: with no gate run the tile shows the plan as planned and grey, never Fail', function () {
+  var tile = m.vfTile(vfPlanState());
+  eq([tile.status, tile.line], ['idle', 'Planned \u00b7 91 of 100 checks']);
+  eq(/Nothing was read or checked/.test(tile.tip), true); eq(/run the gate to get a verdict/.test(tile.tip), true);
+  var mode = tileOf(m.modeStates(vfPlanState()), 'verify');
+  eq(mode.status, 'idle'); eq(mode.line, 'Planned \u00b7 91 of 100 checks');
+  // a plan that is still being written, and one that did not finish: informational, never err
+  eq(m.vfTile(vfPlanState({ status: 'planning' })).line, 'Planning \u00b7 91 of 100 checks');
+  eq(m.summaryFor(vfPlanState({ status: 'planning' }), 'verify', {}).chip.text, 'Planning');
+  var broken = m.vfTile(vfPlanState({ status: 'incomplete', warnings: ['The plan did not finish cleanly.'] }));
+  eq(broken.status, 'idle'); eq(/not a gate result/.test(broken.tip), true); eq(broken.line, 'Plan incomplete \u00b7 91 of 100 checks');
+  eq(m.summaryFor(vfPlanState({ status: 'incomplete' }), 'verify', {}).chip.text, 'Plan incomplete');
+});
+
+test('Verification plan: the summary, facts, panel and tree of a plan with no gate run', function () {
+  var s = vfPlanState();
+  var sum = m.summaryFor(s, 'verify', {});
+  eq(sum.chip, { kind: 'idle', text: 'Planned' }); eq(/Planned: 91 of 100 checks apply \(81 blocking\)/.test(sum.headline), true);
+  eq(sum.facts.map(function (f) { return f.k; }), ['Result', 'Checks', 'Plan run', 'Next']); eq(sum.facts.some(function (f) { return f.warn; }), false);
+  eq(sum.panels.length, 1); eq(sum.panels[0].kind, 'idle'); eq(sum.panels[0].title, 'Plan: nothing was read, no verdict');
+  eq(sum.panels[0].rows[0], { k: 'Azure', v: '23 of 24 apply (22 blocking)' });
+  var tree = m.vfTreeOf(s);
+  eq(tree.map(function (n) { return n.name; }), ['Azure', 'Identity']); eq(tree[0].status, 'notstarted'); eq(tree[0].description, '23 of 24 checks apply, 22 blocking'); eq(tree[0].children, []);
+  eq(m.vfIconKey('Planned'), 'notstarted');
+});
+
+test('Verification plan: a gate run wins; the plan is only one fact beside the verdict', function () {
+  var s = vfPlanState(null, true);
+  eq(m.vfPlanAlone(s.verification), false);
+  eq(m.vfTile(s).status, 'ok'); eq(m.vfTile(s).line, 'Pass \u00b7 5 checks');
+  var failing = vfPlanState(null, true); failing.verification.status = 'fail'; failing.verification.verdict = 'Fail';
+  eq(m.vfTile(failing).status, 'err');
+  var facts = m.vfFacts(s.verification);
+  eq(facts.filter(function (f) { return f.k === 'Plan'; }).length, 1);
+  eq(m.vfTreeOf(s).length, 5, 'the tree is the gate run\'s categories, not the plan\'s');
+});
+
+test('Verification plan: a missing or partial plan object never throws and a plan without data is ignored', function () {
+  [{ verification: { configured: true, hasData: false, plan: null } }, { verification: { configured: true, hasData: false, plan: {} } }, { verification: { configured: true, hasData: false, plan: { hasData: true } } },
+    { verification: { configured: true, hasData: false, plan: { hasData: true, categories: 'x', run: 3, warnings: null } } }].forEach(function (s, i) {
+    m.modeStates(s); m.vfTile(s); m.summaryFor(s, 'verify', {}); m.vfTreeOf(s); m.vfFacts(s.verification); m.vfPanels(s.verification);
+    eq(typeof m.vfHeadline(m.vfOf(s)), 'string', 'case ' + i);
+  });
+  eq(m.vfPlanOf({ configured: true, hasData: false, plan: { hasData: false } }), null);
+  eq(m.vfTile({ verification: { configured: true, hasData: false, plan: { hasData: false } } }).line, '');
+});
+
 test('Verification: a standalone monitor shows its own tile and opens on it', function () {
   var s = { phase: 'provisioning', activePhase: 'provisioning', monitor: 'Verification', provisioning: { route: 'simplified', nodes: [] }, verification: vfState('fail').verification };
   eq(m.modeStates(s).filter(function (t) { return !t.hidden; }).map(function (t) { return t.id; }), ['verify']);
