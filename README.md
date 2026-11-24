@@ -62,6 +62,25 @@ Then pick what you want to do:
 | Know which `infrastructure.yml` keys Sonar reads | [docs/config.md](docs/config.md#from-the-master-infrastructureyml) |
 
 The full routing page is [docs/start-here.md](docs/start-here.md).
+## Where Sonar fits in the Azure Local tool chain
+
+Sonar is the **watcher**: it follows every step from hardware discovery to a solution update, read only, and writes nothing to `infrastructure.yml` or to any tool's files. With `-InfrastructureFile ./infrastructure.yml` it derives where each tool writes.
+
+```text
+Surveyor -> Trailwright (infrastructure.yml) -> hardware discovery -> Beacon -> ZTP -> toolkit OS configuration -> gate -> ARM Validate / Deploy -> update   (Sonar follows these)
+```
+
+| Monitor | Reads | Written by |
+| --- | --- | --- |
+| `Discovery` | The discovery folder: `<ServiceTag>.json`, `discovery-summary.json`, the hardware inventory and Beacon's `validation-*.json` (results schema 1.2, in its `beacon` subfolder) | the toolkit's `Invoke-HardwareDiscovery.ps1` and `Get-HardwareInventory.ps1`; [Beacon](https://github.com/AzureLocal/azurelocal-beacon) |
+| `Provisioning` | `ztp-events.jsonl` and Azure | [azurelocal-ztp](https://github.com/AzureLocal/azurelocal-ztp) |
+| `OsConfiguration` | `os-configuration-events.jsonl` | `Invoke-AzureLocalOsConfiguration.ps1` |
+| `Verification` | `precluster-verification-events.jsonl` and `precluster-plan-events.jsonl` | `Invoke-AzureLocalPreClusterVerification.ps1` (`-Mode Verify`, `-Mode Plan`) |
+| `Validate`, `Deployment` | `arm-deployment-events.jsonl` and Azure | `Invoke-AzureLocalArmDeployment.ps1` |
+| `Update` | `update-events.jsonl` and Azure | `Get-AvailableSolutionUpdate.ps1`, `Start-AzureLocalSolutionUpdate.ps1` |
+
+The feeds sit in one folder, `deployment.events_directory` of the environment file (else `%ProgramData%\AzureLocalToolkit\<cluster.name>\events`). A file cut for ZTP is not enough for Sonar: it needs `cluster.name` and `scenario.identity`, which the cut does not carry.
+
 ## Requirements
 
 On the workstation or jump server that runs Sonar:
@@ -80,7 +99,7 @@ On the workstation or jump server that runs Sonar:
 
 | Module | When | Install |
 | --- | --- | --- |
-| `Az.Accounts` | Always for a live run (not for `-Replay`, and not for `-Monitor Discovery`). Sign in with `Connect-AzAccount` before you start. | `Install-Module Az.Accounts -Scope CurrentUser` |
+| `Az.Accounts` | For a live run, except `-Replay`, `-Monitor Discovery`, `-Monitor Verification` and `-Monitor Update` with an update event file named. Sign in with `Connect-AzAccount` before you start. | `Install-Module Az.Accounts -Scope CurrentUser` |
 | `Az.KeyVault` | Only with `credential.source: keyvault`, or to read the domain account password for the log account. | `Install-Module Az.KeyVault -Scope CurrentUser` |
 | `Posh-SSH` | Only when WinRM to the seed node is blocked and `logs.transport` is `ssh` or `auto` falls through to SSH. | `Install-Module Posh-SSH -Scope CurrentUser` |
 
@@ -184,7 +203,7 @@ Add `?demo=1` to the page URL to see the page with built-in sample data (a runni
 | `OsConfiguration` | The toolkit's OS configuration run | The OS configuration events and, for Arc Run Commands, Azure | `osConfigEventsPath` (`os-configuration-events.jsonl`) | Yes | No node logs |
 | `Validate` | The toolkit's ARM Validate | The validation resources in Azure, the cluster resource, the ARM events, the seed node log | `armEventsPath` (`arm-deployment-events.jsonl`) | Yes | Seed node log |
 | `Deployment` | The toolkit's ARM Deploy, then the post-deployment steps | The deployment resources in Azure, the cluster resource, the ARM events, the seed node log | `armEventsPath` | Yes | Seed node log |
-| `Update` | A solution update | The update resources in Azure, the cluster resource, the seed node log, and (with an update account) the cluster's own update service on one node | none | Yes | Seed node log |
+| `Update` | A solution update | The toolkit's update events; the update resources in Azure, the cluster resource, the seed node log, and (with an update account) the cluster's own update service on one node | `updateEventsPath` (`update-events.jsonl`, written by `Get-AvailableSolutionUpdate.ps1` and `Start-AzureLocalSolutionUpdate.ps1`) | Yes, or **No** when the update event file is named: Sonar then reads that file only and shows the Azure live poll as *not connected* | Seed node log (not without Azure) |
 | `AddNode` | Adding a node | The Arc machines, the cluster resource, the seed node log | none | Yes | Seed node log |
 | `Repair` | Repairing a node | The Arc machines, the cluster resource, the seed node log | none | Yes | Seed node log |
 | `Verification` | The toolkit's pre-cluster verification gate, between OS configuration and Validate: can the cluster deployment start, and what blocks it | The gate's event file only | `verificationEventsPath` (`precluster-verification-events.jsonl`) | No | No |
