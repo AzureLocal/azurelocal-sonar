@@ -456,6 +456,8 @@ The cluster resource, read once a deployment settings object exists (before that
 
 `update` is the update track. Its verdict never trusts the cluster's update summary alone: `AppliedSuccessfully` is also what a cluster says before any update ever ran.
 
+The sample values in this section were captured on a 12.2610 cluster (6 to 9 November 2026); the version numbers shown are that cluster's.
+
 ```json
 { "verified": false, "status": "notstarted", "phase": "waiting", "level": "warn", "label": "Waiting for content", "ran": false,
   "nextAction": { "text": "The update package must be added (SBE side-load): ...", "guide": "https://learn.microsoft.com/azure/azure-local/update/solution-builder-extension?view=azloc-2611#the-additionalcontentrequired-update-state" },

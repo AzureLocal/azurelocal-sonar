@@ -2,7 +2,7 @@
 
 **Real-time monitor for Azure Local deployments.** Follow a deployment while it runs: how each machine gets ready (simplified machine provisioning or OEM image + Arc registration), how its operating system is configured (method, steps, retries, the guarded network change, the domain join), every validation and deployment step and its status, and the live deployment logs from the seed node, in a modern local web view. PowerShell back end; nothing to install. Read-only towards Azure and the nodes. Record a run to a local file and replay it later, time-scrubbed, through the same page.
 
-Beacon checks the environment before deployment. Sonar listens to the deployment as it happens.
+Beacon checks the environment before deployment, and its results file (`validation-*.json`) is shown in the Discovery view on the machine it names. Sonar listens to the deployment as it happens.
 
 > Status: new. See [repo-intent.md](repo-intent.md) and the [plan](docs/plan.md).
 

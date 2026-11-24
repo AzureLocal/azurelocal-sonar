@@ -24,7 +24,7 @@ features:
   - title: Knows which account and when
     details: For Local Identity and Active Directory deployments, Sonar shows which account reads the logs in each phase and when each log appears.
   - title: Pairs with Beacon
-    details: Beacon checks the environment before deployment. Sonar listens while it runs.
+    details: Beacon checks the environment before deployment. Sonar shows its results file (validation-*.json) in the Discovery view, then listens while the deployment runs.
 ---
 
 ## Run it and configure it

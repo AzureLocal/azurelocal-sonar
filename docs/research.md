@@ -2,7 +2,7 @@
 
 Research for plan tasks S-1, S-2 and S-3 ([plan](plan.md)), checked against the contract in [design](design.md). Written 10 Oct 2026.
 
-**Rules used.** Microsoft Learn is the only source. Azure Local pages are read at `view=azloc-2609`. Every row cites the Learn page it comes from. When Learn does not state something, the row says **Not on Learn** and the item stays unverified until a live test confirms it. The **Verified live 10 Oct 2026** column is left empty for the owner to fill in from a live test of a `clus01` cluster.
+**Rules used.** Microsoft Learn is the only source. Azure Local pages were read at `view=azloc-2609` (October 2026); they have not been re-read at `view=azloc-2611`, so a row is a statement about 2609 until it is re-checked. Every row cites the Learn page it comes from. When Learn does not state something, the row says **Not on Learn** and the item stays unverified until a live test confirms it. The **Verified live 10 Oct 2026** column is left empty for the owner to fill in from a live test of a `clus01` cluster.
 
 ## 0. What this changes in the design
 
