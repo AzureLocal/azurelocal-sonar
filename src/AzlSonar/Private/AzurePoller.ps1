@@ -1611,7 +1611,9 @@ function Invoke-AzlSonarPollerLoop {
             $updateContext = if ($Shared.Contains('UpdateLocal')) { $Shared['UpdateLocal'] } else { $null }
             $discoveryCache = if ($Shared.Contains('DiscoveryCache')) { $Shared['DiscoveryCache'] } else { $null }
             # The Discovery monitor reads the discovery files only: no Azure call, no sign-in, no node.
-            $state = if (-not (Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))).azure) { Get-AzlSonarInitialState -Config $Config -DiscoveryCache $discoveryCache -VerificationEvents $verificationEvents } else {
+            # The Update monitor with no Azure sign-in (azureConnected false, set at start) follows the toolkit's update events only.
+            $pollPlan = Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto')) -AzureOffline:(-not [bool](Get-AzlSonarMember $Config 'azureConnected' $true))
+            $state = if ($pollPlan.monitor -eq 'Update' -and -not $pollPlan.azure) { Get-AzlSonarUpdateOfflineState -Config $Config -UpdateEvents $updateEvents } elseif (-not $pollPlan.azure) { Get-AzlSonarInitialState -Config $Config -DiscoveryCache $discoveryCache -VerificationEvents $verificationEvents } else {
             Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -ArmEvents $armEvents -VerificationEvents $verificationEvents -UpdateEvents $updateEvents -DiscoveryCache $discoveryCache -LogAccount $logAccount -LocalUserName $localName -UpdateContext $updateContext }
             Publish-AzlSonarState -Shared $Shared -State $state
             try { Register-AzlSonarUpdateRedaction -Shared $Shared } catch { Write-Verbose "Update account redaction: $($_.Exception.Message)" }
@@ -1629,6 +1631,8 @@ function Invoke-AzlSonarPollerLoop {
             $state.pollError = [ordered]@{ message = $pollError; at = Format-AzlSonarDate ([datetime]::UtcNow) }
             Publish-AzlSonarState -Shared $Shared -State $state
         }
-        Wait-AzlSonarInterval -Shared $Shared -Seconds $Config.pollSeconds
+        # With no Azure call to pace, the events-only Update view follows its file as fast as the file loop reads it (2 seconds).
+        $eventsOnly = (Get-AzlSonarMonitorName -Value ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))) -eq 'Update' -and -not [bool](Get-AzlSonarMember $Config 'azureConnected' $true)
+        Wait-AzlSonarInterval -Shared $Shared -Seconds $(if ($eventsOnly) { [Math]::Min([double]$Config.pollSeconds, 2) } else { $Config.pollSeconds })
     }
 }

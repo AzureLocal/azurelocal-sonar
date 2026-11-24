@@ -22,6 +22,74 @@ $script:AzlSonarUpdateEventFileName = 'update-events.jsonl'
 $script:AzlSonarUpdateEventStages = 'SolutionUpdate', 'Update'
 $script:AzlSonarUpdateEventMaxSteps = 400
 
+function Resolve-AzlSonarUpdateEventsFile {
+    <#
+    .SYNOPSIS
+        The update event file the config follows: updateEventsPath, else the update-events.jsonl that the events folder of the other
+        toolkit feeds (armEventsPath, osConfigEventsPath, verificationEventsPath) already holds. '' when there is none.
+    .DESCRIPTION
+        updateEventsPath is returned as it is, whether the file exists yet or not (the toolkit's update script creates it). The
+        folder search needs the file to be there: a folder that merely might get one later is not a source.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowNull()][object]$Config)
+
+    if ($null -eq $Config) { return '' }
+    $configured = [string](Get-AzlSonarMember $Config 'updateEventsPath' '')
+    if ($configured.Trim()) { return $configured }
+    foreach ($key in 'armEventsPath', 'osConfigEventsPath', 'verificationEventsPath') {
+        $p = [string](Get-AzlSonarMember $Config $key '')
+        if (-not $p.Trim()) { continue }
+        $dir = if (Test-Path -LiteralPath $p -PathType Container) { $p } else { Split-Path -Parent $p }
+        if (-not $dir) { continue }
+        $candidate = Join-Path -Path $dir -ChildPath $script:AzlSonarUpdateEventFileName
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return ''
+}
+
+function Get-AzlSonarUpdateOfflineState {
+    <#
+    .SYNOPSIS
+        The state of the Update monitor when nobody is signed in to Azure: the toolkit's update events only, with the Azure live poll
+        marked as not connected (a plain fact, never an error: pollError stays $null).
+    .DESCRIPTION
+        Built from the same pieces as the connected Update monitor (the update view from the events, the phase moving to update
+        or failed), with no Azure call and no node. update.azure is { connected: false, status: 'notconnected', message }; the
+        update object is the events' view (source 'events'), or, before the toolkit has written a line, one that says Sonar is
+        waiting for them. The machine cards stay Unknown: they come from Azure.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
+    param(
+        [Parameter(Mandatory)][object]$Config,
+        [AllowNull()][System.Collections.IDictionary]$UpdateEvents,
+        [datetime]$Now = [datetime]::UtcNow
+    )
+
+    $state = Get-AzlSonarInitialState -Config $Config
+    $events = Get-AzlSonarUpdateEventSection -Config $Config -Store $UpdateEvents
+    $message = 'The Azure live poll is not connected: nobody is signed in to Azure in this PowerShell session. Sonar shows the toolkit''s update events only. To add what Azure and the cluster say about the update, run Connect-AzAccount and start Sonar again.'
+    $azure = [ordered]@{ connected = $false; status = 'notconnected'; message = $message }
+    $base = [ordered]@{
+        verified = $false; source = 'events'; status = 'notstarted'; phase = 'idle'; level = 'neutral'
+        label = 'Waiting for the toolkit''s update events (Azure is not connected)'
+        ran = $false; nextAction = $null; summary = $null; active = $null; updates = @(); runs = @(); run = $null
+        tree = @(); counts = (Measure-AzlSonarStepTree -Tree @()); local = $null; sources = $null; azure = $azure
+    }
+    $update = Merge-AzlSonarUpdateEvent -Update $base -Events $events
+    $move = Resolve-AzlSonarUpdatePhase -Update $update -Phase 'update' -ActivePhase 'update' -Standalone
+    $state.phase = $move.phase
+    $state.activePhase = $move.activePhase
+    $state.track = 'update'
+    $state.update = $update
+    $state.updateEvents = $events
+    $state.current = Get-AzlSonarCurrentStep -Tree @($update.tree) -Phase 'update'
+    $state.polledAt = Format-AzlSonarDate $Now.ToUniversalTime()
+    return $state
+}
+
 function ConvertFrom-AzlSonarUpdateEventLine {
     <#
     .SYNOPSIS

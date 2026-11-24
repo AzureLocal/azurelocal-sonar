@@ -266,6 +266,8 @@ A node restarts during the update. When the node Sonar reads does not answer, So
 
 **The toolkit's update events (no Azure needed).** The toolkit's solution update scripts write `update-events.jsonl` into the one events folder (`deployment.events_directory`, else `%ProgramData%\AzureLocalToolkit\<cluster.name>\events`; `updateEventsPath` moves it). The Auto and Update monitors follow it every 2 seconds: each event is an `[update]` line in the log pane, and when Azure reports no update run (no Azure context, a `-WhatIf` or plan run, a run the cluster has not reported yet) the Update view shows the run's stages from the file, marked as read from the update events. A plan or `-WhatIf` run says that nothing was installed. When Azure reports a run, Azure's step tree is shown.
 
+**With no Azure sign-in at all.** `-Monitor Update` starts without `Connect-AzAccount` when the update event file is named (`updateEventsPath`, or an `update-events.jsonl` in the events folder of the other toolkit feeds). Sonar then reads the file only: no Azure resource, no node, no node log, no log account. The Update tile and view come from the events, the phase is `update` (`failed` when the run failed), and the Azure live poll is marked **not connected**: a grey note and the cluster card row *Azure live poll*, `update.azure.connected` `false` in the API, `pollError` stays empty. It is a fact about the sources, not a failure. With a sign-in the same start reads Azure as before and `update.azure.connected` is `true`. Auto does not do this: it needs Azure for the deployment. See [Follow an update with no Azure sign-in](./run.md#follow-an-update-with-no-azure-sign-in).
+
 What the three scripts write, and what the Update tile shows for it:
 
 | Script and mode | `mode` | The tile reads | The stages |
@@ -292,7 +294,9 @@ Two ways to follow the monthly update:
 
    `-UpdateCredential` is the deployment account that reads the cluster's own update service; leave it out (and `updateAccount` unset) and Sonar shows what Azure reports, which can be many minutes behind.
 
-   With `-Monitor Update` Sonar reads the cluster resource, the Arc machine of each node, the update resources and the log of the seed node. It reads no deployment settings, edge machines, ARM deployments or event files, so no old deployment tree appears and the config needs none of the deployment, provisioning, ZTP, OS configuration or ARM keys. The [minimal config](./config.md#monitoring-a-monthly-update) is five settings and a node.
+   With `-Monitor Update` Sonar reads the cluster resource, the Arc machine of each node, the update resources and the log of the seed node, and the toolkit's update event file when `updateEventsPath` names one. It reads no deployment settings, edge machines, ARM deployments or other event files, so no old deployment tree appears and the config needs none of the deployment, provisioning, ZTP, OS configuration or ARM keys. The [minimal config](./config.md#monitoring-a-monthly-update) is five settings and a node.
+
+   With no Azure sign-in, `-Monitor Update` still starts when the update event file is named: it shows the toolkit's update events alone and marks the Azure live poll as not connected ([details](#update)).
 
    Auto against a cluster whose deployment finished more than 24 hours ago also lands on the Update view when an update is waiting for content or ready (a running update always does).
 

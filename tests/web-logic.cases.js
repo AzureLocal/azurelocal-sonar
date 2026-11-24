@@ -2809,4 +2809,33 @@ test('Discovery: a stale run says how old it is and to run it again; Beacon resu
   eq(tileOf(m.modeStates(st(fresh)), 'discovery').line, '1 of 1 machines');
 });
 
+
+// ---------------------------------------------------------------- Update monitor with no Azure sign-in (update.azure.connected false)
+
+function offlineUpdate(extra) {
+  return Object.assign({ verified: false, source: 'events', status: 'success', phase: 'available', level: 'neutral', label: 'Update available: Solution12.2611.1004.9; nothing was installed (toolkit Check run)', ran: false,
+    nextAction: null, summary: null, active: null, updates: [], runs: [], run: null, local: null, sources: null,
+    tree: [{ id: 'upd.Discover', name: 'Discover', status: 'success', children: [] }],
+    azure: { connected: false, status: 'notconnected', message: 'The Azure live poll is not connected: nobody is signed in to Azure in this PowerShell session.' } }, extra || {});
+}
+
+test('Azure not connected: a neutral notice and a cluster-card row, never an error; the events still fill the tile', function () {
+  var u = offlineUpdate();
+  var n = m.updateNotices(u);
+  eq(n.length, 1); eq(n[0].kind, 'azure-off'); eq(/not connected/.test(n[0].text), true);
+  var s = { phase: 'update', activePhase: 'update', monitor: 'Update', cluster: 'clus01', update: u, pollError: null, nodes: [{ name: 'n1', arcStatus: 'Unknown', seed: true }] };
+  var card = m.clusterCard(s, 'update');
+  var row = card.rows.filter(function (r) { return r.k === 'Azure live poll'; })[0];
+  eq(!!row, true); eq(/Not connected/.test(row.v), true); eq(!!row.warn, false);
+  eq(card.lastError, ''); eq(card.kind === 'err', false);
+  var t = tileOf(m.modeStates(s), 'update');
+  eq(t.status, 'idle'); eq(/nothing was installed/.test(t.line), true);
+  eq(m.liveNotes(s).filter(function (x) { return x.kind === 'azure-off'; }).length, 1);
+});
+
+test('Azure connected (or an older Sonar without the field): no not-connected note', function () {
+  eq(m.updateNotices(offlineUpdate({ azure: { connected: true, status: 'connected', message: '' } })), []);
+  eq(m.updateNotices(offlineUpdate({ azure: undefined })), []);
+});
+
 process.stdout.write(JSON.stringify(cases));

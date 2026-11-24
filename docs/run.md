@@ -32,7 +32,7 @@ By default Sonar follows the whole flow (`-Monitor Auto`): Discovery, Provisioni
 | `... -Monitor Verification` | Verification | The pre-cluster verification gate's event file only. No Azure sign-in, no node. See [Verification](./verification.md). |
 | `... -Monitor Validate` | Validate | The validation resources in Azure and the seed node's log. |
 | `... -Monitor Deployment` | Deployment | The deployment resources in Azure and the seed node's log. |
-| `... -Monitor Update` | Update | The update resources in Azure and the seed node's log. |
+| `... -Monitor Update` | Update | The update resources in Azure and the seed node's log. With the toolkit's update events (`updateEventsPath`) it also starts with **no Azure sign-in**: it then reads the event file only ([no sign-in](#follow-an-update-with-no-azure-sign-in)). |
 | `... -Monitor AddNode` | Add node | The Arc machines and the seed node's log. |
 | `... -Monitor Repair` | Repair | The Arc machines and the seed node's log. |
 
@@ -154,6 +154,22 @@ With the default `track: auto` (and `updateTrack: auto`) Sonar reads the update 
 **What Sonar shows:** the **Update** mode with what Azure offers (name, version, package type, description, state in plain words and the next action, for example *Waiting for content* for an SBE update that must be side-loaded), the pre-update readiness checks that failed with their severity, the update run's steps (status, start and end, duration, error text, from `updateRuns`), the history of earlier runs, and the node log of the seed node as it is written. The tab is grey until an update has run and green only after a run finished; see [Update](./stages.md#update). To follow an update weeks after the deployment, with no deployment in the session, start Sonar with `-Monitor Update` ([Monitoring a monthly update](./stages.md#monitoring-a-monthly-update)). The tab *Update* of [Log access](./log-access.md) names the account (the deployment local admin, or on Active Directory the domain account you give Sonar) and the folders. A failed update can be resumed in the portal; Sonar only reports it.
 
 **Access:** Reader on the resource group; for the node logs an account in the seed node's local Administrators.
+
+## Follow an update with no Azure sign-in
+
+**When:** you run the toolkit's update scripts (`Get-AvailableSolutionUpdate.ps1`, `Start-AzureLocalSolutionUpdate.ps1`) and want to watch what they do, on a machine that has no Azure sign-in (no `Connect-AzAccount`, no Az PowerShell, or an account that cannot read the cluster).
+
+```powershell
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor Update
+```
+
+The Update monitor starts without a sign-in when the config names the toolkit's update event file: `updateEventsPath` (the master file always names it, in the events folder), or, with a config file that has no `updateEventsPath`, an `update-events.jsonl` that already sits in the folder of `armEventsPath`, `osConfigEventsPath` or `verificationEventsPath`. Auto, Deployment, Validate and the other Azure monitors still stop with *No Azure sign-in found*.
+
+**What Sonar shows:** the **Update** mode built from the event file alone (the run's stages, its verdict, the next action, an `[update]` line per event), marked as read from the update events. The Azure live poll is shown as **not connected**: a grey note and a row *Azure live poll: Not connected* on the cluster card, never an error and never red. Sonar reads no Azure resource, no node and no node log, so it asks for no log account and the machine cards stay *Unknown* (they come from Azure). Until the toolkit has written its first line the tile reads *Waiting for the toolkit's update events*.
+
+Sign in first (`Connect-AzAccount`) and the same start shows both: the Azure poll and the cluster's own update service as in [Follow an update](#follow-an-update), and the events when Azure reports no run. The decision is made once, at start; to add Azure to a Sonar that started without it, start it again.
+
+**Access:** read access to the event file's folder. Nothing else.
 
 ## Look at a deployed cluster
 

@@ -52,11 +52,17 @@ function Get-AzlSonarMonitorPlan {
         Auto is today's behaviour: everything. Discovery reads the discovery files only (no Azure sign-in, no node). Provisioning
         reads Azure and the ZTP event file. OsConfiguration reads the OS configuration event file (and the Arc run commands in
         Azure) but not the node logs. Verification reads the gate's event file only (no Azure sign-in, no node, no log tailer). Validate, Deployment, Update, AddNode and Repair read the Azure resources of their
-        operation and the seed node's log.
+        operation and the seed node's log. With -AzureOffline the Update monitor reads the toolkit's update event file only (no Azure,
+        no node, no log tailer, no log access listed): it is what Sonar runs when nobody is signed in to Azure and the update events
+        are there to follow.
     #>
     [CmdletBinding()]
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
-    param([AllowNull()][AllowEmptyString()][string]$Monitor = 'Auto')
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Monitor = 'Auto',
+
+        [switch]$AzureOffline
+    )
 
     $name = Get-AzlSonarMonitorName -Value $Monitor
     if (-not $name) { $name = 'Auto' }
@@ -75,5 +81,25 @@ function Get-AzlSonarMonitorPlan {
         'AddNode' { $plan.verificationEvents = $false; $plan.armEvents = $false; $plan.ztpEvents = $false; $plan.osConfigEvents = $false; $plan.nodeProbe = $false; $plan.discovery = $false; $plan.phases = @('add-node') }
         'Repair' { $plan.verificationEvents = $false; $plan.armEvents = $false; $plan.ztpEvents = $false; $plan.osConfigEvents = $false; $plan.nodeProbe = $false; $plan.discovery = $false; $plan.phases = @('repair') }
     }
+    if ($AzureOffline -and $name -eq 'Update') {
+        $plan.azure = $false; $plan.tailer = $false; $plan.nodeProbe = $false; $plan.cluster = $false; $plan.phases = @()
+    }
     return $plan
+}
+
+function Test-AzlSonarOfflineUpdate {
+    <#
+    .SYNOPSIS
+        True when the Update monitor can run without an Azure sign-in: its config names the toolkit's update event file
+        (updateEventsPath, or an update-events.jsonl in the events folder of the other toolkit feeds).
+    .DESCRIPTION
+        Only the Update monitor does this. Auto also needs Azure for the deployment, so it still asks for the sign-in. The check
+        reads the config only: the file itself may not exist yet (the toolkit's update script creates it).
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][object]$Config)
+
+    if ((Get-AzlSonarMonitorName -Value ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))) -ne 'Update') { return $false }
+    return [bool](Resolve-AzlSonarUpdateEventsFile -Config $Config)
 }

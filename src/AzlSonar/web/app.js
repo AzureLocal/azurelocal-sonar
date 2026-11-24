@@ -929,9 +929,15 @@
   }
 
   // The notes above the steps for the Update view: Azure behind the cluster, node-side reading off or failing, a node switch.
-  // Each is { kind: source | source-off | source-info, text }.
+  // Each is { kind: azure-off | source | source-off | source-info, text }.
+  // The Update monitor started with no Azure sign-in: update.azure.connected is false. That is a fact about the sources, never an error.
+  function azureNotConnected(upd) {
+    return isObj(upd) && isObj(upd.azure) && upd.azure.connected === false;
+  }
+
   function updateNotices(upd) {
     var out = [], loc = localOf(upd), src = sourcesOf(upd);
+    if (azureNotConnected(upd)) out.push({ kind: 'azure-off', text: str(upd.azure.message) || 'The Azure live poll is not connected: Sonar shows the toolkit\'s update events only.' });
     if (!loc) return out;
     if (!loc.enabled) {
       out.push({ kind: 'source-off', text: str(loc.reason) || 'Node-side update reading is off. Sonar shows only what Azure reports, which can be many minutes behind the cluster.' });
@@ -1085,6 +1091,7 @@
       var phase = str(up.phase) || 'unknown', ulevel = updateLevel(up), chk = updateChecks(up);
       var offered = arr(up.updates).filter(isObj).filter(function (u) { return ['waiting', 'available', 'installing', 'preparing', 'failed'].indexOf(str(u.phase)) >= 0; })[0] || {};
       row('Update', str(up.label) || CLUSTER_UPDATE_PHASE[phase] || phase, ulevel === 'error' || ulevel === 'warn');
+      if (azureNotConnected(up)) row('Azure live poll', 'Not connected: the toolkit\'s update events only');
       row('Current version', str(sum.currentVersion));
       row('Target version', str(act.version) || str(offered.version));
       row('Last updated', str(sum.lastUpdated) ? str(sum.lastUpdated) : (isObj(up.summary) ? 'never: no update has run' : ''));

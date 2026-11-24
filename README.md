@@ -446,7 +446,7 @@ Do not use the built-in `Administrator` for validation or deployment: deployment
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `No Azure sign-in found in this PowerShell session` | Run `Connect-AzAccount` in the same PowerShell 7 window, then start Sonar again. |
+| `No Azure sign-in found in this PowerShell session` | Run `Connect-AzAccount` in the same PowerShell 7 window, then start Sonar again. Only `-Monitor Update` with the toolkit's update events (`updateEventsPath`) starts without a sign-in: it shows the events only and marks the Azure live poll as not connected ([run.md](./docs/run.md#follow-an-update-with-no-azure-sign-in)). |
 | `Az PowerShell (Az.Accounts) is not installed` | `Install-Module Az.Accounts -Scope CurrentUser`. |
 | `GET deploymentSettings ... failed` (403 or 404 on the subscription) | Wrong subscription in the Az context or no access: `Set-AzContext -Subscription <id>` and check you have Reader on the resource group. A 404 on `deploymentSettings` alone is normal before the deployment starts (phase: provisioning or Arc registration). |
 | The page shows **Arc registration** but you use simplified machine provisioning | With `provisioningRoute: auto`, no edge machine matched a configured node. Name the nodes after the edge machines (or their host names), or set `provisioningRoute` to `simplified`. The warnings say how many edge machines matched nothing. |

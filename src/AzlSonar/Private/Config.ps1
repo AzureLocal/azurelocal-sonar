@@ -565,7 +565,7 @@ function ConvertTo-AzlSonarPublicConfig {
         logs          = [ordered]@{ paths = [string[]]@($Config.logs.paths) }
         pollSeconds   = $Config.pollSeconds
         monitor       = [string](Get-AzlSonarMember $Config 'monitor' 'Auto')
-        monitorPhases = [string[]]@((Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))).phases)
+        monitorPhases = [string[]]@((Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto')) -AzureOffline:(-not [bool](Get-AzlSonarMember $Config 'azureConnected' $true))).phases)
         profile       = $(if ($null -ne (Get-AzlSonarMember $Config 'clusterPattern')) {
                 $p = Get-AzlSonarDeploymentProfile -Config $Config
                 [ordered]@{ clusterPattern = $p.clusterPattern; architecture = $p.architecture; internalDns = $p.internalDns; notes = [string[]]@($p.notes) }

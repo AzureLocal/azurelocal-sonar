@@ -1101,8 +1101,27 @@ function Start-AzlSonarServer {
             if ($NoAccessToken -or -not [bool](Get-AzlSonarMember $config 'accessToken' $true)) { throw 'A token file needs the access token: remove -NoAccessToken or set accessToken to true (or drop -TokenFile / tokenFile).' }
             $tokenFilePath = Assert-AzlSonarTokenFilePath -Path $tokenFileSetting -Force:$Force
         }
-        $plan = Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $config 'monitor' 'Auto'))
-        if ($plan.azure) { Assert-AzlSonarAzContext }
+        $monitorName = [string](Get-AzlSonarMember $config 'monitor' 'Auto')
+        if ((Get-AzlSonarMonitorName -Value $monitorName) -eq 'Update' -and -not [string](Get-AzlSonarMember $config 'updateEventsPath' '')) {
+            # No updateEventsPath: follow the update-events.jsonl the events folder of the other toolkit feeds already holds.
+            $foundUpdateEvents = Resolve-AzlSonarUpdateEventsFile -Config $config
+            if ($foundUpdateEvents) { $config | Add-Member -NotePropertyName updateEventsPath -NotePropertyValue $foundUpdateEvents -Force }
+        }
+        $plan = Get-AzlSonarMonitorPlan -Monitor $monitorName
+        $azureOffline = $false
+        if ($plan.azure) {
+            if (Test-AzlSonarOfflineUpdate -Config $config) {
+                # The Update monitor with the toolkit's update events to follow starts without an Azure sign-in: it shows the events only
+                # and marks the Azure live poll as not connected. With a sign-in it is the Azure poll and the events, as always.
+                try { Assert-AzlSonarAzContext }
+                catch {
+                    $azureOffline = $true
+                    $config | Add-Member -NotePropertyName azureConnected -NotePropertyValue $false -Force
+                    $plan = Get-AzlSonarMonitorPlan -Monitor $monitorName -AzureOffline
+                }
+            }
+            else { Assert-AzlSonarAzContext }
+        }
         $recordPath = if ($PSBoundParameters.ContainsKey('Record') -and $Record) { $Record } else { [string](Get-AzlSonarMember $config 'recordPath' '') }
         if ($Publishable -and -not $recordPath) { throw '-Publishable needs a recording: give -Record <file> or set recordPath in the config.' }
         if ($recordPath) { $recordPath = Resolve-AzlSonarRecordPath -Path $recordPath }
@@ -1193,6 +1212,7 @@ function Start-AzlSonarServer {
             $workerSpecs.Add(@{ Name = 'NodeProbe'; Command = 'Invoke-AzlSonarNodeProbeLoop'; Arguments = @{ Shared = $shared; Config = $config; Credential = $logCredential } })
         }
         $startMessage = "AzL Sonar is listening on {0} for $($config.clusterName) (read-only). Press Ctrl+C to stop."
+        if ($azureOffline) { $startMessage += ' Azure live poll: not connected (no Azure sign-in in this PowerShell session); following the toolkit''s update events only. Run Connect-AzAccount and start Sonar again to add the Azure and cluster status.' }
         if ($recordPath) { $startMessage += " Recording to $recordPath$(if ($Publishable) { ' (publishable: identifiers replaced by pseudonyms)' } else { ' (secrets masked; identifiers are kept: use -Publishable to share it)' })." }
     }
     $shared = $server.Shared

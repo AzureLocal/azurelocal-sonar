@@ -780,6 +780,8 @@ function Get-AzlSonarUpdateMonitorState {
     $state.clusterResource = Get-AzlSonarClusterObject -Config $Config -Resource $resource
     $state.provisioningState = [string]$state.clusterResource.provisioningState
     $update = Get-AzlSonarUpdateState -Config $Config -Now $Now -Warnings $warnings -UpdateContext $UpdateContext
+    # Signed in and read: the live poll is connected (without a sign-in the monitor runs from the update events, Get-AzlSonarUpdateOfflineState).
+    $update['azure'] = [ordered]@{ connected = $true; status = 'connected'; message = '' }
     $move = Resolve-AzlSonarUpdatePhase -Update $update -Phase 'update' -ActivePhase 'update' -Standalone
     $state.phase = $move.phase
     $state.activePhase = $move.activePhase

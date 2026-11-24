@@ -24,7 +24,8 @@
     AddNode or Repair runs that monitor on its own: only its tile and section show, only the sources it needs are read (Discovery
     reads the discovery files and needs no Azure sign-in; Verification reads the pre-cluster verification gate's event file and
     needs no Azure sign-in either; OsConfiguration does not read the node logs; Validate, Deployment, Update, AddNode and
-    Repair read their Azure resources and the seed node's log), the page title names it, and Log access lists only its phases.
+    Repair read their Azure resources and the seed node's log; Update with the toolkit's update event file named (updateEventsPath) also starts with no Azure
+    sign-in and then shows the events only, with the Azure live poll marked not connected), the page title names it, and Log access lists only its phases.
     Overrides monitor in the config.
 .PARAMETER Replay
     Path to a recording (.jsonl or .jsonl.gz) to play instead of watching a live deployment.
