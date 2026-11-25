@@ -63,6 +63,7 @@ function Initialize-AzlSonarSharedState {
             VerificationEvents = [hashtable]::Synchronized(@{})   # pre-cluster verification gate events: the latest run entry '*' with its checks (Invoke-AzlSonarVerificationEventLoop)
             VerificationInfo   = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the verification event file: events read and the newest event time (/api/details)
             ArmInfo       = [hashtable]::Synchronized(@{ Count = [long]0; LastEventAt = $null })   # the ARM event file: events read and the newest event time (/api/details)
+            PostDeploymentEvents = [hashtable]::Synchronized(@{})   # the toolkit's post-deployment events (phase 06): the run entry '*' with its steps (Invoke-AzlSonarPostDeploymentEventLoop)
             UpdateEvents  = [hashtable]::Synchronized(@{})   # the toolkit's solution update events: the run entry '*' with its stages (Invoke-AzlSonarUpdateEventLoop)
             LogAccount    = [hashtable]::Synchronized(@{})   # per node: immutable records of the account log access uses (never a password); '*breaker' and '*unavailable' hold the account-wide ones
             CredentialLock = [object]::new()   # one lock for the domain credential (read, mask, publish) and for the breaker and the per-node records
@@ -1110,7 +1111,7 @@ function Start-AzlSonarServer {
         $plan = Get-AzlSonarMonitorPlan -Monitor $monitorName
         $azureOffline = $false
         if ($plan.azure) {
-            if (Test-AzlSonarOfflineUpdate -Config $config) {
+            if ((Test-AzlSonarOfflineUpdate -Config $config) -or (Test-AzlSonarOfflinePostDeployment -Config $config)) {
                 # The Update monitor with the toolkit's update events to follow starts without an Azure sign-in: it shows the events only
                 # and marks the Azure live poll as not connected. With a sign-in it is the Azure poll and the events, as always.
                 try { Assert-AzlSonarAzContext }
@@ -1203,6 +1204,10 @@ function Start-AzlSonarServer {
             # The gate's Plan feed (precluster-plan-events.jsonl in the events folder): planned, informational, never a verdict.
             $workerSpecs.Add(@{ Name = 'VerificationPlanEvents'; Command = 'Invoke-AzlSonarVerificationPlanEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
         }
+        if ($plan.postDeploymentEvents -and (Resolve-AzlSonarPostDeploymentEventsFile -Config $config)) {
+            # The toolkit's post-deployment event file (post-deployment-events.jsonl in the events folder): the Post-deployment view and its log lines.
+            $workerSpecs.Add(@{ Name = 'PostDeploymentEvents'; Command = 'Invoke-AzlSonarPostDeploymentEventLoop'; Arguments = @{ Shared = $shared; Config = $config } })
+        }
         if ($InfrastructureFile) {
             # Logs a notice when the master file's node set changes (restart Sonar to track it).
             $workerSpecs.Add(@{ Name = 'InfrastructureWatch'; Command = 'Invoke-AzlSonarInfrastructureWatchLoop'; Arguments = @{ Shared = $shared; Config = $config; Path = $config.sourcePath } })
@@ -1212,7 +1217,7 @@ function Start-AzlSonarServer {
             $workerSpecs.Add(@{ Name = 'NodeProbe'; Command = 'Invoke-AzlSonarNodeProbeLoop'; Arguments = @{ Shared = $shared; Config = $config; Credential = $logCredential } })
         }
         $startMessage = "AzL Sonar is listening on {0} for $($config.clusterName) (read-only). Press Ctrl+C to stop."
-        if ($azureOffline) { $startMessage += ' Azure live poll: not connected (no Azure sign-in in this PowerShell session); following the toolkit''s update events only. Run Connect-AzAccount and start Sonar again to add the Azure and cluster status.' }
+        if ($azureOffline) { $startMessage += ' Azure live poll: not connected (no Azure sign-in in this PowerShell session); following the toolkit''s ' + $(if ((Get-AzlSonarMonitorName -Value $monitorName) -eq 'Deployment') { 'post-deployment' } else { 'update' }) + ' events only. Run Connect-AzAccount and start Sonar again to add the Azure and cluster status.' }
         if ($recordPath) { $startMessage += " Recording to $recordPath$(if ($Publishable) { ' (publishable: identifiers replaced by pseudonyms)' } else { ' (secrets masked; identifiers are kept: use -Publishable to share it)' })." }
     }
     $shared = $server.Shared

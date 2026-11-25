@@ -1117,7 +1117,11 @@ function Get-AzlSonarInitialState {
 
         # Shared.VerificationEvents (Add-AzlSonarVerificationEvent): the pre-cluster verification gate's latest run.
         [AllowNull()]
-        [System.Collections.IDictionary]$VerificationEvents
+        [System.Collections.IDictionary]$VerificationEvents,
+
+        # Shared.PostDeploymentEvents: the toolkit's post-deployment run (phase 06).
+        [AllowNull()]
+        [System.Collections.IDictionary]$PostDeploymentEvents
     )
 
     $nodes = foreach ($node in $Config.nodes) {
@@ -1141,6 +1145,7 @@ function Get-AzlSonarInitialState {
         osConfiguration   = Get-AzlSonarOsConfigurationState -Store $null -Config $Config -ExpectedRoute $(if ($route) { $route } else { '' })
         arm               = Get-AzlSonarArmState -Store $null -Config $Config
         verification      = Get-AzlSonarVerificationState -Store $VerificationEvents -Config $Config
+        postDeployment    = Get-AzlSonarPostDeploymentSection -Config $Config -Store $PostDeploymentEvents
         extensions        = [ordered]@{ shown = $false; status = 'notstarted'; nodes = @() }
         validation        = [ordered]@{ status = 'notstarted'; tree = @(); counts = $emptyCounts }
         deployment        = [ordered]@{ status = 'notstarted'; tree = @(); counts = (Measure-AzlSonarStepTree -Tree @()) }
@@ -1230,6 +1235,9 @@ function Get-AzlSonarDeploymentState {
         # The toolkit's solution update events (Shared.UpdateEvents, Add-AzlSonarUpdateEvent). Read by the Auto and Update monitors.
         [AllowNull()]
         [System.Collections.IDictionary]$UpdateEvents,
+        # The toolkit's post-deployment events (Shared.PostDeploymentEvents, Add-AzlSonarPostDeploymentEvent). Read by the Auto and Deployment monitors.
+        [AllowNull()]
+        [System.Collections.IDictionary]$PostDeploymentEvents,
         # Shared.DiscoveryCache: the hardware discovery files already parsed (Get-AzlSonarDiscoveryState).
         [AllowNull()]
         [System.Collections.IDictionary]$DiscoveryCache,
@@ -1354,6 +1362,7 @@ function Get-AzlSonarDeploymentState {
     $osConfiguration = Get-AzlSonarOsConfigurationState -Store $OsConfigEvents -Config $Config -ExpectedRoute $route -ZtpNode $ztpNodeNames -RunCommand $runCommands -LogAccount $LogAccount -LocalUserName $LocalUserName
     $arm = Get-AzlSonarArmState -Store $ArmEvents -Config $Config -Now $Now
     $verification = Get-AzlSonarVerificationState -Store $VerificationEvents -Config $Config -Now $Now
+    $postDeployment = Get-AzlSonarPostDeploymentSection -Config $Config -Store $PostDeploymentEvents
     $nextStep = if ($ztpComplete) { [ordered]@{ name = 'OS configuration'; guide = $script:AzlSonarOsConfigurationGuide } } else { $null }
     $readyForValidate = $route -eq 'oem-image' -and $provisioningStatus -eq 'success' -and -not $clusterStarted
 
@@ -1456,6 +1465,7 @@ function Get-AzlSonarDeploymentState {
         osConfiguration   = $osConfiguration
         arm               = $arm
         verification      = $verification
+        postDeployment    = $postDeployment
         extensions        = $extensionsSection
         validation        = [ordered]@{ status = $validationStatus; tree = $validationTree; counts = (Measure-AzlSonarStepTree -Tree $validationTree) }
         deployment        = [ordered]@{ status = $deploymentStatus; tree = $deploymentTree; counts = (Measure-AzlSonarStepTree -Tree $deploymentTree) }
@@ -1553,6 +1563,7 @@ function Add-AzlSonarEventSection {
     $State['osConfiguration'] = Get-AzlSonarOsConfigurationState -Store (& $get 'OsConfigEvents') -Config $Config -ExpectedRoute $route -ZtpNode $ztpNodeNames -RunCommand @{} -LogAccount (& $get 'LogAccount') -LocalUserName $localName
     $State['arm'] = Get-AzlSonarArmState -Store (& $get 'ArmEvents') -Config $Config -Now $Now
     $State['verification'] = Get-AzlSonarVerificationState -Store (& $get 'VerificationEvents') -Config $Config -Now $Now
+    $State['postDeployment'] = Get-AzlSonarPostDeploymentSection -Config $Config -Store (& $get 'PostDeploymentEvents')
     $State['discovery'] = Get-AzlSonarDiscoveryState -Config $Config -Cache (& $get 'DiscoveryCache') -Now $Now
     # The update events: the previous update object keeps Azure's track when it had one, else it is built from the events again.
     $updateEvents = Get-AzlSonarUpdateEventSection -Config $Config -Store (& $get 'UpdateEvents')
@@ -1606,6 +1617,7 @@ function Invoke-AzlSonarPollerLoop {
             $armEvents = if ($Shared.Contains('ArmEvents')) { $Shared['ArmEvents'] } else { $null }
             $verificationEvents = if ($Shared.Contains('VerificationEvents')) { $Shared['VerificationEvents'] } else { $null }
             $updateEvents = if ($Shared.Contains('UpdateEvents')) { $Shared['UpdateEvents'] } else { $null }
+            $postDeploymentEvents = if ($Shared.Contains('PostDeploymentEvents')) { $Shared['PostDeploymentEvents'] } else { $null }
             $logAccount = if ($Shared.Contains('LogAccount')) { $Shared['LogAccount'] } else { $null }
             $localName = if ($Shared.Contains('LocalUserName')) { [string]$Shared['LocalUserName'] } else { '' }
             $updateContext = if ($Shared.Contains('UpdateLocal')) { $Shared['UpdateLocal'] } else { $null }
@@ -1613,8 +1625,8 @@ function Invoke-AzlSonarPollerLoop {
             # The Discovery monitor reads the discovery files only: no Azure call, no sign-in, no node.
             # The Update monitor with no Azure sign-in (azureConnected false, set at start) follows the toolkit's update events only.
             $pollPlan = Get-AzlSonarMonitorPlan -Monitor ([string](Get-AzlSonarMember $Config 'monitor' 'Auto')) -AzureOffline:(-not [bool](Get-AzlSonarMember $Config 'azureConnected' $true))
-            $state = if ($pollPlan.monitor -eq 'Update' -and -not $pollPlan.azure) { Get-AzlSonarUpdateOfflineState -Config $Config -UpdateEvents $updateEvents } elseif (-not $pollPlan.azure) { Get-AzlSonarInitialState -Config $Config -DiscoveryCache $discoveryCache -VerificationEvents $verificationEvents } else {
-            Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -ArmEvents $armEvents -VerificationEvents $verificationEvents -UpdateEvents $updateEvents -DiscoveryCache $discoveryCache -LogAccount $logAccount -LocalUserName $localName -UpdateContext $updateContext }
+            $state = if ($pollPlan.monitor -eq 'Update' -and -not $pollPlan.azure) { Get-AzlSonarUpdateOfflineState -Config $Config -UpdateEvents $updateEvents } elseif ($pollPlan.monitor -eq 'Deployment' -and -not $pollPlan.azure) { Get-AzlSonarPostDeploymentOfflineState -Config $Config -PostDeploymentEvents $postDeploymentEvents -ArmEvents $armEvents } elseif (-not $pollPlan.azure) { Get-AzlSonarInitialState -Config $Config -DiscoveryCache $discoveryCache -VerificationEvents $verificationEvents -PostDeploymentEvents $postDeploymentEvents } else {
+            Get-AzlSonarDeploymentState -Config $Config -NodeProbe $probe -Secret $secret -LogHint $hint -ZtpStages $ztpStages -OsConfigEvents $osEvents -ArmEvents $armEvents -VerificationEvents $verificationEvents -UpdateEvents $updateEvents -PostDeploymentEvents $postDeploymentEvents -DiscoveryCache $discoveryCache -LogAccount $logAccount -LocalUserName $localName -UpdateContext $updateContext }
             Publish-AzlSonarState -Shared $Shared -State $state
             try { Register-AzlSonarUpdateRedaction -Shared $Shared } catch { Write-Verbose "Update account redaction: $($_.Exception.Message)" }
         }
@@ -1632,7 +1644,7 @@ function Invoke-AzlSonarPollerLoop {
             Publish-AzlSonarState -Shared $Shared -State $state
         }
         # With no Azure call to pace, the events-only Update view follows its file as fast as the file loop reads it (2 seconds).
-        $eventsOnly = (Get-AzlSonarMonitorName -Value ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))) -eq 'Update' -and -not [bool](Get-AzlSonarMember $Config 'azureConnected' $true)
+        $eventsOnly = (Get-AzlSonarMonitorName -Value ([string](Get-AzlSonarMember $Config 'monitor' 'Auto'))) -in 'Update', 'Deployment' -and -not [bool](Get-AzlSonarMember $Config 'azureConnected' $true)
         Wait-AzlSonarInterval -Shared $Shared -Seconds $(if ($eventsOnly) { [Math]::Min([double]$Config.pollSeconds, 2) } else { $Config.pollSeconds })
     }
 }

@@ -132,4 +132,24 @@ Describe 'events.schema.json: the toolkit feeds in the events folder (input to S
         }
         (Test-Def -Json $json -Def 'updateEventsState') | Should -BeTrue
     }
+
+    It 'describes the post-deployment run Sonar serves for every real fixture, and refuses to call a Plan failed or red' {
+        Import-SonarTestModule
+        foreach ($name in 'plan-example', 'plan-passed', 'plan-warning', 'apply-passed', 'apply-failed') {
+            $lines = @(Get-Content -LiteralPath (Join-Path $script:ToolkitFixtures "$name.post-deployment-events.jsonl"))
+            $json = InModuleScope AzlSonar -Parameters @{ L = $lines } {
+                param($L)
+                $store = [hashtable]::Synchronized(@{})
+                foreach ($x in $L) { Add-AzlSonarPostDeploymentEvent -Store $store -Line $x }
+                ConvertTo-Json -InputObject (Get-AzlSonarPostDeploymentState -Store $store -Config ([pscustomobject]@{ armEventsPath = 'C:\ev\arm.jsonl' })) -Depth 8
+            }
+            (Test-Def -Json $json -Def 'postDeploymentState') | Should -BeTrue -Because $name
+        }
+        $planned = [ordered]@{ hasData = $true; status = 'failed'; kind = 'err'; mode = 'Plan' }
+        (Test-Def -Json (ConvertTo-Json -InputObject $planned) -Def 'postDeploymentState') | Should -BeFalse
+        $apply = [ordered]@{ hasData = $true; status = 'failed'; kind = 'err'; mode = 'Apply' }
+        (Test-Def -Json (ConvertTo-Json -InputObject $apply) -Def 'postDeploymentState') | Should -BeTrue
+        $stopped = [ordered]@{ hasData = $true; status = 'incomplete'; kind = 'warn'; mode = 'Plan' }
+        (Test-Def -Json (ConvertTo-Json -InputObject $stopped) -Def 'postDeploymentState') | Should -BeTrue
+    }
 }

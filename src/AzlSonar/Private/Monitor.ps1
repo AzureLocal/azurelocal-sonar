@@ -48,13 +48,13 @@ function Get-AzlSonarMonitorPlan {
         What a monitor needs: which sources are read and which log access is listed.
     .DESCRIPTION
         { monitor, standalone, azure (poll the Azure resources), ztpEvents, osConfigEvents, nodeProbe (OEM image route
-        probes), tailer (the seed node's log), updateEvents (the toolkit's update-events.jsonl; Auto and Update only), armEvents (the toolkit's ARM Validate and Deploy event file; Validate and Deployment only), verificationEvents (the pre-cluster verification gate's event file; Auto and Verification only), cluster (the cluster resource, for the cluster card of Validate, Deployment, Update, AddNode and Repair), discovery (the discovery files), phases (the log access phases listed) }.
+        probes), tailer (the seed node's log), updateEvents (the toolkit's update-events.jsonl; Auto and Update only), armEvents (the toolkit's ARM Validate and Deploy event file; Validate and Deployment only), postDeploymentEvents (the toolkit's post-deployment-events.jsonl of phase 06; Auto and Deployment only), verificationEvents (the pre-cluster verification gate's event file; Auto and Verification only), cluster (the cluster resource, for the cluster card of Validate, Deployment, Update, AddNode and Repair), discovery (the discovery files), phases (the log access phases listed) }.
         Auto is today's behaviour: everything. Discovery reads the discovery files only (no Azure sign-in, no node). Provisioning
         reads Azure and the ZTP event file. OsConfiguration reads the OS configuration event file (and the Arc run commands in
         Azure) but not the node logs. Verification reads the gate's event file only (no Azure sign-in, no node, no log tailer). Validate, Deployment, Update, AddNode and Repair read the Azure resources of their
         operation and the seed node's log. With -AzureOffline the Update monitor reads the toolkit's update event file only (no Azure,
         no node, no log tailer, no log access listed): it is what Sonar runs when nobody is signed in to Azure and the update events
-        are there to follow.
+        are there to follow. The same goes for the Deployment monitor with the toolkit's post-deployment-events.jsonl (Test-AzlSonarOfflinePostDeployment).
     #>
     [CmdletBinding()]
     [OutputType([System.Collections.Specialized.OrderedDictionary])]
@@ -66,10 +66,12 @@ function Get-AzlSonarMonitorPlan {
 
     $name = Get-AzlSonarMonitorName -Value $Monitor
     if (-not $name) { $name = 'Auto' }
-    $plan = [ordered]@{ monitor = $name; standalone = ($name -ne 'Auto'); azure = $true; ztpEvents = $true; osConfigEvents = $true; nodeProbe = $true; tailer = $true; discovery = $true; armEvents = $true; verificationEvents = $true; updateEvents = $true; cluster = $true
+    $plan = [ordered]@{ monitor = $name; standalone = ($name -ne 'Auto'); azure = $true; ztpEvents = $true; osConfigEvents = $true; nodeProbe = $true; tailer = $true; discovery = $true; armEvents = $true; verificationEvents = $true; updateEvents = $true; postDeploymentEvents = $true; cluster = $true
         phases = @('provisioning', 'arc-registration', 'validation', 'deployment', 'post-deployment', 'update', 'add-node', 'repair') }
     # The toolkit's solution update event file is read by Auto and Update only.
     if ($name -notin 'Auto', 'Update') { $plan.updateEvents = $false }
+    # The toolkit's post-deployment event file (phase 06) is read by Auto and Deployment only.
+    if ($name -notin 'Auto', 'Deployment') { $plan.postDeploymentEvents = $false }
     switch ($name) {
         'Discovery' { $plan.verificationEvents = $false; $plan.azure = $false; $plan.cluster = $false; $plan.armEvents = $false; $plan.ztpEvents = $false; $plan.osConfigEvents = $false; $plan.nodeProbe = $false; $plan.tailer = $false; $plan.phases = @() }
         'Provisioning' { $plan.verificationEvents = $false; $plan.cluster = $false; $plan.armEvents = $false; $plan.osConfigEvents = $false; $plan.discovery = $false; $plan.tailer = $false; $plan.phases = @('provisioning', 'arc-registration') }
@@ -81,7 +83,7 @@ function Get-AzlSonarMonitorPlan {
         'AddNode' { $plan.verificationEvents = $false; $plan.armEvents = $false; $plan.ztpEvents = $false; $plan.osConfigEvents = $false; $plan.nodeProbe = $false; $plan.discovery = $false; $plan.phases = @('add-node') }
         'Repair' { $plan.verificationEvents = $false; $plan.armEvents = $false; $plan.ztpEvents = $false; $plan.osConfigEvents = $false; $plan.nodeProbe = $false; $plan.discovery = $false; $plan.phases = @('repair') }
     }
-    if ($AzureOffline -and $name -eq 'Update') {
+    if ($AzureOffline -and $name -in 'Update', 'Deployment') {
         $plan.azure = $false; $plan.tailer = $false; $plan.nodeProbe = $false; $plan.cluster = $false; $plan.phases = @()
     }
     return $plan

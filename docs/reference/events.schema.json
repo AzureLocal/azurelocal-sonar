@@ -115,6 +115,7 @@
         "update": { "type": ["object", "null"], "description": "The Update view. Azure's track when Azure reports a run; otherwise, with the toolkit's update-events.jsonl, an object with source 'events', verified false, status, phase, level, label, tree and counts." },
         "updateEvents": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/updateEventsState" }], "description": "What the toolkit's update-events.jsonl says (Auto and Update monitors); null for the other monitors." },
         "verification": { "type": "object", "properties": { "plan": { "$ref": "#/$defs/verificationPlan" } }, "description": "The Verification view: the pre-cluster gate's run (status, verdict, counts, categories) and, beside it, the gate's Plan from precluster-plan-events.jsonl." },
+        "postDeployment": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/postDeploymentState" }], "description": "The Post-deployment view: the toolkit's phase 06 run from post-deployment-events.jsonl (Auto and Deployment monitors); null for the other monitors." },
         "warnings": { "type": "array", "items": { "type": "string" } },
         "pollError": { "type": ["string", "null"] }
       }
@@ -144,24 +145,27 @@
       "required": ["name"]
     },
     "toolkitEvent": {
-      "title": "toolkit feed event: one line of update-events.jsonl or precluster-plan-events.jsonl in the shared events folder (the envelope every azurelocal-toolkit feed shares)",
-      "description": "JSON Lines, UTF-8 without BOM, appended by the toolkit and read by Sonar (read only, shared with the writer). These files are Sonar's INPUT from the toolkit, not Sonar's recording: they have no t or k. update-events.jsonl (stage SolutionUpdate; Get-AvailableSolutionUpdate.ps1 with mode Check, Start-AzureLocalSolutionUpdate.ps1 with mode WhatIf or Install): RunStarted (step Run), EnvironmentRead (step Environment), DiscoveryPolled (step Discovery), one Update<Next> or UpdateAttention line per update (step Update, with updateName and version), EnvironmentAttention, then RunCompleted or RunFailed (step Run, exitCode, verdict). precluster-plan-events.jsonl (stage PreClusterVerification, mode Plan; Invoke-AzureLocalPreClusterVerification.ps1 -Mode Plan): RunStarted (step Run), one CategoryPlanned per category (step azure, identity, nodes, network, storage or readiness; applies, total, blocking), RunCompleted (step Run, exitCode 0, result Planned). A plan has no verdict. A line that is not a JSON object with node and state is skipped; another stage is ignored.",
+      "title": "toolkit feed event: one line of update-events.jsonl, precluster-plan-events.jsonl or post-deployment-events.jsonl in the shared events folder (the envelope every azurelocal-toolkit feed shares)",
+      "description": "JSON Lines, UTF-8 without BOM, appended by the toolkit and read by Sonar (read only, shared with the writer). These files are Sonar's INPUT from the toolkit, not Sonar's recording: they have no t or k. update-events.jsonl (stage SolutionUpdate; Get-AvailableSolutionUpdate.ps1 with mode Check, Start-AzureLocalSolutionUpdate.ps1 with mode WhatIf or Install): RunStarted (step Run), EnvironmentRead (step Environment), DiscoveryPolled (step Discovery), one Update<Next> or UpdateAttention line per update (step Update, with updateName and version), EnvironmentAttention, then RunCompleted or RunFailed (step Run, exitCode, verdict). precluster-plan-events.jsonl (stage PreClusterVerification, mode Plan; Invoke-AzureLocalPreClusterVerification.ps1 -Mode Plan): RunStarted (step Run), one CategoryPlanned per category (step azure, identity, nodes, network, storage or readiness; applies, total, blocking), RunCompleted (step Run, exitCode 0, result Planned). A plan has no verdict. post-deployment-events.jsonl (stage PostDeployment, mode Plan or Apply; Invoke-AzureLocalPostDeployment.ps1): RunStarted (route, selected: the step ids of the run), one line per state change of a step (step = the step id: StepSkipped with the reason as evidence, StepStarted with task, StepPlanned, StepPassed, StepWarning, StepFailed, StepNotRun, StepRefused; exitCode on the result lines), ClusterReachable or ClusterUnreachable, RunCompleted (exitCode 0, 1, 2 or 3, result: the one-line verdict). A line that is not a JSON object with node and state is skipped; another stage is ignored.",
       "type": "object",
       "required": ["timestamp", "node", "stage", "state"],
       "properties": {
         "timestamp": { "type": "string", "format": "date-time", "description": "UTC, round trip format with up to seven fractional digits." },
         "node": { "type": "string", "description": "'*' for the run itself, else a machine name." },
-        "stage": { "type": "string", "description": "SolutionUpdate for update-events.jsonl, PreClusterVerification for precluster-plan-events.jsonl." },
+        "stage": { "type": "string", "description": "SolutionUpdate for update-events.jsonl, PreClusterVerification for precluster-plan-events.jsonl, PostDeployment for post-deployment-events.jsonl." },
         "step": { "type": "string", "description": "Run for the run's own lines, else the stage of the run: Environment, Discovery, Update (update feed); the category id (plan feed)." },
-        "state": { "type": "string", "description": "RunStarted, RunCompleted, RunFailed, or the event: EnvironmentRead, DiscoveryPolled, UpdateStart, UpdateFollow, UpdateImportSbe, UpdateAttention, UpdateWouldStart, UpdateStarted, UpdatePrepared, CategoryPlanned ... Sonar does not depend on a fixed list." },
+        "state": { "type": "string", "description": "RunStarted, RunCompleted, RunFailed, or the event: EnvironmentRead, DiscoveryPolled, UpdateStart, UpdateFollow, UpdateImportSbe, UpdateAttention, UpdateWouldStart, UpdateStarted, UpdatePrepared, CategoryPlanned, StepSkipped, StepStarted, StepPlanned, StepPassed, StepWarning, StepFailed, StepNotRun, StepRefused, ClusterReachable, ClusterUnreachable ... Sonar does not depend on a fixed list." },
         "evidence": { "type": "string", "description": "What happened, in words (at most 4000 characters)." },
         "level": { "enum": ["Info", "Warning", "Error"] },
         "nextAction": { "type": "string" },
         "runId": { "type": "string", "description": "One per run; a RunStarted with another runId starts the view over." },
-        "mode": { "type": "string", "description": "Check, WhatIf or Install (update feed); Plan (plan feed)." },
+        "mode": { "type": "string", "description": "Check, WhatIf or Install (update feed); Plan (plan feed); Plan or Apply (post-deployment feed)." },
         "cluster": { "type": "string" },
-        "exitCode": { "type": "integer", "description": "On the closing line: 0 done, 1 failed, 2 an input problem." },
-        "result": { "type": "string", "description": "Running, Passed, Warning, Failed, Skipped or Planned." },
+        "exitCode": { "type": "integer", "description": "On the closing line: 0 done, 1 failed, 2 an input problem. Post-deployment feed: 0 every selected step passed, was planned or was skipped, 1 a step failed, 2 bad input, a refusal or a cluster that does not answer, 3 stopped after a step with warnings; the result lines of a step carry the exit code of its script." },
+        "result": { "type": "string", "description": "Running, Passed, Warning, Failed, Skipped or Planned (update feed); the one-line verdict on the closing line of the post-deployment feed." },
+        "route": { "type": "string", "description": "Post-deployment feed, RunStarted: PowerShell or AzureCli." },
+        "selected": { "type": "array", "items": { "type": "string" }, "description": "Post-deployment feed, RunStarted: the step ids the run selected." },
+        "task": { "type": "string", "description": "Post-deployment feed, StepStarted: the page of the Implementation guide the step belongs to, for example task-05-storage-configuration." },
         "verdict": { "type": "string", "description": "Update feed, closing line of a Check: UpToDate, UpdateAvailable, AdditionalContentRequired, UpdateRunning or AttentionNeeded. The plan feed has none." },
         "updateName": { "type": "string" },
         "version": { "type": "string" },
@@ -186,6 +190,29 @@
         "tree": { "type": "array", "items": { "$ref": "#/$defs/step" } },
         "counts": { "type": "object" }
       }
+    },
+    "postDeploymentState": {
+      "type": "object",
+      "description": "state.postDeployment: the latest run of post-deployment-events.jsonl as Sonar read it. A Plan changes nothing, so a Plan is never a failed deployment: a Plan that completed is planned (kind idle), one that stopped is incomplete (kind warn); only an Apply that failed is failed (kind err).",
+      "properties": {
+        "configured": { "type": "boolean" },
+        "hasData": { "type": "boolean" },
+        "file": { "type": "string" },
+        "status": { "enum": ["notstarted", "running", "planned", "passed", "warning", "incomplete", "failed"] },
+        "kind": { "enum": ["idle", "run", "ok", "warn", "err"], "description": "What the tile shows." },
+        "mode": { "enum": ["", "Plan", "Apply"] },
+        "word": { "type": "string" },
+        "verdict": { "type": "string", "description": "The toolkit's one-line result of the run." },
+        "exitCode": { "type": ["integer", "null"] },
+        "nextAction": { "type": "string" },
+        "cluster": { "type": "object", "properties": { "state": { "enum": ["", "reachable", "unreachable"] }, "message": { "type": "string" } } },
+        "counts": { "type": "object", "additionalProperties": { "type": "integer" } },
+        "steps": { "type": "array", "items": { "type": "object", "required": ["id", "status"], "properties": { "id": { "type": "string" }, "order": { "type": "integer" }, "task": { "type": "string" }, "status": { "enum": ["planned", "passed", "skipped", "warning", "failed", "notrun", "refused", "running", "pending"] }, "word": { "type": "string" }, "kind": { "enum": ["idle", "run", "ok", "warn", "err"] }, "reason": { "type": "string", "description": "What the step found, or why it was skipped." }, "exitCode": { "type": ["integer", "null"] }, "nextAction": { "type": "string" }, "at": { "type": "string" } } } },
+        "run": { "type": ["object", "null"] },
+        "azure": { "type": "object", "description": "Present when Sonar started with no Azure sign-in: connected false, status notconnected. A plain fact, never an error.", "properties": { "connected": { "type": "boolean" }, "status": { "type": "string" }, "message": { "type": "string" } } },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      },
+      "not": { "anyOf": [{ "properties": { "mode": { "const": "Plan" }, "status": { "const": "failed" } }, "required": ["mode", "status"] }, { "properties": { "mode": { "const": "Plan" }, "kind": { "const": "err" } }, "required": ["mode", "kind"] }] }
     },
     "verificationPlan": {
       "type": "object",
@@ -213,72 +240,7 @@
       "type": "object",
       "properties": {
         "k": { "const": "tailer" },
-        "toolkitEvent": {
-      "title": "toolkit feed event: one line of update-events.jsonl or precluster-plan-events.jsonl in the shared events folder (the envelope every azurelocal-toolkit feed shares)",
-      "description": "JSON Lines, UTF-8 without BOM, appended by the toolkit and read by Sonar (read only, shared with the writer). These files are Sonar's INPUT from the toolkit, not Sonar's recording: they have no t or k. update-events.jsonl (stage SolutionUpdate; Get-AvailableSolutionUpdate.ps1 with mode Check, Start-AzureLocalSolutionUpdate.ps1 with mode WhatIf or Install): RunStarted (step Run), EnvironmentRead (step Environment), DiscoveryPolled (step Discovery), one Update<Next> or UpdateAttention line per update (step Update, with updateName and version), EnvironmentAttention, then RunCompleted or RunFailed (step Run, exitCode, verdict). precluster-plan-events.jsonl (stage PreClusterVerification, mode Plan; Invoke-AzureLocalPreClusterVerification.ps1 -Mode Plan): RunStarted (step Run), one CategoryPlanned per category (step azure, identity, nodes, network, storage or readiness; applies, total, blocking), RunCompleted (step Run, exitCode 0, result Planned). A plan has no verdict. A line that is not a JSON object with node and state is skipped; another stage is ignored.",
-      "type": "object",
-      "required": ["timestamp", "node", "stage", "state"],
-      "properties": {
-        "timestamp": { "type": "string", "format": "date-time", "description": "UTC, round trip format with up to seven fractional digits." },
-        "node": { "type": "string", "description": "'*' for the run itself, else a machine name." },
-        "stage": { "type": "string", "description": "SolutionUpdate for update-events.jsonl, PreClusterVerification for precluster-plan-events.jsonl." },
-        "step": { "type": "string", "description": "Run for the run's own lines, else the stage of the run: Environment, Discovery, Update (update feed); the category id (plan feed)." },
-        "state": { "type": "string", "description": "RunStarted, RunCompleted, RunFailed, or the event: EnvironmentRead, DiscoveryPolled, UpdateStart, UpdateFollow, UpdateImportSbe, UpdateAttention, UpdateWouldStart, UpdateStarted, UpdatePrepared, CategoryPlanned ... Sonar does not depend on a fixed list." },
-        "evidence": { "type": "string", "description": "What happened, in words (at most 4000 characters)." },
-        "level": { "enum": ["Info", "Warning", "Error"] },
-        "nextAction": { "type": "string" },
-        "runId": { "type": "string", "description": "One per run; a RunStarted with another runId starts the view over." },
-        "mode": { "type": "string", "description": "Check, WhatIf or Install (update feed); Plan (plan feed)." },
-        "cluster": { "type": "string" },
-        "exitCode": { "type": "integer", "description": "On the closing line: 0 done, 1 failed, 2 an input problem." },
-        "result": { "type": "string", "description": "Running, Passed, Warning, Failed, Skipped or Planned." },
-        "verdict": { "type": "string", "description": "Update feed, closing line of a Check: UpToDate, UpdateAvailable, AdditionalContentRequired, UpdateRunning or AttentionNeeded. The plan feed has none." },
-        "updateName": { "type": "string" },
-        "version": { "type": "string" },
-        "applies": { "type": "integer", "minimum": 0 },
-        "total": { "type": "integer", "minimum": 0 },
-        "blocking": { "type": "integer", "minimum": 0 }
-      },
-      "additionalProperties": true
-    },
-    "updateEventsState": {
-      "type": "object",
-      "description": "state.updateEvents: the run of update-events.jsonl as Sonar read it.",
-      "properties": {
-        "configured": { "type": "boolean" },
-        "hasData": { "type": "boolean" },
-        "status": { "enum": ["notstarted", "running", "success", "error"] },
-        "phase": { "enum": ["idle", "available", "preparing", "installing", "failed"] },
-        "level": { "enum": ["neutral", "run", "ok", "error"] },
-        "label": { "type": "string" },
-        "plan": { "type": "boolean", "description": "True for a Check, Plan or WhatIf run: nothing was installed." },
-        "run": { "type": ["object", "null"], "properties": { "runId": { "type": "string" }, "mode": { "type": "string" }, "verdict": { "type": "string" }, "cluster": { "type": "string" }, "exitCode": { "type": ["integer", "null"] }, "update": { "type": "string" }, "version": { "type": "string" }, "message": { "type": "string" }, "nextAction": { "type": "string" } } },
-        "tree": { "type": "array", "items": { "$ref": "#/$defs/step" } },
-        "counts": { "type": "object" }
-      }
-    },
-    "verificationPlan": {
-      "type": "object",
-      "description": "state.verification.plan: the pre-cluster gate's Plan (precluster-plan-events.jsonl). Informational: it has no verdict and is never a Fail; the gate's own run, when there is one, is the answer.",
-      "properties": {
-        "configured": { "type": "boolean" },
-        "hasData": { "type": "boolean" },
-        "planned": { "const": true },
-        "status": { "enum": ["notplanned", "planning", "planned", "incomplete"] },
-        "word": { "type": "string" },
-        "file": { "type": "string" },
-        "applies": { "type": "integer", "minimum": 0 },
-        "total": { "type": "integer", "minimum": 0 },
-        "blocking": { "type": "integer", "minimum": 0 },
-        "categories": { "type": "array", "items": { "type": "object", "required": ["id", "applies", "total", "blocking"], "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "applies": { "type": "integer" }, "total": { "type": "integer" }, "blocking": { "type": "integer" }, "evidence": { "type": "string" } } } },
-        "message": { "type": "string" },
-        "nextAction": { "type": "string" },
-        "run": { "type": ["object", "null"] },
-        "warnings": { "type": "array", "items": { "type": "string" } }
-      },
-      "not": { "anyOf": [{ "required": ["verdict"] }, { "properties": { "status": { "enum": ["fail", "pass"] } }, "required": ["status"] }] }
-    },
-    "tailer": {
+        "tailer": {
           "type": "object",
           "properties": {
             "state": { "type": "string", "description": "connected, connecting, unavailable ..." },

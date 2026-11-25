@@ -43,8 +43,8 @@ Describe 'the monitor plan with no Azure' {
         $p.tailer | Should -BeTrue
         @($p.phases) | Should -Be @('update')
     }
-    It 'changes nothing for the <Name> monitor: only the Update monitor runs without Azure' -ForEach @(
-        @{ Name = 'Auto' }, @{ Name = 'Deployment' }, @{ Name = 'Validate' }, @{ Name = 'Provisioning' }
+    It 'changes nothing for the <Name> monitor: only the Update and the Deployment monitor (PostDeploymentEvents.Tests.ps1) run without Azure' -ForEach @(
+        @{ Name = 'Auto' }, @{ Name = 'Validate' }, @{ Name = 'Provisioning' }
     ) {
         $plain = InModuleScope AzlSonar -Parameters @{ N = $Name } { param($N) Get-AzlSonarMonitorPlan -Monitor $N }
         $off = InModuleScope AzlSonar -Parameters @{ N = $Name } { param($N) Get-AzlSonarMonitorPlan -Monitor $N -AzureOffline }

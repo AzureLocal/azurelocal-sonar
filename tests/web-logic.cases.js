@@ -886,7 +886,7 @@ test('stepRule: OEM route groups, validation, extensions, deployment and update'
 });
 
 test('mode sections: each mode shows only its own steps; Add node and Repair have none of their own', function () {
-  eq(m.MODE_SECTIONS, { discovery: ['discovery'], prov: ['provisioning'], osconfig: ['osconfiguration'], verify: ['verification'], validate: ['armvalidation', 'validation', 'extensions'], deploy: ['armdeployment', 'deployment'], update: ['update'], addnode: [], repair: [] });
+  eq(m.MODE_SECTIONS, { discovery: ['discovery'], prov: ['provisioning'], osconfig: ['osconfiguration'], verify: ['verification'], validate: ['armvalidation', 'validation', 'extensions'], deploy: ['armdeployment', 'deployment'], postdeploy: ['postdeployment'], update: ['update'], addnode: [], repair: [] });
 });
 
 test('regression: clicking an Azure step (Register machine, Install OS) must not leave the logs empty', function () {
@@ -1827,7 +1827,8 @@ test('standalone monitors: only that tile shows (the others are hidden, not grey
   each.forEach(function (c) {
     var s = JSON.parse(JSON.stringify(base)); s.monitor = c[0];
     var shown = m.modeStates(s).filter(function (t) { return !t.hidden; });
-    eq(shown.map(function (t) { return t.id; }), [c[1]], c[0] + ' shows its own tile only');
+    // The Deployment monitor also shows the post-deployment tile (phase 06 follows the deployment).
+    eq(shown.map(function (t) { return t.id; }), c[1] === 'deploy' ? ['deploy', 'postdeploy'] : [c[1]], c[0] + ' shows its own tile only');
     eq(m.activeModeId(s), c[1], c[0] + ' is the mode shown');
     eq(m.monitorOf(s), c[1]);
   });
@@ -2836,6 +2837,120 @@ test('Azure not connected: a neutral notice and a cluster-card row, never an err
 test('Azure connected (or an older Sonar without the field): no not-connected note', function () {
   eq(m.updateNotices(offlineUpdate({ azure: { connected: true, status: 'connected', message: '' } })), []);
   eq(m.updateNotices(offlineUpdate({ azure: undefined })), []);
+});
+
+// ---------------------------------------------------------------- post-deployment (the toolkit's phase 06 run, post-deployment-events.jsonl)
+
+function pdStep(order, id, task, status, word, reason, exitCode) {
+  return { id: id, order: order, task: task, status: status, word: word, kind: 'idle', reason: reason || '', exitCode: exitCode === undefined ? null : exitCode, nextAction: '', at: '2026-11-25T02:21:34.000Z' };
+}
+// What Get-AzlSonarPostDeploymentState returns for a Plan that passed (the toolkit's plan-passed fixture, shortened).
+function pdPlanned(extra) {
+  var pd = { configured: true, hasData: true, file: 'post-deployment-events.jsonl', status: 'planned', kind: 'idle', mode: 'Plan', word: 'planned', verdict: 'every selected step passed or was planned', exitCode: 0, nextAction: '',
+    cluster: { state: 'reachable', message: 'The cluster answers on clus01.' }, counts: { total: 4, planned: 2, passed: 0, skipped: 2, warning: 0, failed: 0, refused: 0, notrun: 0, running: 0, pending: 0 },
+    steps: [pdStep(1, 'sdn', 'task-01-deploy-sdn', 'skipped', 'Skipped', 'sdn.enabled is not true (the file has it false)'), pdStep(2, 'sdn-test', 'task-01-deploy-sdn', 'skipped', 'Skipped', 'sdn.enabled is not true (the file has it false)'),
+      pdStep(3, 'quorum', 'task-02-cluster-quorum-configuration', 'planned', 'Planned', 'Set the cluster witness: the file was read', 0), pdStep(4, 'ssh', 'task-04-ssh-connectivity-to-nodes', 'planned', 'Planned', 'Turn on SSH: the file was read', 0)],
+    run: { runId: 'abc123', cluster: 'clus01', route: 'PowerShell', started: '2026-11-25T02:21:34.000Z', completed: '2026-11-25T02:21:40.000Z', lastEventAt: '2026-11-25T02:21:40.000Z', events: 12, stale: 0 }, warnings: [] };
+  if (extra) Object.keys(extra).forEach(function (k) { pd[k] = extra[k]; });
+  return pd;
+}
+function pdStopped() {
+  var pd = pdPlanned({ status: 'incomplete', kind: 'warn', word: 'plan stopped', exitCode: 2, verdict: "step 'quorum' failed (exit code 2); the steps after it were not run",
+    warnings: ['The plan stopped: step quorum failed. A plan changes nothing: this is what it found, not a failed deployment.'] });
+  pd.steps = [pdStep(1, 'sdn', 'task-01-deploy-sdn', 'skipped', 'Skipped', 'sdn.enabled is not true'), pdStep(2, 'quorum', 'task-02-cluster-quorum-configuration', 'failed', 'Failed', 'exit code 2: ERROR: azure.subscription_id is missing', 2), pdStep(3, 'ssh', 'task-04-ssh-connectivity-to-nodes', 'notrun', 'Not run', 'an earlier step stopped the run')];
+  pd.counts = { total: 3, planned: 0, passed: 0, skipped: 1, warning: 0, failed: 1, refused: 0, notrun: 1, running: 0, pending: 0 };
+  return pd;
+}
+function pdApplyFailed() {
+  var pd = pdStopped(); pd.mode = 'Apply'; pd.status = 'failed'; pd.kind = 'err'; pd.word = 'failed'; pd.exitCode = 1; pd.warnings = [];
+  pd.steps[1] = pdStep(2, 'storage-volumes', 'task-05-storage-configuration', 'failed', 'Failed', 'exit code 1: ERROR: the failure of storage-volumes', 1);
+  return pd;
+}
+function pdState(pd, extra) {
+  var s = { phase: 'post-deployment', activePhase: 'post-deployment', monitor: 'Deployment', cluster: 'clus01', postDeployment: pd, pollError: null, nodes: [{ name: 'n1', arcStatus: 'Unknown', seed: true }] };
+  if (extra) Object.keys(extra).forEach(function (k) { s[k] = extra[k]; });
+  return s;
+}
+
+test('post-deployment: a Plan that passed is a quiet tile with its mode, steps and skip reasons, never an error', function () {
+  var s = pdState(pdPlanned());
+  var t = m.pdTile(s);
+  eq(t.status, 'idle'); eq(t.line, 'Planned · 2 steps, 2 skipped');
+  var tile = tileOf(m.modeStates(s), 'postdeploy');
+  eq(tile.name, 'Post-deployment'); eq(tile.status, 'idle'); eq(tile.hidden, false);
+  var sm = m.summaryFor(s, 'postdeploy', {});
+  eq(sm.chip.kind, 'idle'); eq(sm.chip.text, 'Planned');
+  eq(/Plan complete \(exit code 0\)/.test(sm.headline), true); eq(/Nothing was changed/.test(sm.headline), true);
+  var facts = {}; sm.facts.forEach(function (f) { facts[f.k] = f; });
+  eq(/^Plan/.test(facts.Mode.v), true); eq(facts['Exit code'].v.indexOf('0 ('), 0); eq(!!facts['Exit code'].warn, false);
+  eq(sm.panels[0].kind, 'idle');
+  var tree = m.pdTreeOf(s);
+  eq(tree.map(function (n) { return n.name; }), ['sdn', 'sdn-test', 'quorum', 'ssh']);
+  eq(tree.map(function (n) { return n.status; }), ['skipped', 'skipped', 'unknown', 'unknown']);
+  eq(tree[0].pd.reason, 'sdn.enabled is not true (the file has it false)'); eq(tree[2].pd.task, 'task-02-cluster-quorum-configuration');
+  eq(m.pdIconKey('planned', true), 'notstarted');
+});
+
+test('post-deployment: a Plan that stopped is amber and a finding, a failed step of a Plan is never an error icon', function () {
+  var s = pdState(pdStopped());
+  var t = m.pdTile(s);
+  eq(t.status, 'warn'); eq(t.line, 'Plan stopped at quorum');
+  var sm = m.summaryFor(s, 'postdeploy', {});
+  eq(sm.chip.kind, 'warn'); eq(sm.chip.text, 'Plan stopped');
+  eq(/A plan changes nothing/.test(sm.headline), true); eq(/at quorum \(exit code 2\)/.test(sm.headline), true);
+  eq(sm.panels[0].rows[0].k, 'Failed: quorum');
+  var tree = m.pdTreeOf(s);
+  eq(tree[1].status, 'unknown'); eq(m.pdIconKey('failed', true), 'warning'); eq(m.pdIconKey('failed', false), 'error');
+  eq(tree[2].status, 'notstarted');
+  eq(m.liveNotes(s).filter(function (x) { return x.kind === 'postdeploy'; }).length, 1);
+});
+
+test('post-deployment: an Apply that failed is red at the step, one that passed is green', function () {
+  var f = m.pdTile(pdState(pdApplyFailed()));
+  eq(f.status, 'err'); eq(f.line, 'Failed at storage-volumes');
+  eq(m.summaryFor(pdState(pdApplyFailed()), 'postdeploy', {}).chip.kind, 'err');
+  eq(m.pdTreeOf(pdState(pdApplyFailed()))[1].status, 'error');
+  var ok = pdPlanned({ status: 'passed', kind: 'ok', mode: 'Apply', word: 'passed', counts: { total: 2, planned: 0, passed: 2, skipped: 0, warning: 0, failed: 0, refused: 0, notrun: 0, running: 0, pending: 0 } });
+  ok.steps = [pdStep(1, 'quorum', 'task-02', 'passed', 'Passed', 'done', 0), pdStep(2, 'ssh', 'task-04', 'passed', 'Passed', 'done', 0)];
+  var t = m.pdTile(pdState(ok));
+  eq(t.status, 'ok'); eq(t.line, 'Passed · 2 steps');
+  var w = pdPlanned({ status: 'warning', kind: 'warn', word: 'stopped after warnings', exitCode: 3, verdict: "stopped after step 'ssh', which ended with warnings (-ContinueOnWarning goes on)" });
+  w.steps[3] = pdStep(4, 'ssh', 'task-04', 'warning', 'Warning', 'ended with 1 warning(s): a warning', 0);
+  eq(m.pdTile(pdState(w)).status, 'warn'); eq(m.pdTile(pdState(w)).line, 'Stopped after ssh (warnings)');
+});
+
+test('post-deployment: a run in progress says which step it is on', function () {
+  var pd = pdPlanned({ status: 'running', kind: 'run', word: 'planning', exitCode: null });
+  pd.steps = [pdStep(1, 'quorum', 't', 'planned', 'Planned', 'ok', 0), pdStep(2, 'ssh', 't', 'running', 'Running', 'Turn on SSH'), pdStep(3, 'storage-volumes', 't', 'pending', 'Waiting', '')];
+  pd.counts = { total: 3, planned: 1, passed: 0, skipped: 0, warning: 0, failed: 0, refused: 0, notrun: 0, running: 1, pending: 1 };
+  var t = m.pdTile(pdState(pd));
+  eq(t.status, 'run'); eq(t.line, 'Plan · step 2 of 3 (ssh)');
+  eq(/Planning: 1 of 3 steps done \(now ssh\)/.test(m.pdHeadline(pd)), true);
+});
+
+test('post-deployment: the Deployment monitor with no Azure sign-in shows the run and says Azure is not connected, as a fact', function () {
+  var pd = pdPlanned({ azure: { connected: false, status: 'notconnected', message: 'The Azure live poll is not connected: nobody is signed in.' } });
+  var s = pdState(pd);
+  eq(m.activeModeId(s), 'postdeploy');
+  eq(m.modeStates(s).filter(function (t) { return !t.hidden; }).map(function (t) { return t.id; }), ['deploy', 'postdeploy']);
+  var sm = m.summaryFor(s, 'postdeploy', {});
+  eq(sm.facts.filter(function (f) { return f.k === 'Azure'; }).length, 1);
+  eq(sm.panels[0].rows.filter(function (r) { return r.k === 'Azure'; }).length, 1);
+  eq(m.pdFacts(pd).filter(function (f) { return !!f.warn; }).length, 0, 'nothing in a passed Plan is a warning');
+  eq(m.stepRule('postdeployment', [{ id: 'pd:quorum', name: 'quorum' }]).side, 'postdeploy');
+});
+
+test('post-deployment: Auto lands on it after the deployment, stays on Deployment while Azure deploys, and shows no tile without events', function () {
+  var done = { phase: 'done', activePhase: 'done', monitor: 'Auto', postDeployment: pdPlanned(), deployment: { status: 'success', tree: [] } };
+  eq(m.activeModeId(done), 'postdeploy');
+  eq(tileOf(m.modeStates(done), 'postdeploy').status, 'idle');
+  var deploying = { phase: 'deployment', activePhase: 'deployment', monitor: 'Auto', postDeployment: pdPlanned(), deployment: { status: 'running', tree: [{ id: 's', name: 's', status: 'running', children: [] }] } };
+  eq(m.activeModeId(deploying), 'deploy');
+  var none = { phase: 'done', activePhase: 'done', monitor: 'Auto', postDeployment: { configured: true, hasData: false, steps: [] } };
+  eq(m.activeModeId(none), 'deploy');
+  eq(tileOf(m.modeStates(none), 'postdeploy'), undefined);
+  eq(m.modeStates({ phase: 'provisioning', activePhase: 'provisioning', provisioning: provNone() }).length, 7, 'no post-deployment tile for a run without the events');
+  eq(m.stepsEmptyText('postdeploy', 'idle', '', false).indexOf('The steps appear here when the post-deployment run starts'), 0);
 });
 
 process.stdout.write(JSON.stringify(cases));

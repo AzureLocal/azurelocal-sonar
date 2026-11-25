@@ -214,10 +214,28 @@ These modes act on the cluster resource (`Microsoft.AzureStackHCI/clusters`), so
 | **Verification** | The **Verification** mode: the pre-cluster verification gate's verdict (Pass, Fail, Running, Expired), the counts by status and the checks by category with their node, message, remedy and source; a skipped check blocks the gate. Before the gate has run, the gate's **Plan** (which checks would run) is shown as planned, never as Fail. | The toolkit's pre-cluster verification gate, with Sonar pointed at its event file (`verificationEventsPath`). [Details](./verification.md). |
 | **Validate** | The **Validate** mode: the toolkit's checks and validation results ([ARM run](./arm-run.md)), Azure's validation steps (`deploymentSettings`), the running step with a live timer, errors expanded. Node logs from the seed node. | `./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Credential (Get-Credential)` with the deployment local admin. [Details](./run.md#watch-validate). |
 | **Deployment** | The **Deployment** mode: the toolkit's progress per cluster step with the known-failure hint ([ARM run](./arm-run.md)), the nested step tree, the live logs, the account and folders in **Log access**. | The same command. [Details](./run.md#watch-a-deployment). |
+| **Post-deployment** | The **Post-deployment** mode: the toolkit's phase 06 run, Plan or Apply, with its 13 steps, each with its task, result, exit code and skip reason, the verdict and the exit code. [Details](#post-deployment). | The toolkit's `Invoke-AzureLocalPostDeployment.ps1`; Sonar follows `post-deployment-events.jsonl` in the events folder, with or without an Azure sign-in (`-Monitor Deployment`). |
 | **Update** | The **Update** mode: what Azure offers, the readiness checks, the update run's steps and the history. [Details](#update). | `track: update`, or `auto` when Azure reports an update; weeks later, `-Monitor Update` on its own ([Monitoring a monthly update](#monitoring-a-monthly-update)). |
 | **Deployed cluster** | The **Deployment** mode in its *Done* state, with a card per machine that keeps its Arc status. There is no Health mode. | Any run on a deployed cluster. [Details](./run.md#look-at-a-deployed-cluster). |
 
 A machine that fails in any stage turns red, the status chip reads **Failed**, and the page stays on the mode that failed so you can read the text.
+
+## Post-deployment
+
+**The toolkit does:** `Invoke-AzureLocalPostDeployment.ps1` is phase 06 of the Implementation guide in one run: the eleven post-deployment tasks (SDN, quorum, security groups, SSH, storage, VM images, network security groups, logical networks, verification, external storage, the SBE import plan), 13 steps in the order of the guide's pages. `-Mode Plan` (the default) passes `-WhatIf` to every step and changes nothing; `-Mode Apply` makes the changes. It appends one event per state change to `post-deployment-events.jsonl` in the events folder (the file format is in [the event feed](./reference/events.md#the-toolkits-feeds-in-the-events-folder-input-to-sonar)).
+
+**In Sonar:** the **Post-deployment** tile and mode, between Deployment and Update. It shows when the toolkit has written events (Auto) and always on the Deployment monitor. The Steps box lists the 13 steps in the order of the guide; each shows its result, the page of the guide it belongs to (`task-05-storage-configuration`), the exit code of its script, what it found or why it was **skipped** (for example *sdn.enabled is not true (the file has it false)*) and the next action. The summary box shows the **mode** (Plan or Apply), the result, the **exit code** with its meaning, the toolkit's one-line verdict, the step counts and whether the cluster answered. Each event is a `[post-deployment]` line in the log pane.
+
+| Tile | Meaning |
+| --- | --- |
+| Grey, *Planned · 9 steps, 4 skipped* | A Plan finished (exit code 0). Nothing was changed; run it with `-Mode Apply`. |
+| Amber, *Plan stopped at quorum* | A Plan found a problem (exit code 1 or 2): the step is a **finding**, shown with a warning icon, and the steps after it are *Not run*. A Plan changes nothing, so Sonar never shows it as a failed deployment and shows its `Error` lines in the log pane as warnings. |
+| Amber, *Stopped after ssh (warnings)* | The run stopped after a step with warnings (exit code 3); `-ContinueOnWarning` goes on. |
+| Blue, *Plan · step 3 of 13 (quorum)* | The run is going. |
+| Green, *Passed · 13 steps* | An Apply finished (exit code 0). |
+| Red, *Failed at storage-volumes* | An **Apply** failed (exit code 1 or 2); the steps after it were not run. Repeat it with `-From <step>`. |
+
+**No Azure sign-in needed.** `-Monitor Deployment` starts without `Connect-AzAccount` when a `post-deployment-events.jsonl` is in the events folder (the folder of `updateEventsPath`, `armEventsPath`, `osConfigEventsPath` or `verificationEventsPath`; no new configuration key). Sonar then reads the event file only: no Azure resource, no node, no node log, no log account. The Azure live poll is marked **not connected** (`postDeployment.azure.connected` is `false` in the API; a note, never an error; `pollError` stays empty). See [Follow the post-deployment run](./run.md#follow-the-post-deployment-run). With a sign-in the same start reads Azure as before and adds the events.
 
 ## Update
 

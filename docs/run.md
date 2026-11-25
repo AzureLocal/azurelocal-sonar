@@ -22,7 +22,7 @@ The Validate, Deployment, Update, Add node and Repair modes start with a **clust
 
 ## Run one stage on its own (-Monitor)
 
-By default Sonar follows the whole flow (`-Monitor Auto`): Discovery, Provisioning, OS configuration, Verification, Validate, Deployment and Update. To watch one stage, name it. Only that tile and section show (the others are hidden, not greyed), only the sources that stage needs are read, **Log access** lists only its phases, and the page title names it.
+By default Sonar follows the whole flow (`-Monitor Auto`): Discovery, Provisioning, OS configuration, Verification, Validate, Deployment, Post-deployment (when the toolkit has written its events) and Update. To watch one stage, name it. Only that tile and section show (the others are hidden, not greyed), only the sources that stage needs are read, **Log access** lists only its phases, and the page title names it.
 
 | Launch line | Shows | Reads |
 | --- | --- | --- |
@@ -31,7 +31,7 @@ By default Sonar follows the whole flow (`-Monitor Auto`): Discovery, Provisioni
 | `... -Monitor OsConfiguration` | OS configuration | The OS configuration event file and, for Arc Run Commands, Azure. No node logs. |
 | `... -Monitor Verification` | Verification | The pre-cluster verification gate's event file only. No Azure sign-in, no node. See [Verification](./verification.md). |
 | `... -Monitor Validate` | Validate | The validation resources in Azure and the seed node's log. |
-| `... -Monitor Deployment` | Deployment | The deployment resources in Azure and the seed node's log. |
+| `... -Monitor Deployment` | Deployment and Post-deployment | The deployment resources in Azure and the seed node's log, and the toolkit's `post-deployment-events.jsonl`. With that file in the events folder it also starts with **no Azure sign-in**: it then reads the event file only ([no sign-in](#follow-the-post-deployment-run)). |
 | `... -Monitor Update` | Update | The update resources in Azure and the seed node's log. With the toolkit's update events (`updateEventsPath`) it also starts with **no Azure sign-in**: it then reads the event file only ([no sign-in](#follow-an-update-with-no-azure-sign-in)). |
 | `... -Monitor AddNode` | Add node | The Arc machines and the seed node's log. |
 | `... -Monitor Repair` | Repair | The Arc machines and the seed node's log. |
@@ -154,6 +154,22 @@ With the default `track: auto` (and `updateTrack: auto`) Sonar reads the update 
 **What Sonar shows:** the **Update** mode with what Azure offers (name, version, package type, description, state in plain words and the next action, for example *Waiting for content* for an SBE update that must be side-loaded), the pre-update readiness checks that failed with their severity, the update run's steps (status, start and end, duration, error text, from `updateRuns`), the history of earlier runs, and the node log of the seed node as it is written. The tab is grey until an update has run and green only after a run finished; see [Update](./stages.md#update). To follow an update weeks after the deployment, with no deployment in the session, start Sonar with `-Monitor Update` ([Monitoring a monthly update](./stages.md#monitoring-a-monthly-update)). The tab *Update* of [Log access](./log-access.md) names the account (the deployment local admin, or on Active Directory the domain account you give Sonar) and the folders. A failed update can be resumed in the portal; Sonar only reports it.
 
 **Access:** Reader on the resource group; for the node logs an account in the seed node's local Administrators.
+
+## Follow the post-deployment run
+
+**When:** you run the toolkit's `Invoke-AzureLocalPostDeployment.ps1` (phase 06: SDN, quorum, security groups, SSH, storage, VM images, network security groups, logical networks, verification, external storage, the SBE import plan) and want to see the mode, each step and the verdict, in a Plan or an Apply, with or without an Azure sign-in.
+
+```powershell
+./Start-AzlSonar.ps1 -InfrastructureFile ./infrastructure.yml -Monitor Deployment
+```
+
+The orchestrator writes `post-deployment-events.jsonl` into the events folder (`deployment.events_directory`, else `%ProgramData%\AzureLocalToolkit\<cluster.name>\events`), the same folder as `update-events.jsonl`. Sonar finds it there: there is no key for it. With no `Connect-AzAccount` in the session, `-Monitor Deployment` starts when that file already exists (start the run first, or start Sonar after the first event); otherwise it stops with *No Azure sign-in found* as before. Auto does not do this: it needs Azure for the deployment.
+
+**What Sonar shows:** the **Post-deployment** mode: the run mode (**Plan** or **Apply**), each step with its task, result and skip reason, the verdict, the exit code and, in the log pane, one `[post-deployment]` line per event. A Plan is never an error: a finished Plan is a grey *Planned* tile, a Plan that found a problem is amber *Plan stopped*, and only an Apply that failed is red. The Azure live poll is shown as **not connected** (a grey note, never an error). Sonar reads no Azure resource, no node and no node log, so it asks for no log account and the machine cards stay *Unknown* (they come from Azure). [Details](./stages.md#post-deployment).
+
+Sign in first and the same start shows both: the Azure poll as in [Follow an update](#follow-an-update) (for the deployment) and the events. The decision is made once, at start; to add Azure to a Sonar that started without it, start it again.
+
+**Access:** read access to the event file's folder. Nothing else.
 
 ## Follow an update with no Azure sign-in
 

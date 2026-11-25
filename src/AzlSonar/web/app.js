@@ -66,6 +66,7 @@
     provTree: [],               // one synthetic tree item per machine (provisioningTreeOf)
     oscTree: [],                // OS configuration: one tree item per machine with its steps (osConfigTreeOf)
     discTree: [],               // Discovery: one tree item per machine with what was read (discoveryTreeOf)
+    pdTree: [],                 // Post-deployment: one tree item per step of the toolkit's run (pdTreeOf)
     vfTree: [],                 // Verification: one tree item per category with its checks (vfTreeOf)
     extTree: [],                // OEM image route, from Validate on: one item per machine with its extensions
     stepIndex: new Map(),       // key -> { node, section, parentKey }
@@ -1316,12 +1317,12 @@
   // update). Azure's raw states are turned into plain words here; the raw value goes into a tooltip. A finished
   // deployment is the Deployment mode in its Done state; the machine cards keep each machine's Azure Arc status.
 
-  var MODE_IDS = ['discovery', 'prov', 'osconfig', 'verify', 'validate', 'deploy', 'update', 'addnode', 'repair'];
+  var MODE_IDS = ['discovery', 'prov', 'osconfig', 'verify', 'validate', 'deploy', 'postdeploy', 'update', 'addnode', 'repair'];
   var MODE_OF_PHASE = {
     provisioning: 'prov', 'arc-registration': 'prov', validation: 'validate', deployment: 'deploy', update: 'update',
-    done: 'deploy', 'post-deployment': 'deploy', 'add-node': 'addnode', repair: 'repair'
+    done: 'deploy', 'post-deployment': 'postdeploy', 'add-node': 'addnode', repair: 'repair'
   };
-  var MODE_TITLE = { discovery: 'Discovery', osconfig: 'OS configuration', verify: 'Verification', validate: 'Validate', deploy: 'Deployment', update: 'Update', addnode: 'Add node', repair: 'Repair' };
+  var MODE_TITLE = { discovery: 'Discovery', osconfig: 'OS configuration', verify: 'Verification', validate: 'Validate', deploy: 'Deployment', postdeploy: 'Post-deployment', update: 'Update', addnode: 'Add node', repair: 'Repair' };
   // Start-AzlSonar.ps1 -Monitor (the monitor key of the config): the one tile a standalone monitor shows.
   var MONITOR_TILE = { discovery: 'discovery', provisioning: 'prov', osconfiguration: 'osconfig', verification: 'verify', validate: 'validate', deployment: 'deploy', update: 'update', addnode: 'addnode', repair: 'repair' };
   // The tile a standalone monitor was started for, or '' (Auto: every tile of the flow).
@@ -1353,6 +1354,7 @@
     var p = normPhase(state.phase), act = str(state.activePhase).toLowerCase();
     var key = p === 'failed' ? (act || 'provisioning') : (p === 'done' ? 'done' : (act || p));
     var only = monitorOf(state);
+    if (only === 'deploy') return pdTakeover(state, 'deploy');
     if (only) return only;
     var mode = MODE_OF_PHASE[key] || 'prov';
     // An update that installs or prepares is the mode to watch (Auto lands on the Update view when one starts).
@@ -1370,7 +1372,8 @@
     // The toolkit's ARM run can be ahead of what Azure reports (checks that failed before anything was submitted).
     var armMode = armActiveMode(state);
     if (armMode && MODE_IDS.indexOf(armMode) > MODE_IDS.indexOf(mode) && p !== 'done') return armMode;
-    return mode;
+    // The toolkit's post-deployment run (phase 06) is the mode to watch once the deployment itself is over.
+    return pdTakeover(state, mode);
   }
 
   // The pre-cluster verification gate runs after OS configuration and before Validate: once it has data and OS configuration
@@ -1414,6 +1417,7 @@
     verify: 'Starts after OS configuration has converged: the toolkit’s pre-cluster verification gate checks the environment before Validate; Sonar follows its event file (verificationEventsPath)',
     validate: { simplified: 'Starts after OS configuration has converged on every machine', 'oem-image': 'Starts when every machine is registered', '': 'Starts after the machines are ready' },
     deploy: 'Starts after validation passes',
+    postdeploy: 'Starts after the cluster is deployed: the toolkit’s Invoke-AzureLocalPostDeployment.ps1 runs the eleven post-deployment tasks (Plan or Apply); Sonar follows its post-deployment-events.jsonl in the events folder',
     update: 'Available after the cluster is deployed; starts when Azure reports an update'
   };
   function modeWhen(id, route, manual) {
@@ -1495,6 +1499,12 @@
       else tile(x[0], 'idle');
     });
 
+    // Post-deployment (phase 06): shown when the toolkit's run has written events, and always on the Deployment monitor. A Plan is never red.
+    if (pdHasData(pdOf(s)) || monitorOf(s) === 'deploy') {
+      var pdt = pdTile(s);
+      tile('postdeploy', pdt.status, pdt.line, false, pdt.tip && pdt.status !== 'idle' ? pdt.tip : (pdt.status === 'idle' && pdt.tip ? pdt.tip : modeWhen('postdeploy', route, manual)));
+    }
+
     // The Update tile follows the back end's verdict, never the summary alone: neutral (grey) when no update has run, amber
     // when an update waits for content or a check warns, red for a failure or a Critical/Error check, green only after a run.
     var ut = updateTile(updOf(s));
@@ -1509,7 +1519,7 @@
       else tile(id, 'idle', '', false);
     });
     // A standalone monitor shows its own tile only; the others are hidden, not greyed.
-    if (only) out.forEach(function (t) { t.hidden = t.id !== only; });
+    if (only) out.forEach(function (t) { t.hidden = t.id !== only && !(only === 'deploy' && t.id === 'postdeploy'); });
     return out;
   }
 
@@ -1747,6 +1757,161 @@
     });
   }
 
+  // ------------------------------------------------------------------ Post-deployment (pure; also run by tests under Node)
+  //
+  // Phase 06 of the Implementation guide: the toolkit's Invoke-AzureLocalPostDeployment.ps1 runs the eleven post-deployment tasks in one
+  // run (Plan or Apply) and writes post-deployment-events.jsonl in the events folder. The back end follows it and builds
+  // state.postDeployment (Get-AzlSonarPostDeploymentState): the latest run only, its mode, the 13 steps with their task, result, exit code
+  // and reason, the verdict and the exit code. A Plan changes nothing: it is never shown as a failed deployment. A Plan that stopped is
+  // "Plan stopped" (amber) and a failed step of a Plan is a finding with a warning icon; only an Apply that failed is red. A run needs no
+  // Azure sign-in to be shown (state.postDeployment.azure.connected is false then: a plain fact, never an error). Every text is shown as text.
+
+  var PD_TILE = { ok: 'ok', run: 'run', warn: 'warn', err: 'err', idle: 'idle' };
+  var PD_STEP_KIND = { passed: 'ok', running: 'run', warning: 'warn', failed: 'err', refused: 'err', planned: 'idle', skipped: 'skip', notrun: 'idle', pending: 'idle' };
+
+  function pdOf(state) { return isObj(state) && isObj(state.postDeployment) ? state.postDeployment : null; }
+  function pdHasData(pd) { return isObj(pd) && pd.hasData === true; }
+  function pdIsPlan(pd) { return isObj(pd) && str(pd.mode) === 'Plan'; }
+  function pdKind(pd) { var k = isObj(pd) ? str(pd.kind) : ''; return PD_TILE[k] || 'idle'; }
+  function pdCount(pd, name) { var c = isObj(pd) && isObj(pd.counts) ? pd.counts : {}; return Number(c[name]) || 0; }
+  function pdPlural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+  function pdSteps(pd) { return isObj(pd) ? arr(pd.steps).filter(isObj) : []; }
+  // The first step that failed or was refused (the step the run stopped at), or null.
+  function pdFailedStep(pd) { return pdSteps(pd).filter(function (x) { return str(x.status) === 'failed' || str(x.status) === 'refused'; })[0] || null; }
+  function pdWarnStep(pd) { return pdSteps(pd).filter(function (x) { return str(x.status) === 'warning'; })[0] || null; }
+  function pdRunningStep(pd) { return pdSteps(pd).filter(function (x) { return str(x.status) === 'running'; })[0] || null; }
+  // The mode word for the facts and the headline: a Plan reads and checks, an Apply changes.
+  function pdModeWord(pd) { var m = isObj(pd) ? str(pd.mode) : ''; return m === 'Plan' ? 'Plan (-WhatIf, nothing is changed)' : (m === 'Apply' ? 'Apply (changes the cluster)' : (m || 'unknown')); }
+  function pdExit(pd) { return isObj(pd) && pd.exitCode !== null && pd.exitCode !== undefined && pd.exitCode !== '' ? Number(pd.exitCode) : NaN; }
+  // The steps of the run that ended well, as a sentence: "9 planned, 4 skipped".
+  function pdCountText(pd) {
+    var parts = [], names = [['planned', 'planned'], ['passed', 'passed'], ['warning', 'with a warning'], ['failed', 'failed'], ['refused', 'refused'], ['running', 'running'], ['skipped', 'skipped'], ['notrun', 'not run'], ['pending', 'waiting']];
+    names.forEach(function (n) { var c = pdCount(pd, n[0]); if (c) parts.push(c + ' ' + n[1]); });
+    return parts.join(', ');
+  }
+
+  function pdHeadline(pd) {
+    if (!pdHasData(pd)) return '';
+    var st = str(pd.status), plan = pdIsPlan(pd), total = pdCount(pd, 'total'), bad = pdFailedStep(pd), warn = pdWarnStep(pd), run = pdRunningStep(pd);
+    var verdict = firstLine(pd.verdict, 220), exit = pdExit(pd), code = isNaN(exit) ? '' : ' (exit code ' + exit + ')';
+    switch (st) {
+      case 'running': {
+        var done = pdCount(pd, 'planned') + pdCount(pd, 'passed') + pdCount(pd, 'skipped') + pdCount(pd, 'warning');
+        return (plan ? 'Planning' : 'Applying') + ': ' + done + ' of ' + total + ' steps done' + (run ? ' (now ' + str(run.id) + ')' : '');
+      }
+      case 'planned': return 'Plan complete' + code + ': ' + pdCountText(pd) + '. Nothing was changed; run it with -Mode Apply to make the changes';
+      case 'passed': return 'Post-deployment passed' + code + ': ' + pdCountText(pd);
+      case 'warning': return (verdict || 'The run stopped after a step with warnings') + code + (warn ? '. Step ' + str(warn.id) + ': ' + firstLine(warn.reason, 160) : '');
+      case 'incomplete': return 'The plan stopped' + (bad ? ' at ' + str(bad.id) : '') + code + (bad && str(bad.reason) ? ': ' + firstLine(bad.reason, 200) : (verdict ? ': ' + verdict : '')) + '. A plan changes nothing: this is what it found, to fix before Apply';
+      case 'failed': return 'Post-deployment failed' + (bad ? ' at ' + str(bad.id) : '') + code + (bad && str(bad.reason) ? ': ' + firstLine(bad.reason, 200) : (verdict ? ': ' + verdict : ''));
+    }
+    return verdict;
+  }
+
+  // The tile of the flow: { status, line, tip }.
+  function pdTile(state) {
+    var pd = pdOf(state);
+    if (!pdHasData(pd)) return { status: 'idle', line: '', tip: 'Run Invoke-AzureLocalPostDeployment.ps1 from the toolkit: Sonar follows its post-deployment-events.jsonl in the events folder.' };
+    var st = str(pd.status), total = pdCount(pd, 'total'), plan = pdIsPlan(pd), bad = pdFailedStep(pd), warn = pdWarnStep(pd), run = pdRunningStep(pd), tip = pdHeadline(pd);
+    var done = pdCount(pd, 'planned') + pdCount(pd, 'passed') + pdCount(pd, 'skipped') + pdCount(pd, 'warning');
+    var shown = total - pdCount(pd, 'skipped');
+    var line;
+    switch (st) {
+      case 'running': line = (plan ? 'Plan' : 'Apply') + ' · step ' + Math.min(total, done + 1) + ' of ' + total + (run ? ' (' + str(run.id) + ')' : ''); break;
+      case 'planned': line = 'Planned · ' + pdPlural(pdCount(pd, 'planned') || shown, 'step') + (pdCount(pd, 'skipped') ? ', ' + pdCount(pd, 'skipped') + ' skipped' : ''); break;
+      case 'passed': line = 'Passed · ' + pdPlural(pdCount(pd, 'passed'), 'step') + (pdCount(pd, 'skipped') ? ', ' + pdCount(pd, 'skipped') + ' skipped' : ''); break;
+      case 'warning': line = 'Stopped' + (warn ? ' after ' + str(warn.id) : '') + ' (warnings)'; break;
+      case 'incomplete': line = 'Plan stopped' + (bad ? ' at ' + str(bad.id) : ''); break;
+      case 'failed': line = 'Failed' + (bad ? ' at ' + str(bad.id) : ''); break;
+      default: line = '';
+    }
+    return { status: pdKind(pd), line: line, tip: tip };
+  }
+
+  // Facts under the headline: [{ k, v, warn }].
+  function pdFacts(pd) {
+    var out = [];
+    if (!pdHasData(pd)) return out;
+    var run = isObj(pd.run) ? pd.run : {}, exit = pdExit(pd), st = str(pd.status);
+    out.push({ k: 'Mode', v: pdModeWord(pd) });
+    out.push({ k: 'Result', v: str(pd.word) ? str(pd.word).charAt(0).toUpperCase() + str(pd.word).slice(1) : '', warn: pdKind(pd) === 'err' });
+    if (!isNaN(exit)) out.push({ k: 'Exit code', v: String(exit) + (exit === 0 ? ' (every selected step passed, was planned or was skipped)' : exit === 1 ? ' (a step failed)' : exit === 2 ? ' (bad input, a refusal, a missing script or a cluster that does not answer)' : exit === 3 ? ' (stopped after a step with warnings)' : ''), warn: exit !== 0 });
+    if (str(pd.verdict)) out.push({ k: 'Verdict', v: firstLine(pd.verdict, 260) });
+    var counts = pdCountText(pd);
+    if (counts) out.push({ k: 'Steps', v: pdCount(pd, 'total') + ' in the run: ' + counts, warn: pdCount(pd, 'failed') + pdCount(pd, 'refused') > 0 && !pdIsPlan(pd) });
+    if (isObj(pd.cluster) && str(pd.cluster.state)) out.push({ k: 'Cluster', v: str(pd.cluster.state) === 'reachable' ? 'answers' : 'does not answer' + (str(pd.cluster.message) ? ': ' + firstLine(pd.cluster.message, 160) : ''), warn: str(pd.cluster.state) !== 'reachable' });
+    if (str(run.route)) out.push({ k: 'Route', v: str(run.route) });
+    if (str(run.runId)) out.push({ k: 'Run', v: str(run.runId) });
+    if (str(pd.nextAction)) out.push({ k: 'Next', v: firstLine(pd.nextAction, 260) });
+    else if (st === 'planned') out.push({ k: 'Next', v: 'Run Invoke-AzureLocalPostDeployment.ps1 with -Mode Apply to make the changes' });
+    if (isObj(pd.azure) && pd.azure.connected === false) out.push({ k: 'Azure', v: 'live poll not connected (no sign-in): Sonar shows the toolkit’s events only' });
+    return out;
+  }
+
+  // The verdict banner and the steps that need attention: [{ node, title, kind, rows[{k,v}], until }].
+  function pdPanels(pd) {
+    if (!pdHasData(pd)) return [];
+    var rows = [], kind = pdKind(pd), plan = pdIsPlan(pd);
+    var attention = pdSteps(pd).filter(function (x) { return ['failed', 'refused', 'warning'].indexOf(str(x.status)) >= 0; });
+    attention.slice(0, 6).forEach(function (x) {
+      rows.push({ k: str(x.word) + ': ' + str(x.id), v: (str(x.task) ? str(x.task) + '. ' : '') + firstLine(x.reason, 220) + (str(x.nextAction) ? ' Next: ' + firstLine(x.nextAction, 200) : '') });
+    });
+    if (attention.length > 6) rows.push({ k: 'More', v: (attention.length - 6) + ' more steps need attention below' });
+    arr(pd.warnings).slice(0, 3).forEach(function (w) { rows.push({ k: 'Note', v: firstLine(w, 220) }); });
+    if (isObj(pd.azure) && pd.azure.connected === false && str(pd.azure.message)) rows.push({ k: 'Azure', v: firstLine(pd.azure.message, 300) });
+    if (!rows.length && str(pd.status) === 'planned') rows.push({ k: 'Result', v: 'Nothing was changed; every step that applies is planned' });
+    if (!rows.length && str(pd.status) === 'passed') rows.push({ k: 'Result', v: 'Every selected step passed' });
+    var title = (plan ? 'Plan' : 'Apply') + ': ' + (str(pd.word) || 'waiting');
+    return [{ node: '', title: title, kind: kind, rows: rows, until: '' }];
+  }
+
+  // The icon and the tree status of a step. A failed or refused step of a Plan is a finding (warning icon), never an error.
+  function pdTreeStatus(step, plan) {
+    switch (str(step.status)) {
+      case 'passed': return 'success';
+      case 'warning': return 'success';
+      case 'running': return 'running';
+      case 'skipped': return 'skipped';
+      case 'failed': case 'refused': return plan ? 'unknown' : 'error';
+      case 'planned': return 'unknown';
+      default: return 'notstarted';
+    }
+  }
+  function pdIconKey(status, plan) {
+    switch (status) {
+      case 'planned': return 'notstarted';
+      case 'warning': return 'warning';
+      case 'failed': case 'refused': return plan ? 'warning' : 'error';
+      case 'passed': return 'success';
+      case 'running': return 'running';
+      case 'skipped': return 'skipped';
+      default: return 'notstarted';
+    }
+  }
+
+  // The steps as a flat tree, in the order of the guide's pages.
+  function pdTreeOf(state) {
+    var pd = pdOf(state);
+    if (!pdHasData(pd)) return [];
+    var plan = pdIsPlan(pd);
+    return pdSteps(pd).map(function (x) {
+      var line = (str(x.word) || '') + (str(x.reason) ? ': ' + firstLine(x.reason, 160) : '');
+      return {
+        id: 'pd:' + str(x.id), name: str(x.id), description: '', status: pdTreeStatus(x, plan), start: null, end: null, errors: [], children: [],
+        pd: { kind: 'step', id: str(x.id), order: Number(x.order) || 0, status: str(x.status), word: str(x.word), task: str(x.task), reason: str(x.reason), exitCode: x.exitCode === null || x.exitCode === undefined || x.exitCode === '' ? null : Number(x.exitCode), nextAction: str(x.nextAction), plan: plan, line: line }
+      };
+    });
+  }
+
+  // The post-deployment mode only takes over the Deployment mode when its run has data and Azure is not deploying.
+  function pdTakeover(state, mode) {
+    if (mode !== 'deploy' || !pdHasData(pdOf(state))) return mode;
+    var s = state, p = normPhase(s.phase);
+    var deploying = isObj(s.deployment) && sectionStatus(s.deployment) === 'running';
+    if (deploying) return mode;
+    return p === 'done' || p === 'post-deployment' || monitorOf(s) === 'deploy' ? 'postdeploy' : mode;
+  }
+
   // The machines Sonar knows: the config's nodes merged with the state's nodes (Arc status, Arc machine name).
   function machineList(state, config) {
     var byName = new Map();
@@ -1844,6 +2009,19 @@
       return out;
     }
 
+    if (me.id === 'postdeploy') {
+      var pd = pdOf(s) || {}, prun = isObj(pd.run) ? pd.run : {};
+      var pst = parseTime(prun.started), pend = parseTime(prun.completed);
+      if (!isNaN(pst)) out.startedAt = pst;
+      if (!isNaN(pend) && me.status !== 'run') out.endedAt = pend;
+      if (pdHasData(pd)) out.chip = { kind: pdKind(pd), text: str(pd.word) ? str(pd.word).charAt(0).toUpperCase() + str(pd.word).slice(1) : chipText[me.status] };
+      out.headline = pdHasData(pd) ? pdHeadline(pd) : me.tip;
+      out.facts = pdFacts(pd);
+      out.panels = pdPanels(pd);
+      out.cards = [];
+      return out;
+    }
+
     var sec = me.id === 'validate' ? s.validation : me.id === 'deploy' ? s.deployment : me.id === 'update' ? s.update : null;
     var secTree = isObj(sec) ? arr(sec.tree) : [];
     var pr = stepProgress(secTree), word = { validate: 'Validation', deploy: 'Deployment', update: 'Update', addnode: 'Add node', repair: 'Repair' }[me.id];
@@ -1930,7 +2108,7 @@
   // the step's time window, or, for a ZTP stage, to the ZTP event lines tagged with that stage. A machine row selects
   // the machine, like its card.
 
-  var MODE_SECTIONS = { discovery: ['discovery'], prov: ['provisioning'], osconfig: ['osconfiguration'], verify: ['verification'], validate: ['armvalidation', 'validation', 'extensions'], deploy: ['armdeployment', 'deployment'], update: ['update'], addnode: [], repair: [] };
+  var MODE_SECTIONS = { discovery: ['discovery'], prov: ['provisioning'], osconfig: ['osconfiguration'], verify: ['verification'], validate: ['armvalidation', 'validation', 'extensions'], deploy: ['armdeployment', 'deployment'], postdeploy: ['postdeployment'], update: ['update'], addnode: [], repair: [] };
 
   // chain: the items from the top of the section down to the clicked step ({ id, name, ... }).
   // Returns { side: 'machine' | 'azure' | 'node', node, stage, window }.
@@ -1953,6 +2131,8 @@
     }
     // The checks of the pre-cluster verification gate: reported by the gate, not by a node (no log window) and not read from Azure.
     if (section === 'verification') return { side: 'verify', node: '', stage: '', window: false };
+    // The steps of the toolkit's post-deployment run: reported by the orchestrator, not by a node (no log window) and not read from Azure.
+    if (section === 'postdeployment') return { side: 'postdeploy', node: '', stage: '', window: false };
     // The toolkit's own checks and steps: reported by the ARM run, not by a node (no log window) and not read from Azure.
     if (section === 'armvalidation' || section === 'armdeployment') return { side: 'arm', node: '', stage: '', window: false };
     if (section === 'discovery') {
@@ -1996,6 +2176,7 @@
     if (modeId === 'prov' && !hasMachines) return 'No machines reported yet.';
     if (modeId === 'osconfig' && status === 'idle') return 'The steps appear here when the OS configuration run starts. Run Invoke-AzureLocalOsConfiguration.ps1 from the toolkit and point osConfigEventsPath at its os-configuration-events.jsonl.' + (when ? ' ' + when + '.' : '');
     if (modeId === 'verify') return status === 'idle' ? 'The checks appear here when the pre-cluster verification gate runs. Run the gate from the toolkit and point verificationEventsPath at its precluster-verification-events.jsonl.' + (when ? ' ' + when + '.' : '') : 'No checks reported yet.';
+    if (modeId === 'postdeploy') return status === 'idle' ? 'The steps appear here when the post-deployment run starts. Run Invoke-AzureLocalPostDeployment.ps1 from the toolkit; Sonar follows its post-deployment-events.jsonl in the events folder.' + (when ? ' ' + when + '.' : '') : 'No steps reported yet.';
     if (status === 'idle') return 'The steps appear here when this mode begins.' + (when ? ' ' + when + '.' : '');
     return 'No steps reported yet.';
   }
@@ -2119,6 +2300,8 @@
     var vfA = vfOf(s);
     if (vfHasData(vfA)) arr(vfA.warnings).slice(0, 2).forEach(function (w) { out.push({ kind: 'verify', text: 'Verification: ' + firstLine(w, 220) }); });
     else if (vfPlanOf(vfA)) arr(vfPlanOf(vfA).warnings).slice(0, 2).forEach(function (w) { out.push({ kind: 'verify', text: 'Verification plan: ' + firstLine(w, 220) }); });
+    var pdA = pdOf(s);
+    if (pdHasData(pdA)) arr(pdA.warnings).slice(0, 2).forEach(function (w) { out.push({ kind: 'postdeploy', text: 'Post-deployment: ' + firstLine(w, 220) }); });
     var armA = armOf(s);
     if (armHasData(armA)) {
       arr(armA.hints).filter(isObj).forEach(function (h) {
@@ -2817,7 +3000,8 @@
       oscDemoState: oscDemoState, oscDemoLines: oscDemoLines,
       armOf: armOf, armHasData: armHasData, armPhaseOf: armPhaseOf, armPhaseHasData: armPhaseHasData, armTreeOf: armTreeOf, armActiveMode: armActiveMode,
       armTile: armTile, armHeadline: armHeadline, armFacts: armFacts, armOverall: armOverall, armDemoState: armDemoState, armDemoLines: armDemoLines,
-      vfOf: vfOf, vfPlanOf: vfPlanOf, vfPlanAlone: vfPlanAlone, vfHasData: vfHasData, vfStatus: vfStatus, vfChip: vfChip, vfHeadline: vfHeadline, vfTile: vfTile, vfFacts: vfFacts, vfPanels: vfPanels, vfTreeOf: vfTreeOf, vfIconKey: vfIconKey, VF_STATUS_ORDER: VF_STATUS_ORDER, MODE_IDS: MODE_IDS
+      vfOf: vfOf, vfPlanOf: vfPlanOf, vfPlanAlone: vfPlanAlone, vfHasData: vfHasData, vfStatus: vfStatus, vfChip: vfChip, vfHeadline: vfHeadline, vfTile: vfTile, vfFacts: vfFacts, vfPanels: vfPanels, vfTreeOf: vfTreeOf, vfIconKey: vfIconKey, VF_STATUS_ORDER: VF_STATUS_ORDER, MODE_IDS: MODE_IDS,
+      pdOf: pdOf, pdHasData: pdHasData, pdKind: pdKind, pdHeadline: pdHeadline, pdTile: pdTile, pdFacts: pdFacts, pdPanels: pdPanels, pdTreeOf: pdTreeOf, pdIconKey: pdIconKey, pdTreeStatus: pdTreeStatus, pdTakeover: pdTakeover
     };
     return;
   }
@@ -3357,6 +3541,7 @@
     app.discTree = discoveryTreeOf(s);
     app.extTree = extensionsTreeOf(s);
     app.vfTree = vfTreeOf(s);
+    app.pdTree = pdTreeOf(s);
     var collapse = provisioningCollapse(s.activePhase || (normPhase(s.phase) === 'failed' ? '' : s.phase), app.provAutoCollapsed);
     if (collapse === 'collapse') { app.sectionCollapsed.provisioning = true; app.provAutoCollapsed = true; }
     else if (collapse === 'expand') { app.sectionCollapsed.provisioning = false; app.provAutoCollapsed = false; }
@@ -3370,6 +3555,7 @@
     indexSection('extensions');
     indexSection('armdeployment');
     indexSection('deployment');
+    indexSection('postdeployment');
     indexSection('update');
     var stillIndexed = !!filterKey && app.stepIndex.has(filterKey);
     var change = stepFilterChange(filterKey, stillIndexed, windowBefore, stillIndexed ? windowSignature(stepWindow()) : null);
@@ -3421,7 +3607,7 @@
         walk(n.children, k);
       });
     }
-    walk(armTree ? armTree : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'discovery' ? app.discTree : section === 'verification' ? app.vfTree : section === 'extensions' ? app.extTree : (isObj(sec) ? sec.tree : null), section);
+    walk(armTree ? armTree : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'discovery' ? app.discTree : section === 'verification' ? app.vfTree : section === 'postdeployment' ? app.pdTree : section === 'extensions' ? app.extTree : (isObj(sec) ? sec.tree : null), section);
   }
 
   function findCurrentKey() {
@@ -3460,6 +3646,7 @@
     });
     if (!best && activeModeId(s) === 'osconfig') walk(app.oscTree, 0);
     if (!best && activeModeId(s) === 'verify') walk(app.vfTree, 0);
+    if (!best && activeModeId(s) === 'postdeploy') walk(app.pdTree, 0);
     if (!best && (s.activePhase === 'provisioning' || s.activePhase === 'arc-registration')) walk(app.provTree, 0);
     if (best) return best.__key;
     // 3. by name
@@ -3536,7 +3723,7 @@
     wanted.forEach(function (section) {
       var armWhich = section === 'armvalidation' ? 'validation' : section === 'armdeployment' ? 'deployment' : '';
       var sec = armWhich ? (armPhaseOf(s, armWhich) || {}) : section === 'provisioning' ? (isObj(s.provisioning) ? s.provisioning : {}) : section === 'osconfiguration' ? (isObj(s.osConfiguration) ? s.osConfiguration : {}) : (isObj(s[section]) ? s[section] : {});
-      var tree = armWhich ? armTreeOf(s, armWhich) : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'discovery' ? app.discTree : section === 'verification' ? app.vfTree : section === 'extensions' ? app.extTree : arr(sec.tree);
+      var tree = armWhich ? armTreeOf(s, armWhich) : section === 'provisioning' ? app.provTree : section === 'osconfiguration' ? app.oscTree : section === 'discovery' ? app.discTree : section === 'verification' ? app.vfTree : section === 'postdeployment' ? app.pdTree : section === 'extensions' ? app.extTree : arr(sec.tree);
       var only = section === 'provisioning' || section === 'osconfiguration' || section === 'discovery' ? str(app.filter.node).toLowerCase() : '';
       if (only) tree = tree.filter(function (n) { return str(n.name).toLowerCase() === only; });
       var wrap = host.querySelector('.tree-section[data-section="' + section + '"]');
@@ -3586,7 +3773,7 @@
   function buildSection(section, tree) {
     var wrap = el('div', { class: 'tree-section', 'data-section': section });
     var title = section === 'provisioning' || section === 'osconfiguration' || section === 'discovery' ? 'Machines' : section === 'extensions' ? 'Extensions (installed during Validate)' :
-      section === 'verification' ? 'Pre-cluster verification: checks by category' : section === 'armvalidation' ? 'Toolkit run: checks and validation results' : section === 'armdeployment' ? 'Toolkit run: checks and deployment progress' :
+      section === 'verification' ? 'Pre-cluster verification: checks by category' : section === 'postdeployment' ? 'Post-deployment: steps of the toolkit run' : section === 'armvalidation' ? 'Toolkit run: checks and validation results' : section === 'armdeployment' ? 'Toolkit run: checks and deployment progress' :
       section === 'validation' ? 'Validation' : section === 'update' ? 'Update (unverified against a live run)' : 'Deployment';
     if (section === 'extensions' || section === 'armvalidation' || section === 'armdeployment') wrap.appendChild(el('h3', { class: 'sub-h', text: title }));
     // When the toolkit's run is shown above, say that the next list is what Azure itself reports.
@@ -3628,6 +3815,7 @@
 
     var row = el('div', { class: 'row' + (rule.side === 'machine' ? ' row-machine' : ''), 'data-status': st, 'data-current': String(app.currentKey === k) });
     if (isObj(n.vf)) row.setAttribute('data-vf', str(n.vf.status));
+    if (isObj(n.pd)) row.setAttribute('data-pd', str(n.pd.status));
     if (hasKids) {
       var cb = el('button', { type: 'button', class: 'caret-btn', tabindex: '-1', 'aria-hidden': 'true' });
       cb.innerHTML = ICON.caret;
@@ -3637,13 +3825,13 @@
       row.appendChild(el('span', { class: 'caret-spacer', 'aria-hidden': 'true' }));
     }
     var ic = el('span', { 'aria-hidden': 'true', title: STATUS_LABEL[st] || st });
-    var iconKey = isObj(n.vf) ? vfIconKey(str(n.vf.status)) : st;
+    var iconKey = isObj(n.vf) ? vfIconKey(str(n.vf.status)) : isObj(n.pd) ? pdIconKey(str(n.pd.status), n.pd.plan === true) : st;
     ic.innerHTML = icon(iconKey);
     row.appendChild(ic);
 
     var nameEl = el('span', { class: 'step-name' });
     if (isObj(n.arm) && n.arm.kind === 'step') nameEl.appendChild(el('span', { class: 'idx', text: str(n.arm.step) }));
-    else if (!isObj(n.arm) && !isObj(n.vf) && rule.side !== 'machine' && section !== 'provisioning' && section !== 'osconfiguration' && section !== 'discovery' && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
+    else if (!isObj(n.arm) && !isObj(n.vf) && !isObj(n.pd) && rule.side !== 'machine' && section !== 'provisioning' && section !== 'osconfiguration' && section !== 'discovery' && n.id !== undefined && n.id !== null && n.id !== '' && str(n.id) !== name) nameEl.appendChild(el('span', { class: 'idx', text: str(n.id) }));
     nameEl.appendChild(el('span', { class: 'sn', text: name }));
     if (rule.side === 'azure') nameEl.appendChild(el('span', { class: 'az', title: 'This step runs in Azure: Sonar reads its status from Azure, there are no node log lines for it.', text: 'Azure' }));
     if (isObj(n.osc) && n.osc.arc === true) nameEl.appendChild(el('span', { class: 'az', title: 'This step runs as an Azure Arc Run Command: Azure starts it on the node and Sonar can read the run command from Azure.', text: 'Azure' }));
@@ -3681,6 +3869,7 @@
     if (isObj(n.osc) && n.osc.machine === true) li.appendChild(buildOscMeta(n));
     if (isObj(n.arm)) li.appendChild(buildArmMeta(n));
     if (isObj(n.vf)) li.appendChild(buildVfMeta(n));
+    if (isObj(n.pd)) li.appendChild(buildPdMeta(n));
     if (isObj(n.disc) && n.disc.machine === true) li.appendChild(buildDiscMeta(n));
 
     if (selected && rule.side === 'azure') li.appendChild(buildAzureDetail(n, st, name));
@@ -3736,6 +3925,20 @@
       else src.appendChild(document.createTextNode(v.source));
       meta.appendChild(src);
     }
+    return meta;
+  }
+
+  // Under a step of the post-deployment run: its result, the page of the guide it belongs to, the exit code, what it found or why it was
+  // skipped, and what to do next. All of it is text from the feed, rendered as text.
+  function buildPdMeta(n) {
+    var v = n.pd, meta = el('div', { class: 'prov-meta pd-meta' });
+    var kind = PD_STEP_KIND[v.status] || 'idle';
+    var word = v.status === 'failed' && v.plan ? 'Failed in the plan' : (v.word || v.status || 'Unknown');
+    meta.appendChild(chipEl(kind === 'skip' ? 'idle' : kind, word, v.plan && (v.status === 'failed' || v.status === 'refused') ? 'A plan changes nothing: this is what the step found, not a failed deployment.' : 'The result of this step in the run.'));
+    if (v.task) meta.appendChild(el('span', { class: 'arm-node', title: 'The page of the Implementation guide this step belongs to', text: v.task }));
+    if (v.exitCode !== null && v.exitCode !== undefined && !isNaN(v.exitCode)) meta.appendChild(el('span', { class: 'arm-node', title: 'The exit code of the step script', text: 'exit ' + v.exitCode }));
+    if (v.reason) meta.appendChild(el('span', { class: 'prov-msg pd-msg', text: v.status === 'skipped' ? 'Skipped: ' + v.reason : v.reason }));
+    if (v.nextAction) meta.appendChild(el('span', { class: 'prov-msg pd-next', text: 'Next: ' + v.nextAction }));
     return meta;
   }
 
@@ -3930,6 +4133,7 @@
     var rule = stepRuleOf(k), name = str(info.node.name);
     if (rule.side === 'machine') { selectNode(rule.node); return; }
     if (rule.side === 'file') { announce(name + ' is read from the discovery files; there is no node log for it.'); return; }
+    if (rule.side === 'postdeploy') { announce(name + ' is reported by the post-deployment run; its details are shown under it. The logs keep their filter.'); return; }
     if (rule.side === 'verify') { if (arr(info.node.children).length) toggleKey(k); else announce(name + ' is reported by the verification gate; its details are shown under it. The logs keep their filter.'); return; }
     if (app.selectedKey === k) { clearStepFilter(); return; }
     app.selectedKey = k;
@@ -3983,7 +4187,7 @@
 
   // ------------------------------------------------------------------ mode bar
 
-  var MODE_OF_SECTION = { discovery: 'discovery', provisioning: 'prov', osconfiguration: 'osconfig', verification: 'verify', armvalidation: 'validate', validation: 'validate', extensions: 'validate', armdeployment: 'deploy', deployment: 'deploy', update: 'update' };
+  var MODE_OF_SECTION = { discovery: 'discovery', provisioning: 'prov', osconfiguration: 'osconfig', verification: 'verify', armvalidation: 'validate', validation: 'validate', extensions: 'validate', armdeployment: 'deploy', deployment: 'deploy', postdeployment: 'postdeploy', update: 'update' };
 
   // The mode shown: the one the user clicked while the run is still in the same mode, else the active one.
   function currentModeId() {

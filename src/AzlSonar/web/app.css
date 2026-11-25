@@ -826,3 +826,5 @@ body.modal-open { overflow: hidden; }
 .vf-meta .vf-remedy { color: var(--text); font-weight: 600; }
 .vf-meta .vf-source { color: var(--muted); }
 .vf-meta .vf-source a { color: var(--accent); overflow-wrap: anywhere; }
+.pd-meta .pd-msg { flex-basis: 100%; }
+.pd-meta .pd-next { flex-basis: 100%; color: var(--text); font-weight: 600; }

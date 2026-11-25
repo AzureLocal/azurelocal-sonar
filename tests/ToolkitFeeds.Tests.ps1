@@ -41,7 +41,7 @@ AfterAll {
 Describe 'the toolkit fixtures are the real envelope' {
     It 'every line of every fixture has the shared envelope and the stage of its feed' {
         foreach ($file in Get-ChildItem -LiteralPath $script:Fx -Filter '*.jsonl') {
-            $want = if ($file.Name -like '*precluster-plan*') { 'PreClusterVerification' } else { 'SolutionUpdate' }
+            $want = if ($file.Name -like '*precluster-plan*') { 'PreClusterVerification' } elseif ($file.Name -like '*post-deployment-events*') { 'PostDeployment' } else { 'SolutionUpdate' }
             foreach ($line in Get-TkLine $file.Name) {
                 $o = $line | ConvertFrom-Json
                 foreach ($k in 'timestamp', 'node', 'stage', 'step', 'state', 'evidence', 'level', 'nextAction', 'runId', 'mode', 'cluster') { $o.PSObject.Properties.Name | Should -Contain $k -Because "$($file.Name): $k" }

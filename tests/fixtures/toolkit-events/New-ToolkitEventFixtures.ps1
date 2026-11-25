@@ -3,14 +3,20 @@
 .SYNOPSIS
     Regenerates the toolkit event fixtures in this folder from the toolkit's own scripts, run offline.
 .DESCRIPTION
-    The *.update-events.jsonl and gate-plan.precluster-plan-events.jsonl files next to this script are what the azurelocal-toolkit
+    The *.update-events.jsonl, gate-plan.precluster-plan-events.jsonl and *.post-deployment-events.jsonl files next to this script are what the azurelocal-toolkit
     scripts write to their event feeds. This script produces them again, so the fixtures follow the toolkit when its output changes:
 
       check-available, check-uptodate, check-attention   Get-AvailableSolutionUpdate.ps1 (mode Check)
       start-whatif, start-install                        Start-AzureLocalSolutionUpdate.ps1 (mode WhatIf and Install)
       gate-plan                                          Invoke-AzlPreClusterVerification -Mode Plan (the toolkit's fc-san test file)
+      plan-example                                       Invoke-AzlPostDeployment -Mode Plan with the toolkit's own step scripts against
+                                                         config/variables/examples/infrastructure.example.yml (it stops at the first step that
+                                                         needs a secret: nobody is signed in to Azure)
+      plan-passed, plan-warning, apply-passed,           Invoke-AzlPostDeployment (Plan and Apply) with stub step scripts at the paths of the real
+      apply-failed                                       step table, so every kind of step result is there (the toolkit's own tests use the same stubs)
 
-    Nothing leaves this machine and nothing is started: Invoke-Command is replaced by a function that returns a made-up update state
+    Nothing leaves this machine and nothing is started: Azure is blocked (Get-AzContext answers nobody, Get-AzKeyVaultSecret throws) and
+    Invoke-Command is replaced by a function that returns a made-up update state
     of a made-up cluster ("clus01"), so no cluster, no node, no BMC and no Azure resource is read or changed. The work happens in a
     temporary folder that is removed at the end. Machine paths in the output (this machine's toolkit folder, the temporary folder)
     are replaced by C:\toolkit and C:\data before the files are written.
@@ -60,6 +66,9 @@ function global:Invoke-Command {
     $global:GenState
 }
 function global:Start-Sleep { }
+# Azure is blocked: nobody is signed in and no Key Vault answers, so a step that needs a secret stops with its own message.
+function global:Get-AzContext { $null }
+function global:Get-AzKeyVaultSecret { throw 'Azure is blocked while the fixtures are generated.' }
 
 function New-Infra([string]$Name, [string]$Events) {
     $doc = [ordered]@{ cluster = [ordered]@{ name = 'clus01' }; operations = [ordered]@{ updates = [ordered]@{ install_after_deployment = $false } }; deployment = [ordered]@{ events_directory = $Events } }
@@ -129,10 +138,106 @@ try {
         $planInfra = 'C:\data\infrastructure.yml'
         $Toolkit = 'C:\toolkit'
     }
+    # 7. The post-deployment orchestrator (phase 06). The real orchestrator (Invoke-AzlPostDeployment, what Invoke-AzureLocalPostDeployment.ps1
+    #    calls) runs with Azure blocked and every cluster answer made up. plan-example runs the toolkit's own step scripts against its example file;
+    #    the others run the same orchestrator and the real step table with stub scripts at the paths of the steps, so each kind of result is there.
+    $global:GenState = 'NODE01'
+    $pdTable = [IO.Path]::Combine($Toolkit, 'scripts', 'deploy', '04-cluster-deployment', 'phase-06-post-deployment', 'PostDeploymentSteps.psd1')
+    $pdSteps = (Import-PowerShellDataFile -LiteralPath $pdTable).Steps
+
+    # A root with a stub at the path of every script of the step table. A stub has the parameters of the real script it stands for and does
+    # what the AZL_PD_BEHAVIOUR variable says for its step (pass, warn, fail).
+    function New-PostDeploymentStubRoot([string]$Name) {
+        $root = Join-Path $work "$Name-root"
+        foreach ($s in $pdSteps) {
+            $path = Join-Path $root ([string]$s.Script)
+            $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path)
+            $binding = if ($s.Plan -eq 'WhatIf') { '[CmdletBinding(SupportsShouldProcess)]' } else { '[CmdletBinding()]' }
+            $extra = @(if ($s.Plan -eq 'WhatIf') { '[string]$LogPath', '[string]$ComputerName', '[pscredential]$Credential' })
+            if ($s.ContainsKey('Arguments')) { foreach ($a in $s.Arguments) { $extra += "[switch]`$$($a.Name)" } }
+            $body = @"
+$binding
+param([Parameter(Mandatory)][string]`$InfrastructureFile$(if ($extra) { ', ' + ($extra -join ', ') }))
+`$behaviour = @{}; foreach (`$pair in (`$env:AZL_PD_BEHAVIOUR -split ';')) { if (`$pair -match '^(.+?)=(.+)`$') { `$behaviour[`$Matches[1]] = `$Matches[2] } }
+`$mode = `$behaviour['$($s.Id)']
+Write-Information '$($s.Title): the file was read' -InformationAction Continue
+if (`$mode -eq 'warn') { Write-Warning 'a warning of $($s.Id)' }
+if (`$mode -eq 'fail') { Write-Error 'the failure of $($s.Id)' -ErrorAction Continue; exit 1 }
+exit 0
+"@
+            Set-Content -LiteralPath $path -Value $body
+        }
+        $root
+    }
+
+    # The infrastructure file of the stub runs: every step applies unless the change says otherwise (the toolkit's own run tests use this shape).
+    function New-PostDeploymentFile([string]$Name, [string]$Events, [hashtable]$Change = @{}) {
+        $d = [ordered]@{
+            cluster = [ordered]@{ name = 'clus01'; witness = [ordered]@{ type = 'cloud'; storage_account = 'stwit01' } }
+            scenario = [ordered]@{ storage_architecture = 'hybrid' }
+            sdn = [ordered]@{ enabled = $true; prefix = 'iic'; dns_records = 'dynamic'; acknowledge_maintenance_window = $true }
+            identity = [ordered]@{ active_directory = [ordered]@{ security_groups = @([ordered]@{ name = 'g1'; local_groups = @('Administrators') }) } }
+            storage = [ordered]@{ volumes = @([ordered]@{ name = 'vol1'; size_gib = 100 }); paths = @([ordered]@{ name = 'sp1'; path = 'C:\ClusterStorage\vol1' }); vm_images = @([ordered]@{ name = 'img1' }) }
+            networking = [ordered]@{ network_security_groups = @([ordered]@{ name = 'nsg1' }); logical_networks = @([ordered]@{ name = 'lnet1' }) }
+            hardware = [ordered]@{ sbe = [ordered]@{ requirement = 'required'; source_path = '\\share\sbe' } }
+            deployment = [ordered]@{ events_directory = $Events }
+        }
+        foreach ($k in $Change.Keys) {
+            $parts = $k -split '\.'
+            $node = $d
+            for ($i = 0; $i -lt $parts.Count - 1; $i++) { if (-not $node.Contains($parts[$i])) { $node[$parts[$i]] = [ordered]@{} }; $node = $node[$parts[$i]] }
+            if ($null -eq $Change[$k]) { $node.Remove($parts[-1]) } else { $node[$parts[-1]] = $Change[$k] }
+        }
+        $file = Join-Path $work "$Name.yml"
+        Set-Content -LiteralPath $file -Value (ConvertTo-Yaml $d)
+        $file
+    }
+
+    function Invoke-PostDeploymentScenario([string]$Name, [string]$File, [string]$Mode, [string]$Behaviour = '', [string]$Root = '') {
+        $env:AZL_PD_BEHAVIOUR = $Behaviour
+        $arguments = @{ InfrastructureFile = $File; LogPath = (Join-Path $work "$Name-log"); Mode = $Mode; SkipValidation = $true; RemoteCommand = { param([hashtable]$Call) $true } }
+        if ($Root) { $arguments.RepositoryRoot = $Root; $arguments.StepTablePath = $pdTable }
+        $null = Invoke-AzlPostDeployment @arguments 6>&1 3>&1 2>&1
+    }
+
+    Import-Module ([IO.Path]::Combine($Toolkit, 'scripts', 'common', 'post-deployment', 'AzlPostDeploymentRun.psm1')) -Force
+
+    # 7a. The toolkit's own step scripts, Plan mode, against the example file: the first step that needs a secret stops the run (exit 2).
+    $e7 = Reset-Folder (Join-Path $work 'plan-example')
+    $example = Join-Path $work 'plan-example.yml'
+    $doc = Get-Content -LiteralPath ([IO.Path]::Combine($Toolkit, 'config', 'variables', 'examples', 'infrastructure.example.yml')) -Raw | ConvertFrom-Yaml -Ordered
+    if (-not $doc.Contains('deployment') -or $doc['deployment'] -isnot [System.Collections.IDictionary]) { $doc['deployment'] = [ordered]@{} }
+    $doc['deployment']['events_directory'] = $e7
+    Set-Content -LiteralPath $example -Value (ConvertTo-Yaml $doc)
+    $exampleCluster = [string]$doc['cluster']['name']
+    Invoke-PostDeploymentScenario -Name 'plan-example' -File $example -Mode Plan
+    Save-Fixture (Join-Path $e7 'post-deployment-events.jsonl') 'plan-example.post-deployment-events.jsonl' @{ $exampleCluster = 'clus01'; $work = 'C:\data'; $Toolkit = 'C:\toolkit' }
+
+    # 7b. Stub steps: a Plan where every step applies but SDN and the VM images (Skipped with their reasons) and every other step is planned.
+    $root = New-PostDeploymentStubRoot 'stubs'
+    $e8 = Reset-Folder (Join-Path $work 'plan-passed')
+    Invoke-PostDeploymentScenario -Name 'plan-passed' -File (New-PostDeploymentFile 'plan-passed' $e8 @{ 'sdn.enabled' = $false; 'storage.vm_images' = $null }) -Mode Plan -Root $root
+    Save-Fixture (Join-Path $e8 'post-deployment-events.jsonl') 'plan-passed.post-deployment-events.jsonl' @{ $work = 'C:\data'; $Toolkit = 'C:\toolkit' }
+
+    # 7c. A Plan that stops after a step with a warning (exit 3).
+    $e9 = Reset-Folder (Join-Path $work 'plan-warning')
+    Invoke-PostDeploymentScenario -Name 'plan-warning' -File (New-PostDeploymentFile 'plan-warning' $e9) -Mode Plan -Behaviour 'ssh=warn' -Root $root
+    Save-Fixture (Join-Path $e9 'post-deployment-events.jsonl') 'plan-warning.post-deployment-events.jsonl' @{ $work = 'C:\data'; $Toolkit = 'C:\toolkit' }
+
+    # 7d. Apply, every step passes.
+    $e10 = Reset-Folder (Join-Path $work 'apply-passed')
+    Invoke-PostDeploymentScenario -Name 'apply-passed' -File (New-PostDeploymentFile 'apply-passed' $e10) -Mode Apply -Root $root
+    Save-Fixture (Join-Path $e10 'post-deployment-events.jsonl') 'apply-passed.post-deployment-events.jsonl' @{ $work = 'C:\data'; $Toolkit = 'C:\toolkit' }
+
+    # 7e. Apply, the storage volumes step fails (exit 1) and the steps after it are not run.
+    $e11 = Reset-Folder (Join-Path $work 'apply-failed')
+    Invoke-PostDeploymentScenario -Name 'apply-failed' -File (New-PostDeploymentFile 'apply-failed' $e11) -Mode Apply -Behaviour 'storage-volumes=fail' -Root $root
+    Save-Fixture (Join-Path $e11 'post-deployment-events.jsonl') 'apply-failed.post-deployment-events.jsonl' @{ $work = 'C:\data'; $Toolkit = 'C:\toolkit' }
     "Wrote the fixtures to $Out"
 }
 finally {
-    Remove-Item -LiteralPath 'Function:\Invoke-Command', 'Function:\Start-Sleep' -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath 'Function:\Invoke-Command', 'Function:\Start-Sleep', 'Function:\Get-AzContext', 'Function:\Get-AzKeyVaultSecret' -ErrorAction SilentlyContinue
+    Remove-Item Env:AZL_PD_BEHAVIOUR -ErrorAction SilentlyContinue
     Remove-Variable -Name GenState -Scope Global -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $work) { Remove-Item -Recurse -Force -LiteralPath $work }
 }
