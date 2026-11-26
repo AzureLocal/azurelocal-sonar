@@ -50,6 +50,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and 
 * **config:** the built-in YAML reader for `infrastructure.yml` is stricter and more exact: a key such as `712:` keeps its inline value, unquoted keys are trimmed, `''` inside a single-quoted value no longer ends the comment scan, `|` and `>` block scalars keep blank lines, indentation and `#` lines, duplicate keys are refused, and every error names its line without printing it. Multi-line quoted values and flow collections, `- - a`, text after a closing quote, content after `...`, input over 2 MB and nesting over 40 levels are refused with a clear message. See "What the YAML reader supports and refuses" in the configuration page.
 * **provisioning:** the **Prepare for Validate** step and the per-machine `prepare` field are removed: azurelocal-ztp no longer has a Prepare stage. Prepare events in older event files still show in the log pane.
 
+## [0.6.0](https://github.com/AzureLocal/azurelocal-sonar/compare/v0.5.0...v0.6.0) (2026-11-26)
+
+
+### Features
+
+* **2611:** Sonar names Azure Local 12.2611 (latest) and the update states Learn added AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([cceb72e](https://github.com/AzureLocal/azurelocal-sonar/commit/cceb72ec00deeb876e47c45f4a7df5774742a24c))
+* **sonar:** chain gaps N1 to N8 and Beacon results in the Discovery view AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([d1d75ad](https://github.com/AzureLocal/azurelocal-sonar/commit/d1d75ade88cd631134be80bfc7b24a2dd1628263))
+* **sonar:** read the toolkit's event feeds from the one shared events folder AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([00d3629](https://github.com/AzureLocal/azurelocal-sonar/commit/00d3629a25ed0339c27aa6c443ab213cf521321b))
+* **sonar:** read the toolkit's update-events and precluster-plan-events feeds, with the toolkit's real output as fixtures AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([939cdcb](https://github.com/AzureLocal/azurelocal-sonar/commit/939cdcbb4890e76a304f7804e4857db5ba897042))
+* **sonar:** the Deployment monitor shows the toolkit's post-deployment run (phase 06), Plan or Apply, with no Azure sign-in AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([32040a6](https://github.com/AzureLocal/azurelocal-sonar/commit/32040a6082349a2b7d997a6f552594fd39341709))
+* **sonar:** the Update monitor starts with no Azure sign-in and follows the toolkit's update events, with the Azure live poll shown as not connected AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([7c20a24](https://github.com/AzureLocal/azurelocal-sonar/commit/7c20a243f121786a14496c4575d24400e010d04a))
+
+
+### Bug Fixes
+
+* **discovery:** read the toolkit's 2.0 discovery files and never ask for a log account in Discovery or Verification AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([e0dc139](https://github.com/AzureLocal/azurelocal-sonar/commit/e0dc139c39e809d5db863fe9e3161cec88077577))
+* **docs:** put the version placeholder in code so the VitePress build passes AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([f507453](https://github.com/AzureLocal/azurelocal-sonar/commit/f50745354d63ad14f5ddb6d74ce949517dce5588))
+* **docs:** use relative links on the docs home page so lychee can resolve them AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([722da33](https://github.com/AzureLocal/azurelocal-sonar/commit/722da33d8fde15f92a383ed6045a92a2442febc0))
+* **sonar:** read CloudDeployment log lines as UTC and cap /api/export at 64 MB AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([e9a6782](https://github.com/AzureLocal/azurelocal-sonar/commit/e9a67824e7b724cca2b7c08e75599d6ad5e84a26))
+* **tests:** keep the NUL path case out of the Pester test name AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([338e0b4](https://github.com/AzureLocal/azurelocal-sonar/commit/338e0b44905d2ca69a656a28e716e300186e37c1))
+* **tests:** suppress the fake-credential analyzer rule in NodeUpdate tests AB[#0](https://github.com/AzureLocal/azurelocal-sonar/issues/0) ([a5f388f](https://github.com/AzureLocal/azurelocal-sonar/commit/a5f388fa3581796be8135bcf9e9006d87c6c28fd))
+
 ## [0.5.0](https://github.com/AzureLocal/azurelocal-sonar/compare/v0.4.0...v0.5.0) (2026-11-09)
 
 
