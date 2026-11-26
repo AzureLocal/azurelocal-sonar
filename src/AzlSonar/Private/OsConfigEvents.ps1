@@ -3,8 +3,8 @@ Set-StrictMode -Version Latest
 # OS configuration events (azurelocal-toolkit Invoke-AzureLocalOsConfiguration.ps1): after provisioning, before validation,
 # the toolkit configures the operating system of every node and appends what it does to a JSON Lines file, one object per
 # line: { timestamp, node, stage 'OsConfiguration', step, state, evidence, level, nextAction, method, transport,
-# payloadVersion, schemaVersion, ... } (the contract: pmo/azure-local/os-configuration-design.md section 6 of the platform
-# repository). Run events use node '*' (RunStarted, PlanCompleted, WipeListPublished, RunCompleted). Node events:
+# payloadVersion, schemaVersion, ... } (the contract: the event feed section of
+# docs/os-configuration-and-arm-deployment.md in azurelocal-toolkit). Run events use node '*' (RunStarted, PlanCompleted, WipeListPublished, RunCompleted). Node events:
 # NodeStarted, MethodResolved, TransportResolved, NodeRetry, NodeConverged, NodeFailed, NodeBlocked, NodeReconnecting,
 # NodeReconnected (an older NodeRestarting counts as NodeReconnecting). Step events: StepPlanned, StepSkipped,
 # StepApplying, StepApplied, StepFailed, StepVerified. Guarded network change (step Network): NetworkChangeStaged,

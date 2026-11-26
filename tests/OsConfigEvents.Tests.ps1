@@ -9,7 +9,7 @@ BeforeAll {
     . (Join-Path -Path $PSScriptRoot -ChildPath 'TestHelpers.ps1')
     Import-SonarTestModule
 
-    # One event line of the contract (pmo/azure-local/os-configuration-design.md section 6).
+    # One event line of the contract (the event feed in azurelocal-toolkit docs/os-configuration-and-arm-deployment.md).
     function global:New-OscLine {
         param([string]$At, [string]$Node, [string]$State, [string]$Step = '', [string]$Evidence = '', [string]$Level = 'Info', [string]$Method = '', [string]$Transport = '', [hashtable]$Extra = @{})
         $o = [ordered]@{ timestamp = $At; node = $Node; stage = 'OsConfiguration'; step = $Step; state = $State; evidence = $Evidence; level = $Level; nextAction = ''; method = $Method; transport = $Transport; payloadVersion = '1'; schemaVersion = '5.3.0' }
